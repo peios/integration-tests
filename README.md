@@ -63,6 +63,34 @@ registry seeds", which is exactly what a testset is. Per-testset *editions*
 are not needed — a spec's `[[package]]` and `[registry]` keys tune a shared
 base, so `peios-testbase` is the only new edition package.
 
+## Citing what a test verifies
+
+Every test names the documented statement it verifies, so a change to
+behaviour can find its tests and a coverage report can find the gaps.
+
+Peios documentation comes in two classes and **a failing test means
+different things in each**:
+
+| Cited | A failure means | What you do |
+|---|---|---|
+| a PCSA book (`PSPK`, `PGSS`, `PCDS`, `PSPU`) | the code violates a normative contract | fix the code |
+| a TRM (`Kernel TRM`, `peinit TRM`, …) | behaviour changed | was it deliberate? if so, update the TRM and the test together |
+
+That distinction is carried by the citation itself — no extra field. It
+matters because a TRM is *descriptive*: it records the true state of the
+component, so a test derived from one is a change detector, and the honest
+resolution of a red light is sometimes to update the manual.
+
+Citations are **Named Citations** (Trail TRA-2, adopted in PEI-566): an
+anchor on an individual statement, cited as e.g.
+`Kernel TRM *copy-up.preserves-ownership`. Until that ships, cite the
+article (`Kernel TRM §4.12`) and name the statement in prose beside it, which
+is what Conventions §5.3 already permits.
+
+A citation is a **pointer, not a copy**. `test-suite` transcribed 3,443
+statements into a matrix and the copies rotted when the documents changed;
+nothing here restates what a document says.
+
 ## Deliberately unsettled
 
 Recorded so they are decided rather than defaulted into:
