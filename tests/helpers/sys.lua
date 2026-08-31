@@ -51,6 +51,9 @@ M.NR = {
     linkat     = 265,
     unlinkat   = 263,
     renameat2  = 316,
+    fgetxattr  = 193,
+    listxattr  = 194,
+    flistxattr = 195,
 }
 
 -- mmap(2) protections and flags.
@@ -318,6 +321,48 @@ function M.getxattr(vm, path, name, size)
     })
     if r.ret < 0 then return nil, r.errno end
     return r.out_bufs[3]:sub(1, r.ret)
+end
+
+--- fgetxattr(2), against an open descriptor. Returns the value, the
+--- required size where `size` is 0, or `nil, errno`.
+function M.fgetxattr(vm, fd, name, size)
+    size = size or 4096
+    local r = vm:syscall(M.NR.fgetxattr, {
+        args = { fd, 0, 0, size },
+        bufs = { M.cstr(name), string.rep("\0", math.max(size, 1)) },
+        ptrs = { 1, 2 },
+    })
+    if r.ret < 0 then return nil, r.errno end
+    if size == 0 then return r.ret end
+    return r.out_bufs[2]:sub(1, r.ret)
+end
+
+--- listxattr(2). Returns the names as a list, or `nil, errno`.
+function M.listxattr(vm, path, size)
+    size = size or 4096
+    local r = vm:syscall(M.NR.listxattr, {
+        args = { 0, 0, size },
+        bufs = { M.cstr(path), string.rep("\0", size) },
+        ptrs = { 0, 1 },
+    })
+    if r.ret < 0 then return nil, r.errno end
+    local out = {}
+    -- bufs[1] is the path; the names come back in bufs[2].
+    for name in r.out_bufs[2]:sub(1, r.ret):gmatch("[^\0]+") do
+        out[#out + 1] = name
+    end
+    return out
+end
+
+--- getxattr(2) asking only for the size it would need.
+function M.getxattr_size(vm, path, name)
+    local r = vm:syscall(M.NR.getxattr, {
+        args = { 0, 0, 0, 0 },
+        bufs = { M.cstr(path), M.cstr(name) },
+        ptrs = { 0, 1 },
+    })
+    if r.ret < 0 then return nil, r.errno end
+    return r.ret
 end
 
 --- removexattr(2).
