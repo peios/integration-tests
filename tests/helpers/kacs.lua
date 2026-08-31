@@ -240,6 +240,64 @@ function M.set_mount_policy(who, fd, policy)
     })
 end
 
+-- The new mount API, for building a filesystem whose objects carry no
+-- stored descriptors.
+--
+-- A filesystem mounted at runtime lands in the deny-missing class and
+-- is unusable: its objects have no descriptors, so KACS refuses even
+-- the agent's own mkdir. `fsmount` hands back a descriptor on the mount
+-- *before* it is attached, which is the one moment its policy can be
+-- set — after that there is no fd to name it by.
+--
+-- UNMANAGED cannot be set (the resolver assigns it, to procfs among
+-- others); a synthesising class can, and makes the filesystem usable
+-- while leaving its objects without stored descriptors.
+M.NR = { fsopen = 430, fsconfig = 431, fsmount = 432, move_mount = 429 }
+M.FSCONFIG_CMD_CREATE = 6
+M.MOVE_MOUNT_F_EMPTY_PATH = 4
+
+--- Create a filesystem, give it a policy class, and attach it at `at`.
+---
+--- Returns `true`, or `nil, stage, errno`.
+function M.new_mount(vm, fstype, at, policy)
+    local fs = vm:syscall(M.NR.fsopen, {
+        args = { 0, 0 }, bufs = { sys.cstr(fstype) }, ptrs = { 0 },
+    })
+    if fs.ret < 0 then return nil, "fsopen", fs.errno end
+
+    local created = vm:syscall(M.NR.fsconfig, fs.ret, M.FSCONFIG_CMD_CREATE,
+        0, 0, 0)
+    if created.ret ~= 0 then
+        sys.close(vm, fs.ret)
+        return nil, "fsconfig", created.errno
+    end
+
+    local mount = vm:syscall(M.NR.fsmount, fs.ret, 0, 0)
+    if mount.ret < 0 then
+        sys.close(vm, fs.ret)
+        return nil, "fsmount", mount.errno
+    end
+
+    if policy then
+        local set = M.set_mount_policy(vm, mount.ret, policy)
+        if set.ret ~= 0 then
+            sys.close(vm, mount.ret); sys.close(vm, fs.ret)
+            return nil, "set_mount_policy", set.errno
+        end
+    end
+
+    sys.mkdir_p(vm, at)
+    local moved = vm:syscall(M.NR.move_mount, {
+        args = { mount.ret, 0, sys.AT_FDCWD, 0, M.MOVE_MOUNT_F_EMPTY_PATH },
+        bufs = { sys.cstr(""), sys.cstr(at) },
+        ptrs = { 1, 3 },
+    })
+    sys.close(vm, mount.ret)
+    sys.close(vm, fs.ret)
+    if moved.ret ~= 0 then return nil, "move_mount", moved.errno end
+    return true
+end
+
 --- Run `fn` in a worker process bound by the descriptors it meets.
 ---
 --- The worker is the same principal as the agent, minus the privileges

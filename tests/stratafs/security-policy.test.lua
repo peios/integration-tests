@@ -226,14 +226,28 @@ test("merging never widens access",
         end)
     end)
 
+-- Needs a provider object whose descriptor read genuinely fails, and
+-- there is no way to arrive at one within a boot.
+--
+-- A filesystem mounted at runtime stores no descriptors, which is the
+-- condition — but in the deny-missing class KACS refuses even the
+-- agent's own mkdir on it, so it cannot be populated. Building it under
+-- a synthesising class and flipping it to deny-missing afterwards does
+-- not work either: after the flip `kacs_get_sd` still returns the same
+-- 72 bytes and a direct open still succeeds, so the value is either
+-- persisted or held by the inode cache §4.6.1 records as never
+-- revalidated. Either way the object is no longer descriptor-less.
+--
+-- What would do it is a provider populated before its policy is
+-- decided, which means either a filesystem image built outside the VM
+-- or a way to drop a cached descriptor.
 test("an object with no readable descriptor is denied under the mount's policy",
     { spec = "PKM *security.missing-descriptor-denied",
-      skip = "needs a provider object carrying no descriptor. Every " ..
-             "filesystem reachable here is managed, and a runtime-mounted " ..
-             "one cannot be populated — the deny-missing class refuses the " ..
-             "agent's own mkdir on it, which is the rule under test " ..
-             "arriving one layer too early to observe through stratafs" },
-    function(t) t:fail("no descriptor-less provider available") end)
+      skip = "needs a provider object whose descriptor read fails. A " ..
+             "runtime filesystem in the deny-missing class cannot be " ..
+             "populated, and one built under a synthesising class keeps a " ..
+             "readable descriptor after the class is changed" },
+    function(t) t:fail("no descriptor-less provider reachable") end)
 
 -- §4.6.5's audit records are covered in audit.test.lua, which reads
 -- them out of the KMES ring.

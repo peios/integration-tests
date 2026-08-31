@@ -440,12 +440,46 @@ test("a copy-up is never observable in a partial state",
     function(t) t:fail("no way to hold a copy-up open") end)
 
 test("any extended-attribute failure aborts the copy-up with EIO",
-    { spec = "PKM *copy-up.xattr-failure-aborts-with-eio",
-      skip = "needs a per-attribute write to fail during the copy — an " ..
-             "attribute the create stratum refuses, or a listing over " ..
-             "XATTR_LIST_MAX. Both want fault injection on the create " ..
-             "stratum's filesystem" },
-    function(t) t:fail("no way to fail one attribute write") end)
+    { spec = "PKM *copy-up.xattr-failure-aborts-with-eio" }, function(t)
+        -- No attribute is silently discarded. Any per-attribute failure
+        -- aborts the copy-up, as does a listing that fails or exceeds
+        -- XATTR_LIST_MAX; in every case the error reported is EIO,
+        -- whatever the underlying one was.
+        --
+        -- The reachable half is the listing bound: XATTR_LIST_MAX is
+        -- 64 KiB, and enough attributes with long enough names put the
+        -- source's listing past it.
+        copying(t, "xattr-failure", function(s)
+            local provider = s:in_stratum("src", "f")
+            local long = string.rep("k", 200)
+            for i = 1, 400 do
+                local r = sys.setxattr(vm, provider,
+                    "user." .. long .. string.format("%03d", i), "v")
+                t:assert_eq(r.ret, 0, "attribute " .. i .. " is set: " ..
+                    sys.errname(r.errno))
+            end
+
+            local size = vm:syscall(sys.NR.listxattr, {
+                args = { 0, 0, 0 }, bufs = { sys.cstr(provider) }, ptrs = { 0 },
+            })
+            t:assert(size.ret > 65536,
+                "the source's attribute listing exceeds XATTR_LIST_MAX (" ..
+                size.ret .. " bytes)")
+
+            local ok, errno = stratafs.try_write(vm, s:join("f"), "modified")
+            t:assert(not ok, "the copy-up is aborted")
+            t:assert_eq(errno, sys.E.IO,
+                "and reported as EIO, whatever the underlying error was: " ..
+                sys.errname(errno))
+
+            -- Nothing published: an object whose attributes could not
+            -- be preserved is never published.
+            t:assert(sys.stat(vm, s:in_stratum("dest", "f")) == nil,
+                "with no partial copy left in the create stratum")
+            t:assert_eq(vm:read_file(s:in_stratum("src", "f")), "original",
+                "and the source untouched")
+        end)
+    end)
 
 test("a copy is accounted to the owner it preserved",
     { spec = "PKM *copy-up.accounted-to-preserved-owner",
