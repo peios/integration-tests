@@ -52,6 +52,7 @@ M.LOCK_SH, M.LOCK_EX, M.LOCK_UN, M.LOCK_NB = 1, 2, 8, 4
 -- Flags a test is likely to name.
 M.AT_FDCWD            = -100
 M.AT_SYMLINK_NOFOLLOW = 0x100
+M.AT_EMPTY_PATH       = 0x1000
 M.MS_RDONLY           = 1
 M.MS_BIND             = 4096
 M.MS_REMOUNT          = 32
@@ -114,7 +115,11 @@ function M.stat(vm, path, opts)
         ptrs = { 1, 2 },
     })
     if r.ret ~= 0 then return nil, r.errno end
-    local buf = r.out_bufs[2]
+    return M.decode_stat(r.out_bufs[2])
+end
+
+--- Decode a struct stat buffer into the fields a stratafs test asserts on.
+function M.decode_stat(buf)
     local mode = string.unpack("<I4", buf, STAT.mode)
     return {
         dev   = string.unpack("<I8", buf, STAT.dev),
@@ -154,6 +159,21 @@ function M.statfs(vm, path)
         namelen = string.unpack("<I8", buf, STATFS.namelen),
         flags   = string.unpack("<I8", buf, STATFS.flags),
     }
+end
+
+--- fstat(2), as newfstatat(fd, "", AT_EMPTY_PATH).
+---
+--- What a descriptor says about itself, which after a copy-up is not
+--- what the path says (§4.4.3).
+function M.fstat(vm, fd)
+    local buf = string.rep("\0", 144)
+    local r = vm:syscall(M.NR.newfstatat, {
+        args = { fd, 0, 0, M.AT_EMPTY_PATH },
+        bufs = { M.cstr(""), buf },
+        ptrs = { 1, 2 },
+    })
+    if r.ret ~= 0 then return nil, r.errno end
+    return M.decode_stat(r.out_bufs[2])
 end
 
 --- mount(2). Every argument is optional but `target`.

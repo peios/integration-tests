@@ -136,6 +136,63 @@ test("a merged directory's create stratum is positional",
         end)
     end)
 
+test("every consumer of the participant set resolves the final component alike",
+    { spec = "PKM *resolution.merge-participant-set-resolves-like-lookup" },
+    function(t)
+        -- Ordinary lookup resolves without following the final
+        -- component. Every site that builds the participant set does
+        -- the same — the set itself, the emptiness scan, the permission
+        -- check, directory fsync — so a stratum holding the name as a
+        -- symlink is a non-participant to all of them.
+        --
+        -- The two agreeing is what closes a confused-deputy shape: were
+        -- the set to follow the link while lookup did not, a stratum
+        -- owner replacing a directory with a symlink would change which
+        -- real directory contributed entries to another stratum's view.
+        stratafs.with(vm, "participant-set-alike", {
+            { name = "top", flags = { "create" }, entries = { ["d/only_top"] = "t" } },
+            { name = "bot", entries = {
+                d = stratafs.symlink("elsewhere"),
+                elsewhere = stratafs.DIR,
+                ["elsewhere/would_be_merged"] = "e",
+            } },
+        }, function(s)
+            -- The set: the symlink stratum contributes nothing, and
+            -- nothing from the directory it points at appears.
+            local got = names_in(s:join("d"))
+            t:assert(got.only_top, "the participating stratum contributes")
+            t:assert(not got.would_be_merged,
+                "and the symlink's target is not merged in")
+
+            -- The permission check and the open agree with that: the
+            -- merged directory opens against one participant.
+            local fd = sys.open(vm, s:join("d"), sys.O.RDONLY | sys.O.DIRECTORY)
+            t:assert(fd, "the merged directory opens")
+            if fd then
+                -- Directory fsync walks the same set.
+                local sync = sys.fsync(vm, fd)
+                t:assert_eq(sync.ret, 0,
+                    "and fsyncs over it: " .. sys.errname(sync.errno))
+                sys.close(vm, fd)
+            end
+
+            -- The emptiness scan: with the one participant emptied, the
+            -- merged directory is empty, because the symlink stratum
+            -- never counted and neither did its target's contents.
+            vm:unlink(s:in_stratum("top", "d/only_top"))
+            t:assert_eq(#vm:listdir(s:join("d")), 0,
+                "the merged directory is empty once its one participant is")
+            local r = sys.mkdir(vm, s:join("d", "probe"))
+            t:assert_eq(r.ret, 0,
+                "and still works as a directory: " .. sys.errname(r.errno))
+
+            -- The target is untouched throughout, and still reachable
+            -- by its own name.
+            t:assert(names_in(s:join("elsewhere")).would_be_merged,
+                "the symlink's target is reachable under its own name")
+        end)
+    end)
+
 test("a symlink masks a directory below exactly as any non-directory does",
     { spec = "PKM *resolution.symlink-masks-like-any-non-directory" }, function(t)
         -- The participant set resolves the final component the way
