@@ -2,9 +2,15 @@
 # the kernel, booted by provium with its own agent as PID 1.
 #
 # Relative paths — and this command's working directory — are this
-# profile's own directory, so the two specs below are the repository's
-# and this one's.
-build = "rm -rf {out}/root && peiso root ../../peiso.toml peiso.toml --out {out}/root"
+# profile's own directory, so the script beside this file is the one
+# that runs, and the two specs it names are the repository's and this
+# one's.
+#
+# It is a script rather than a `peiso root` one-liner because provium
+# runs the build on every invocation and holds no staleness logic:
+# composing unconditionally costs 45 seconds a run against 1 second of
+# tests. build.sh composes only when a spec or a package has moved.
+build = "./build.sh {out}"
 
 # No `kernel`: provium finds it inside the composed root, so a kernel
 # version bump moves nothing here.
