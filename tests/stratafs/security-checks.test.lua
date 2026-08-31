@@ -686,6 +686,39 @@ test("linking an unnamed file is exempt from the source-object check",
         end)
     end)
 
+test("copy-up carries no separate authority of its own",
+    { spec = "PKM *security.copy-up-requires-no-extra-right" }, function(t)
+        -- The same fixture as the rights-table row, stated as the
+        -- section's own claim: the caller obtains nothing they did not
+        -- already have — the same content, under the same descriptor,
+        -- at the same path — and gains no space either, because §4.5.8
+        -- accounts the copy to the preserved owner.
+        stratafs.with(vm, "copy-up-no-authority", {
+            { name = "dest", flags = { "create" } },
+            { name = "src", flags = { "ro" }, entries = { f = "original" } },
+        }, function(s)
+            grant_all(t, s:in_stratum("src", "f"), "the object is writable")
+            grant_all_but(t, s:in_stratum("dest"),
+                R.ADD_FILE | R.ADD_SUBDIRECTORY,
+                "the create stratum grants no right to add an entry")
+            local source_sd = kacs.get_sd(vm, s:in_stratum("src", "f"),
+                kacs.SI.OWNER | kacs.SI.GROUP | kacs.SI.DACL)
+
+            kacs.as_dacl_bound(t, vm, function(worker)
+                local fd = sys.open(worker, s:join("f"), sys.O.RDWR)
+                t:assert(fd, "the caller opens the object for writing")
+                t:assert_eq(sys.write(worker, fd, "modified").ret, 8,
+                    "and the write succeeds")
+                sys.close(worker, fd)
+            end)
+
+            t:assert_eq(kacs.get_sd(vm, s:in_stratum("dest", "f"),
+                kacs.SI.OWNER | kacs.SI.GROUP | kacs.SI.DACL), source_sd,
+                "and the copy carries the source's descriptor, so the " ..
+                "caller reaches exactly what they already could")
+        end)
+    end)
+
 test("copy-up requires no right beyond the operation it serves",
     { spec = "PKM *security.rights.copy-up" }, function(t)
         -- It does not require the caller to hold the right to read the

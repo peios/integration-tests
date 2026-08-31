@@ -239,25 +239,33 @@ test("an object with no readable descriptor is denied under the mount's policy",
 -- userspace through the KMES ring (PKM §3.C, syscalls 1090-1102).
 -- Reading them is a separate ABI and a separate chapter's conformance
 -- work; nothing about them is observable through the filesystem
--- interface these tests drive.
-for _, audit in ipairs({
-    { "audit.events-stamped-with-effective-token",
-      "every record carries the causing task's token" },
-    { "audit.copy-up-always-emitted",
-      "every copy-up emits a record, successful or not" },
-    { "audit.arrangement-refusal-emitted",
-      "a mutation refused by the mount's arrangement emits a record" },
-    { "audit.deferred-deletion-audited-on-any-error",
-      "a refused deferred deletion is audited on any non-zero result" },
-    { "audit.lookup-not-audited",
-      "resolution, revalidation and enumeration emit nothing" },
-}) do
-    test(audit[2], { spec = "PKM *" .. audit[1],
-        skip = "audit records reach userspace through the KMES ring " ..
-               "(syscalls 1090-1102), a separate ABI with no filesystem " ..
-               "surface. Wants a KMES reader in the harness" },
-        function(t) t:fail("no KMES reader") end)
-end
+-- interface these tests drive. Written out one by one rather than in a
+-- loop so each citation is greppable in the source.
+
+test("every audit record carries the causing task's effective token",
+    { spec = "PKM *audit.events-stamped-with-effective-token",
+      skip = "audit records reach userspace through the KMES ring (syscalls 1090-1102), a separate ABI with no filesystem surface. Wants a KMES reader in the harness" },
+    function(t) t:fail("no KMES reader") end)
+
+test("every copy-up emits a record, successful or not",
+    { spec = "PKM *audit.copy-up-always-emitted",
+      skip = "audit records reach userspace through the KMES ring (syscalls 1090-1102), a separate ABI with no filesystem surface. Wants a KMES reader in the harness" },
+    function(t) t:fail("no KMES reader") end)
+
+test("a mutation refused by the mount's arrangement emits a record",
+    { spec = "PKM *audit.arrangement-refusal-emitted",
+      skip = "audit records reach userspace through the KMES ring (syscalls 1090-1102), a separate ABI with no filesystem surface. Wants a KMES reader in the harness" },
+    function(t) t:fail("no KMES reader") end)
+
+test("a refused deferred deletion is audited on any non-zero result",
+    { spec = "PKM *audit.deferred-deletion-audited-on-any-error",
+      skip = "audit records reach userspace through the KMES ring (syscalls 1090-1102), a separate ABI with no filesystem surface. Wants a KMES reader in the harness" },
+    function(t) t:fail("no KMES reader") end)
+
+test("resolution, revalidation and enumeration emit no records",
+    { spec = "PKM *audit.lookup-not-audited",
+      skip = "audit records reach userspace through the KMES ring (syscalls 1090-1102), a separate ABI with no filesystem surface. Wants a KMES reader in the harness" },
+    function(t) t:fail("no KMES reader") end)
 
 test("the option-only mount checks precede every path check",
     { spec = "PKM *failure.mount.option-checks-precede-path-checks" }, function(t)
@@ -357,23 +365,27 @@ test("every stack-wide configuration error collapses to EINVAL",
 -- Four of §4.A's constants are source-level invariants: that the
 -- appendix is generated rather than written, that the marker struct has
 -- a given layout, and that two sets of discriminants agree between the
--- C and Rust halves of the implementation. None has a runtime surface
--- for a conformance VM to observe — they are checks on the build, and
--- belong to whatever verifies the generator's output against the
--- headers.
-for _, k in ipairs({
-    { "const.generated-from-source",
-      "the constants appendix is generated from the headers" },
-    { "const.stage-marker-layout",
-      "the staging marker is a packed 24-byte little-endian struct" },
-    { "const.route-discriminants-match-rust",
-      "the routing discriminants match between C and Rust" },
-    { "const.core-flag-bits-match-c",
-      "stratafs-core's flag bits match the C ones" },
-}) do
-    test(k[2], { spec = "PKM *" .. k[1],
-        skip = "a source-level invariant with no runtime surface: a check " ..
-               "on the build and on the generator's output, not on a " ..
-               "running kernel" },
-        function(t) t:fail("no runtime surface") end)
-end
+-- C and Rust halves. None has a runtime surface for a conformance VM to
+-- observe — they are checks on the build, and belong to whatever
+-- verifies the generator's output against the headers.
+
+test("the constants appendix is generated from the headers",
+    { spec = "PKM *const.generated-from-source",
+      skip = "a source-level invariant with no runtime surface: a check on the build and on the generator's output, not on a running kernel" },
+    function(t) t:fail("no runtime surface") end)
+
+test("the staging marker is a packed 24-byte little-endian struct",
+    { spec = "PKM *const.stage-marker-layout",
+      skip = "a source-level invariant with no runtime surface: a check on the build and on the generator's output, not on a running kernel" },
+    function(t) t:fail("no runtime surface") end)
+
+test("the routing discriminants match between C and Rust",
+    { spec = "PKM *const.route-discriminants-match-rust",
+      skip = "a source-level invariant with no runtime surface: a check on the build and on the generator's output, not on a running kernel" },
+    function(t) t:fail("no runtime surface") end)
+
+test("stratafs-core's flag bits match the C ones",
+    { spec = "PKM *const.core-flag-bits-match-c",
+      skip = "a source-level invariant with no runtime surface: a check on the build and on the generator's output, not on a running kernel" },
+    function(t) t:fail("no runtime surface") end)
+
