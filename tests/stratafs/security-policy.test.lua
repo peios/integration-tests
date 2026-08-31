@@ -235,37 +235,8 @@ test("an object with no readable descriptor is denied under the mount's policy",
              "arriving one layer too early to observe through stratafs" },
     function(t) t:fail("no descriptor-less provider available") end)
 
--- §4.6.5's five citations all concern audit records, which reach
--- userspace through the KMES ring (PKM §3.C, syscalls 1090-1102).
--- Reading them is a separate ABI and a separate chapter's conformance
--- work; nothing about them is observable through the filesystem
--- interface these tests drive. Written out one by one rather than in a
--- loop so each citation is greppable in the source.
-
-test("every audit record carries the causing task's effective token",
-    { spec = "PKM *audit.events-stamped-with-effective-token",
-      skip = "audit records reach userspace through the KMES ring (syscalls 1090-1102), a separate ABI with no filesystem surface. Wants a KMES reader in the harness" },
-    function(t) t:fail("no KMES reader") end)
-
-test("every copy-up emits a record, successful or not",
-    { spec = "PKM *audit.copy-up-always-emitted",
-      skip = "audit records reach userspace through the KMES ring (syscalls 1090-1102), a separate ABI with no filesystem surface. Wants a KMES reader in the harness" },
-    function(t) t:fail("no KMES reader") end)
-
-test("a mutation refused by the mount's arrangement emits a record",
-    { spec = "PKM *audit.arrangement-refusal-emitted",
-      skip = "audit records reach userspace through the KMES ring (syscalls 1090-1102), a separate ABI with no filesystem surface. Wants a KMES reader in the harness" },
-    function(t) t:fail("no KMES reader") end)
-
-test("a refused deferred deletion is audited on any non-zero result",
-    { spec = "PKM *audit.deferred-deletion-audited-on-any-error",
-      skip = "audit records reach userspace through the KMES ring (syscalls 1090-1102), a separate ABI with no filesystem surface. Wants a KMES reader in the harness" },
-    function(t) t:fail("no KMES reader") end)
-
-test("resolution, revalidation and enumeration emit no records",
-    { spec = "PKM *audit.lookup-not-audited",
-      skip = "audit records reach userspace through the KMES ring (syscalls 1090-1102), a separate ABI with no filesystem surface. Wants a KMES reader in the harness" },
-    function(t) t:fail("no KMES reader") end)
+-- §4.6.5's audit records are covered in audit.test.lua, which reads
+-- them out of the KMES ring.
 
 test("the option-only mount checks precede every path check",
     { spec = "PKM *failure.mount.option-checks-precede-path-checks" }, function(t)
