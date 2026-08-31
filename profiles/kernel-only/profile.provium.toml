@@ -1,0 +1,20 @@
+# The kernel conformance VM: a composed Peios root holding nothing but
+# the kernel, booted by provium with its own agent as PID 1.
+#
+# Relative paths — and this command's working directory — are this
+# profile's own directory, so the two specs below are the repository's
+# and this one's.
+build = "rm -rf {out}/root && peiso root ../../peiso.toml peiso.toml --out {out}/root"
+
+# No `kernel`: provium finds it inside the composed root, so a kernel
+# version bump moves nothing here.
+root = "{out}/root"
+
+# No `initrd` either. This VM has no userspace of its own — the agent
+# overlay is the whole initramfs and the agent comes up as PID 1 and
+# does init's mounts itself. There is nothing to boot into, which is
+# the point: what the tests reach is the kernel and only the kernel.
+
+# panic=1 so a kernel that dies takes the VM down instead of hanging
+# the run until it times out.
+cmdline = "console=hvc0 quiet panic=1"

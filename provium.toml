@@ -1,0 +1,5 @@
+[provium]
+roots = ["tests"]
+
+[profiles]
+from_dir = "profiles"

@@ -1,0 +1,11 @@
+# The VM the kernel conformance testsets boot.
+#
+# Layered over the repository's own peiso.toml, which says where
+# packages come from; between them they are one complete spec.
+[baseline]
+edition = "kernel-only"
+# Nothing ever boots this root from a medium — provium launches the
+# kernel out of it directly and supplies its own initramfs — so it takes
+# no boot flavour. Without this it would carry live-boot, and a kernel
+# test would be running against packages the kernel does not need.
+first_boot = "none"

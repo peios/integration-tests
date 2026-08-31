@@ -1,0 +1,3 @@
+[[packages.repository]]
+url = "file://../pkgs/_pkgsOut_/"
+keys = ["../pkgs/dev-signing.pub"]
