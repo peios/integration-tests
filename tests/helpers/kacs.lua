@@ -30,6 +30,7 @@ M.SYS = {
     OPEN_PROCESS_TOKEN = 1001,
     CREATE_TOKEN = 1003,
     REVERT = 1012,
+    OPEN = 1020,
     GET_SD = 1021,
     SET_SD = 1022,
 }
@@ -44,6 +45,15 @@ M.IOC = {
 }
 
 M.TOKEN_ALL_ACCESS = 0x000F01FF
+
+-- The native open path's dispositions and options. Neither has a
+-- POSIX spelling: supersede and delete-on-close are reachable only
+-- through kacs_open.
+M.DISPOSITION = {
+    SUPERSEDE = 0, OPEN = 1, CREATE = 2,
+    OPEN_IF = 3, OVERWRITE = 4, OVERWRITE_IF = 5,
+}
+M.CREATE_OPT = { DIRECTORY = 0x0001, DELETE_ON_CLOSE = 0x0002 }
 M.TOKEN_TYPE_PRIMARY, M.TOKEN_TYPE_IMPERSONATION = 1, 2
 
 -- security_information bits for get_sd / set_sd.
@@ -177,6 +187,28 @@ function M.get_sd(who, path, info)
     })
     if r.ret < 0 then return nil, r.errno end
     return r.out_bufs[2]:sub(1, r.ret)
+end
+
+--- kacs_open(2) — the native open path.
+---
+--- `how` carries `access`, `disposition`, `options` and `flags`;
+--- everything defaults to an ordinary read-write open of an existing
+--- file. Returns `fd, status`, or `nil, errno`.
+function M.open(who, path, how)
+    how = how or {}
+    local buf = string.pack("<I4I4I4I4I8I4I4",
+        how.access or (M.RIGHT.READ_DATA | M.RIGHT.WRITE_DATA
+            | M.RIGHT.READ_ATTRIBUTES | M.RIGHT.WRITE_ATTRIBUTES
+            | M.RIGHT.DELETE | M.RIGHT.READ_CONTROL | M.RIGHT.SYNCHRONIZE),
+        how.disposition or M.DISPOSITION.OPEN,
+        how.options or 0, how.flags or 0, 0, 0, 0)
+    local r = who:syscall(M.SYS.OPEN, {
+        args = { how.dirfd or sys.AT_FDCWD, 0, 0, 32, 0 },
+        bufs = { sys.cstr(path), buf, string.rep("\0", 4) },
+        ptrs = { 1, 2, 4 },
+    })
+    if r.ret < 0 then return nil, r.errno end
+    return r.ret, string.unpack("<I4", r.out_bufs[3])
 end
 
 --- Run `fn` in a worker process bound by the descriptors it meets.
