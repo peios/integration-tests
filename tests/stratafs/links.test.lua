@@ -540,3 +540,74 @@ test("copy-up preserves the descriptor's owner SID alongside the POSIX owner",
                 "identical to the source's, owner SID included")
         end)
     end)
+
+test("a lease acquisition is redirected to the retired file",
+    { spec = "PKM *lock.lease-acquisition-redirected" }, function(t)
+        -- Copy-up moves the pre-copy-up provider file aside into the
+        -- descriptor's private state specifically to keep leases taken
+        -- before the copy-up alive. An acquisition is redirected to it
+        -- where it already holds a lease of the same flavour.
+        local F_SETLEASE, F_GETLEASE = 1024, 1025
+        local F_RDLCK, F_UNLCK = 0, 2
+        stratafs.with(vm, "lease-redirect", {
+            { name = "dest", flags = { "create" } },
+            { name = "src", flags = { "ro" }, entries = { f = "original" } },
+        }, function(s)
+            local fd = sys.open(vm, s:join("f"), sys.O.RDWR)
+            t:assert(fd, "a descriptor opens on the ro provider")
+            local set = vm:syscall(72, fd, F_SETLEASE, F_RDLCK)
+            t:assert_eq(set.ret, 0, "a read lease is taken before any copy-up: "
+                .. sys.errname(set.errno))
+
+            t:assert_eq(sys.write(vm, fd, "modified").ret, 8,
+                "the write copies it up")
+
+            -- Re-acquiring the same flavour is redirected rather than
+            -- refused, because the retired file already holds one.
+            local again = vm:syscall(72, fd, F_SETLEASE, F_RDLCK)
+            t:assert_eq(again.ret, 0,
+                "taking the same lease again after the copy-up succeeds: " ..
+                sys.errname(again.errno))
+
+            vm:syscall(72, fd, F_SETLEASE, F_UNLCK)
+            sys.close(vm, fd)
+        end)
+    end)
+
+test("querying a lease returns the stronger of the two files'",
+    { spec = "PKM *lock.lease-query-returns-the-stronger" }, function(t)
+        -- Ordering write above read above none. After a copy-up the
+        -- lease lives on the retired file and the copy has none, so the
+        -- query must still report it.
+        local F_SETLEASE, F_GETLEASE = 1024, 1025
+        local F_RDLCK, F_UNLCK = 0, 2
+        stratafs.with(vm, "lease-query", {
+            { name = "dest", flags = { "create" } },
+            { name = "src", flags = { "ro" }, entries = { f = "original" } },
+        }, function(s)
+            local fd = sys.open(vm, s:join("f"), sys.O.RDWR)
+            t:assert(fd, "a descriptor opens")
+            t:assert_eq(vm:syscall(72, fd, F_GETLEASE, 0).ret, F_UNLCK,
+                "with no lease to begin with")
+
+            t:assert_eq(vm:syscall(72, fd, F_SETLEASE, F_RDLCK).ret, 0,
+                "a read lease is taken")
+            t:assert_eq(vm:syscall(72, fd, F_GETLEASE, 0).ret, F_RDLCK,
+                "and is reported")
+
+            t:assert_eq(sys.write(vm, fd, "modified").ret, 8,
+                "the write copies it up, leaving the lease on the retired file")
+            t:assert_eq(vm:syscall(72, fd, F_GETLEASE, 0).ret, F_RDLCK,
+                "and the query still reports it — the stronger of the two")
+
+            vm:syscall(72, fd, F_SETLEASE, F_UNLCK)
+            sys.close(vm, fd)
+        end)
+    end)
+
+test("a copy is accounted to the owner it preserved",
+    { spec = "PKM *durability.copy-up-accounted-to-preserved-owner",
+      skip = "quota accounting keys on the POSIX owner, and tmpfs in this " ..
+             "VM has no quota support to observe the charge through. The " ..
+             "ownership half is covered by durability.copy-up-preserves-posix-owner" },
+    function(t) t:fail("no quota accounting available") end)
