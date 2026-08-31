@@ -35,7 +35,34 @@ M.NR = {
     readlinkat = 267,
     getdents64 = 217,
     lseek      = 8,
+    ftruncate  = 77,
+    utimensat  = 280,
+    setxattr   = 188,
+    getxattr   = 191,
+    removexattr = 197,
+    fallocate  = 285,
+    splice     = 275,
+    copy_file_range = 326,
+    mmap       = 9,
+    mprotect   = 10,
+    munmap     = 11,
+    mknodat    = 259,
+    pipe2      = 293,
+    linkat     = 265,
+    unlinkat   = 263,
+    renameat2  = 316,
 }
+
+-- mmap(2) protections and flags.
+M.PROT = { NONE = 0, READ = 1, WRITE = 2 }
+M.MAP  = { SHARED = 0x01, PRIVATE = 0x02, ANONYMOUS = 0x20 }
+
+-- File type bits, for mknod.
+M.S_IFIFO, M.S_IFCHR, M.S_IFSOCK, M.S_IFREG = 0x1000, 0x2000, 0xC000, 0x8000
+
+-- unlinkat / renameat2 flags.
+M.AT_REMOVEDIR = 0x200
+M.RENAME_NOREPLACE, M.RENAME_EXCHANGE, M.RENAME_WHITEOUT = 1, 2, 4
 
 -- d_type values a directory entry may carry.
 M.DT = { UNKNOWN = 0, FIFO = 1, CHR = 2, DIR = 4, BLK = 6, REG = 8, LNK = 10,
@@ -246,6 +273,129 @@ function M.getdents_all(vm, fd, size)
         if #batch == 0 then return all end
         for _, e in ipairs(batch) do all[#all + 1] = e end
     end
+end
+
+--- ftruncate(2).
+function M.ftruncate(vm, fd, length)
+    return vm:syscall(M.NR.ftruncate, fd, length)
+end
+
+--- utimensat(2) on a path, setting both times to a fixed second.
+function M.utimes(vm, path, seconds)
+    -- struct timespec[2], 32 bytes: {sec, nsec} twice.
+    local times = string.pack("<i8i8i8i8", seconds, 0, seconds, 0)
+    return vm:syscall(M.NR.utimensat, {
+        args = { M.AT_FDCWD, 0, 0, 0 },
+        bufs = { M.cstr(path), times },
+        ptrs = { 1, 2 },
+    })
+end
+
+--- setxattr(2).
+function M.setxattr(vm, path, name, value, flags)
+    return vm:syscall(M.NR.setxattr, {
+        args = { 0, 0, 0, #value, flags or 0 },
+        bufs = { M.cstr(path), M.cstr(name), value },
+        ptrs = { 0, 1, 2 },
+    })
+end
+
+--- getxattr(2). Returns the value, or `nil, errno`.
+function M.getxattr(vm, path, name, size)
+    size = size or 4096
+    local r = vm:syscall(M.NR.getxattr, {
+        args = { 0, 0, 0, size },
+        bufs = { M.cstr(path), M.cstr(name), string.rep("\0", size) },
+        ptrs = { 0, 1, 2 },
+    })
+    if r.ret < 0 then return nil, r.errno end
+    return r.out_bufs[3]:sub(1, r.ret)
+end
+
+--- removexattr(2).
+function M.removexattr(vm, path, name)
+    return vm:syscall(M.NR.removexattr, {
+        args = { 0, 0 },
+        bufs = { M.cstr(path), M.cstr(name) },
+        ptrs = { 0, 1 },
+    })
+end
+
+--- fallocate(2).
+function M.fallocate(vm, fd, mode, offset, length)
+    return vm:syscall(M.NR.fallocate, fd, mode or 0, offset or 0, length or 4096)
+end
+
+--- pipe2(2). Returns the read and write fds, or `nil, errno`.
+function M.pipe(vm)
+    local r = vm:syscall(M.NR.pipe2, {
+        args = { 0, 0 },
+        bufs = { string.rep("\0", 8) },
+        ptrs = { 0 },
+    })
+    if r.ret ~= 0 then return nil, r.errno end
+    local rd, wr = string.unpack("<i4i4", r.out_bufs[1])
+    return rd, wr
+end
+
+--- splice(2) from one fd into another.
+function M.splice(vm, fd_in, fd_out, length, flags)
+    return vm:syscall(M.NR.splice, fd_in, 0, fd_out, 0, length, flags or 0)
+end
+
+--- copy_file_range(2).
+function M.copy_file_range(vm, fd_in, fd_out, length)
+    return vm:syscall(M.NR.copy_file_range, fd_in, 0, fd_out, 0, length, 0)
+end
+
+--- mmap(2). Returns the address, or `nil, errno`.
+function M.mmap(vm, fd, length, prot, flags, offset)
+    local r = vm:syscall(M.NR.mmap, 0, length, prot, flags, fd, offset or 0)
+    -- mmap reports failure as a small negative value in the return
+    -- register; anything at or above -4095 is an errno.
+    if r.ret < 0 then return nil, r.errno end
+    return r.ret
+end
+
+--- munmap(2).
+function M.munmap(vm, addr, length)
+    return vm:syscall(M.NR.munmap, addr, length)
+end
+
+--- mknod(2), as mknodat(AT_FDCWD). `mode` carries the type bits.
+function M.mknod(vm, path, mode, dev)
+    return vm:syscall(M.NR.mknodat, {
+        args = { M.AT_FDCWD, 0, mode, dev or 0 },
+        bufs = { M.cstr(path) },
+        ptrs = { 1 },
+    })
+end
+
+--- unlinkat(2). Pass `M.AT_REMOVEDIR` to remove a directory.
+function M.unlink(vm, path, flags)
+    return vm:syscall(M.NR.unlinkat, {
+        args = { M.AT_FDCWD, 0, flags or 0 },
+        bufs = { M.cstr(path) },
+        ptrs = { 1 },
+    })
+end
+
+--- renameat2(2), without asserting.
+function M.rename(vm, from, to, flags)
+    return vm:syscall(M.NR.renameat2, {
+        args = { M.AT_FDCWD, 0, M.AT_FDCWD, 0, flags or 0 },
+        bufs = { M.cstr(from), M.cstr(to) },
+        ptrs = { 1, 3 },
+    })
+end
+
+--- link(2), as linkat(AT_FDCWD).
+function M.link(vm, from, to, flags)
+    return vm:syscall(M.NR.linkat, {
+        args = { M.AT_FDCWD, 0, M.AT_FDCWD, 0, flags or 0 },
+        bufs = { M.cstr(from), M.cstr(to) },
+        ptrs = { 1, 3 },
+    })
 end
 
 --- lseek(2).
