@@ -3,6 +3,7 @@
 
 local sys = require("helpers.sys")
 local stratafs = require("helpers.stratafs")
+local kacs = require("helpers.kacs")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -156,16 +157,91 @@ test("option-string conditions are decided before entitlement",
         end)
     end)
 
--- The oracle half of the evaluation order needs a caller KACS refuses,
--- and a kernel-only VM has no way to become one. Recorded rather than
--- dropped, so coverage names what is missing.
-test("a stratum the caller cannot resolve gives EACCES, not an oracle",
-    { spec = "PKM *mount.admission-evaluation-order",
-      skip = "needs a caller KACS denies traverse to. A kernel-only VM has no way to become one: setresuid/setuid/setresgid are EOPNOTSUPP, unshare(CLONE_NEWUSER) leaves the task kuid at 0 so DAC still grants, /proc/self/uid_map is EPERM, and raw writes to security.peios.sd are denied by FACS (PKM 3.9.5). Open harness question, not a kernel defect" }, function(t) t:fail("no unauthorised caller available") end)
+-- A directory no caller may traverse, holding names of every kind
+-- behind it. Built once and shared: authoring a descriptor is the
+-- expensive part, and both ordering cases want the same barrier.
+local barrier_built = nil
+local function barrier(t)
+    if not barrier_built then
+        local path = base.root .. "/barrier"
+        vm:mkdir(path .. "/inner", { parents = true })
+        vm:write_file(path .. "/inner/f", "f")
+        vm:write_file(path .. "/a-file", "x")
+        local r = kacs.set_sd(vm, path, kacs.deny_all())
+        t:assert_eq(r.ret, 0, "the barrier descriptor is set: " .. sys.errname(r.errno))
+        barrier_built = path
+    end
+    return barrier_built
+end
 
+test("a stratum the caller cannot resolve gives EACCES, not an oracle",
+    { spec = "PKM *mount.admission-evaluation-order" }, function(t)
+        -- The point of the ordering is that the validity conditions must
+        -- not be an oracle: a caller with no right to traverse a
+        -- directory should not learn from the errno whether it exists
+        -- and whether it is a directory. For a single stratum that
+        -- holds — the walk runs under the caller's credentials and its
+        -- EACCES is propagated unchanged.
+        local shut = barrier(t)
+        kacs.as_dacl_bound(t, vm, function(worker)
+            -- The control first: this caller can mount, so an EACCES
+            -- below is about the stratum and not about the mounting.
+            local ok = mount_as(worker, base.root .. "/oracle-control",
+                "strata=" .. A)
+            t:assert_eq(ok.ret, 0,
+                "the caller can mount a stratum it can reach: " ..
+                sys.errname(ok.errno))
+
+            -- Behind the barrier, one errno whatever is there: a
+            -- directory, a regular file, or nothing at all.
+            local behind = {
+                ["a directory"] = "/inner",
+                ["a regular file"] = "/a-file",
+                ["a name that does not exist"] = "/not-there",
+                ["a name below a name that does not exist"] = "/no/such/tree",
+            }
+            for what, suffix in pairs(behind) do
+                local r = mount_as(worker, base.root .. "/oracle" .. #suffix,
+                    "strata=" .. shut .. suffix)
+                t:assert_neq(r.ret, 0, what .. " behind the barrier is refused")
+                t:assert_eq(r.errno, sys.E.ACCES,
+                    what .. " is EACCES, disclosing nothing: " ..
+                    sys.errname(r.errno))
+            end
+        end)
+    end)
+
+-- PEI-579. The specified ordering is stack-wide: entitlement for every
+-- stratum, then the validity conditions. The strata are checked in one
+-- loop instead — resolve, stat, type-test, compare — so stratum 0 is
+-- fully judged before stratum 1 is resolved, and its errno reaches a
+-- caller who was never entitled to name stratum 1. §4.2.3 records this
+-- as a defect; the test states the specified behaviour.
 test("entitlement is decided for the whole stack before any validity condition",
     { spec = "PKM *mount.admission-evaluation-order",
-      skip = "needs a caller KACS denies traverse to. A kernel-only VM has no way to become one: setresuid/setuid/setresgid are EOPNOTSUPP, unshare(CLONE_NEWUSER) leaves the task kuid at 0 so DAC still grants, /proc/self/uid_map is EPERM, and raw writes to security.peios.sd are denied by FACS (PKM 3.9.5). Open harness question, not a kernel defect" }, function(t) t:fail("no unauthorised caller available") end)
+      tags = { "known-bug" } }, function(t)
+        local shut = barrier(t)
+        local file = base.root .. "/a-regular-file"
+        vm:write_file(file, "x")
+        local missing = base.root .. "/definitely-absent"
+
+        kacs.as_dacl_bound(t, vm, function(worker)
+            -- A stratum the caller can reach first, one it cannot
+            -- second. What comes back must be that the caller was not
+            -- entitled to the stack, not what the first stratum is.
+            local notdir = mount_as(worker, base.root .. "/order-notdir",
+                "strata=" .. file .. ":" .. shut .. "/inner")
+            t:assert_eq(notdir.errno, sys.E.ACCES,
+                "a regular file above an unreachable stratum is EACCES, not " ..
+                sys.errname(notdir.errno))
+
+            local absent = mount_as(worker, base.root .. "/order-absent",
+                "strata=" .. missing .. ":" .. shut .. "/inner")
+            t:assert_eq(absent.errno, sys.E.ACCES,
+                "an absent stratum above an unreachable one is EACCES, not " ..
+                sys.errname(absent.errno))
+        end)
+    end)
 
 test("an empty stratum stack is refused",
     { spec = "PKM *mount.admit.empty-stack-einval" }, function(t)
