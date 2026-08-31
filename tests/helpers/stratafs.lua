@@ -113,6 +113,37 @@ function M.try_mount(vm, spec)
     })
 end
 
+-- Mutating the merged view without asserting.
+--
+-- `vm:write_file` raises, which is right for a case whose subject is
+-- something else; a case whose subject *is* the refusal needs the
+-- errno and needs to know which call produced it. Routing happens at
+-- the write and not at the open (§4.5.1), so these are deliberately
+-- two calls and report which one failed.
+
+--- Write to an existing name. Returns `true`, or `nil, errno, stage`.
+function M.try_write(vm, path, data)
+    local fd, errno = sys.open(vm, path, sys.O.WRONLY)
+    if not fd then return nil, errno, "open" end
+    local r = sys.write(vm, fd, data)
+    sys.close(vm, fd)
+    if r.ret < 0 then return nil, r.errno, "write" end
+    return true
+end
+
+--- Create a name that does not exist. Returns `true`, or `nil, errno`.
+function M.try_create(vm, path, data)
+    local flags = sys.O.WRONLY | sys.O.CREAT | sys.O.EXCL
+    local fd, errno = sys.open(vm, path, flags, tonumber("644", 8))
+    if not fd then return nil, errno end
+    if data and #data > 0 then
+        local r = sys.write(vm, fd, data)
+        if r.ret < 0 then sys.close(vm, fd) return nil, r.errno end
+    end
+    sys.close(vm, fd)
+    return true
+end
+
 --- Unmount, ignoring a mount that is already gone.
 function M.umount(vm, at) return sys.umount(vm, at) end
 

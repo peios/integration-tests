@@ -20,7 +20,18 @@ M.NR = {
     fchownat   = 260,
     setresgid  = 119,
     setresuid  = 117,
+    statfs     = 137,
+    openat     = 257,
+    close      = 3,
+    ioctl      = 16,
+    write      = 1,
+    read       = 0,
+    flock      = 73,
+    fsync      = 74,
 }
+
+-- flock(2) operations.
+M.LOCK_SH, M.LOCK_EX, M.LOCK_UN, M.LOCK_NB = 1, 2, 8, 4
 
 -- Flags a test is likely to name.
 M.AT_FDCWD            = -100
@@ -29,12 +40,26 @@ M.MS_RDONLY           = 1
 M.MS_BIND             = 4096
 M.MS_REMOUNT          = 32
 
+-- open(2) flags.
+M.O = {
+    RDONLY = 0, WRONLY = 1, RDWR = 2, CREAT = 0x40, EXCL = 0x80,
+    TRUNC = 0x200, APPEND = 0x400, DIRECTORY = 0x10000, NOFOLLOW = 0x20000,
+    PATH = 0x200000, TMPFILE = 0x410000,
+}
+
+-- The inode flag ioctls, and the one flag stratafs's
+-- accepts-modification predicate reads (§4.2.1).
+M.FS_IOC_GETFLAGS = 0x80086601
+M.FS_IOC_SETFLAGS = 0x40086602
+M.FS_IMMUTABLE_FL = 0x00000010
+
 -- Errnos, by the name the TRM uses for them.
 M.E = {
     PERM = 1, NOENT = 2, IO = 5, BADF = 9, AGAIN = 11, ACCES = 13,
     EXIST = 17, XDEV = 18, NODEV = 19, NOTDIR = 20, ISDIR = 21,
     INVAL = 22, ROFS = 30, NOTEMPTY = 39, LOOP = 40, STALE = 116,
     NODATA = 61, RANGE = 34, OPNOTSUPP = 95, NOTTY = 25,
+    NAMETOOLONG = 36, NOSPC = 28, MLINK = 31, TXTBSY = 26,
 }
 
 local NAME_OF = {}
@@ -91,6 +116,30 @@ function M.stat(vm, path, opts)
     }
 end
 
+-- struct statfs, x86_64. 120 bytes; every field is 8 wide.
+local STATFS_SIZE = 120
+local STATFS = { type = 1, bsize = 9, namelen = 65, flags = 81 }
+
+--- statfs(2), returning the fields that identify a superblock.
+---
+--- `type` is the filesystem magic — for stratafs, §4.A's `STRATAFS_MAGIC`.
+--- Returns `nil, errno` on failure.
+function M.statfs(vm, path)
+    local r = vm:syscall(M.NR.statfs, {
+        args = { 0, 0 },
+        bufs = { M.cstr(path), string.rep("\0", STATFS_SIZE) },
+        ptrs = { 0, 1 },
+    })
+    if r.ret ~= 0 then return nil, r.errno end
+    local buf = r.out_bufs[2]
+    return {
+        type    = string.unpack("<I8", buf, STATFS.type),
+        bsize   = string.unpack("<I8", buf, STATFS.bsize),
+        namelen = string.unpack("<I8", buf, STATFS.namelen),
+        flags   = string.unpack("<I8", buf, STATFS.flags),
+    }
+end
+
 --- mount(2). Every argument is optional but `target`.
 function M.mount(vm, spec)
     return vm:syscall(M.NR.mount, {
@@ -131,6 +180,75 @@ function M.chown(vm, path, uid, gid)
         ptrs = { 1 },
     })
 end
+
+--- openat(2) at AT_FDCWD. Returns the fd, or `nil, errno`.
+---
+--- The agent issues every syscall from one process, so an fd stays
+--- open across calls and can be handed to `M.ioctl` or `M.close`.
+function M.open(vm, path, flags, mode)
+    local r = vm:syscall(M.NR.openat, {
+        args = { M.AT_FDCWD, 0, flags or M.O.RDONLY, mode or 0 },
+        bufs = { M.cstr(path) },
+        ptrs = { 1 },
+    })
+    if r.ret < 0 then return nil, r.errno end
+    return r.ret
+end
+
+--- write(2). Returns the raw syscall result.
+function M.write(vm, fd, data)
+    return vm:syscall(M.NR.write, {
+        args = { fd, 0, #data },
+        bufs = { data },
+        ptrs = { 1 },
+    })
+end
+
+--- close(2).
+function M.close(vm, fd) return vm:syscall(M.NR.close, fd) end
+
+--- ioctl(2) with a pointer to an in/out word — the shape the inode
+--- flag ioctls take. Returns the word back, or `nil, errno`.
+function M.ioctl_word(vm, fd, cmd, word)
+    local r = vm:syscall(M.NR.ioctl, {
+        args = { fd, cmd, 0 },
+        bufs = { string.pack("<I8", word or 0) },
+        ptrs = { 2 },
+    })
+    if r.ret ~= 0 then return nil, r.errno end
+    return string.unpack("<I8", r.out_bufs[1])
+end
+
+--- Set or clear FS_IMMUTABLE_FL on a path.
+---
+--- The third term of the accepts-modification predicate (§4.2.1) is
+--- specifically the immutable inode flag, so a test that wants a
+--- provider which refuses modification *without* saying `ro` and
+--- *without* a read-only mount sets this.
+function M.set_immutable(vm, path, on)
+    local fd, errno = M.open(vm, path, M.O.RDONLY)
+    if not fd then return nil, errno end
+    local flags, err = M.ioctl_word(vm, fd, M.FS_IOC_GETFLAGS, 0)
+    if flags then
+        if on == false then
+            flags = flags & ~M.FS_IMMUTABLE_FL
+        else
+            flags = flags | M.FS_IMMUTABLE_FL
+        end
+        flags, err = M.ioctl_word(vm, fd, M.FS_IOC_SETFLAGS, flags)
+    end
+    M.close(vm, fd)
+    if not flags then return nil, err end
+    return true
+end
+
+--- flock(2).
+function M.flock(vm, fd, operation)
+    return vm:syscall(M.NR.flock, fd, operation)
+end
+
+--- fsync(2).
+function M.fsync(vm, fd) return vm:syscall(M.NR.fsync, fd) end
 
 --- Bind-mount `from` at `to`, read-only.
 ---
