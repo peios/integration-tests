@@ -33,7 +33,13 @@ M.NR = {
     getuid     = 102,
     fchmodat   = 268,
     readlinkat = 267,
+    getdents64 = 217,
+    lseek      = 8,
 }
+
+-- d_type values a directory entry may carry.
+M.DT = { UNKNOWN = 0, FIFO = 1, CHR = 2, DIR = 4, BLK = 6, REG = 8, LNK = 10,
+         SOCK = 12 }
 
 -- Namespace flags, for the cases about what a mounter must be
 -- entitled to.
@@ -182,6 +188,51 @@ function M.symlink(vm, target, linkpath)
     })
 end
 
+--- getdents64(2) against an open directory fd.
+---
+--- Returns a list of `{ino, off, type, name}` in the order the kernel
+--- reported them, or `nil, errno`. An empty list means end of
+--- directory. Unlike `vm:listdir` this keeps the descriptor, which is
+--- what the capture-at-open cases need, and it reports `.` and `..`,
+--- the inode numbers and the offsets, which they also need.
+function M.getdents(vm, fd, size)
+    size = size or 32768
+    local r = vm:syscall(M.NR.getdents64, {
+        args = { fd, 0, size },
+        bufs = { string.rep("\0", size) },
+        ptrs = { 1 },
+    })
+    if r.ret < 0 then return nil, r.errno end
+    local buf, out, at = r.out_bufs[1], {}, 1
+    while at <= r.ret do
+        local ino = string.unpack("<I8", buf, at)
+        local off = string.unpack("<i8", buf, at + 8)
+        local reclen = string.unpack("<I2", buf, at + 16)
+        local dtype = string.unpack("<I1", buf, at + 18)
+        local name = buf:sub(at + 19, at + reclen - 1):match("^[^\0]*")
+        out[#out + 1] = { ino = ino, off = off, type = dtype, name = name }
+        at = at + reclen
+    end
+    return out
+end
+
+--- Every entry of an open directory, across as many getdents64 calls
+--- as it takes. Returns `nil, errno` if any of them fails.
+function M.getdents_all(vm, fd, size)
+    local all = {}
+    while true do
+        local batch, errno = M.getdents(vm, fd, size)
+        if not batch then return nil, errno end
+        if #batch == 0 then return all end
+        for _, e in ipairs(batch) do all[#all + 1] = e end
+    end
+end
+
+--- lseek(2).
+function M.lseek(vm, fd, offset, whence)
+    return vm:syscall(M.NR.lseek, fd, offset, whence or 0)
+end
+
 --- readlink(2), as readlinkat(AT_FDCWD). Returns the target, or
 --- `nil, errno`.
 function M.readlink(vm, path, size)
@@ -218,8 +269,17 @@ end
 --- The agent issues every syscall from one process, so an fd stays
 --- open across calls and can be handed to `M.ioctl` or `M.close`.
 function M.open(vm, path, flags, mode)
+    return M.openat(vm, M.AT_FDCWD, path, flags, mode)
+end
+
+--- openat(2) relative to an open directory fd.
+---
+--- The settled-participant-set cases need this: resolving a name
+--- *through* a directory descriptor is an ordinary live resolution,
+--- and must see strata the descriptor's own enumeration does not.
+function M.openat(vm, dirfd, path, flags, mode)
     local r = vm:syscall(M.NR.openat, {
-        args = { M.AT_FDCWD, 0, flags or M.O.RDONLY, mode or 0 },
+        args = { dirfd, 0, flags or M.O.RDONLY, mode or 0 },
         bufs = { M.cstr(path) },
         ptrs = { 1 },
     })
