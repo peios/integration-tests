@@ -32,6 +32,7 @@ M.NR = {
     mkdir      = 83,
     getuid     = 102,
     fchmodat   = 268,
+    readlinkat = 267,
 }
 
 -- Namespace flags, for the cases about what a mounter must be
@@ -181,6 +182,19 @@ function M.symlink(vm, target, linkpath)
     })
 end
 
+--- readlink(2), as readlinkat(AT_FDCWD). Returns the target, or
+--- `nil, errno`.
+function M.readlink(vm, path, size)
+    size = size or 4096
+    local r = vm:syscall(M.NR.readlinkat, {
+        args = { M.AT_FDCWD, 0, 0, size },
+        bufs = { M.cstr(path), string.rep("\0", size) },
+        ptrs = { 1, 2 },
+    })
+    if r.ret < 0 then return nil, r.errno end
+    return r.out_bufs[2]:sub(1, r.ret)
+end
+
 --- chmod(2), as fchmodat(AT_FDCWD).
 function M.chmod(vm, path, mode)
     return vm:syscall(M.NR.fchmodat, {
@@ -275,6 +289,22 @@ function M.mkdir(vm, path, mode)
         bufs = { M.cstr(path) },
         ptrs = { 0 },
     })
+end
+
+--- mkdir(2) including any missing parents, without asserting.
+---
+--- `vm:mkdir` does this already; this is the version a worker can use,
+--- since a worker exposes `syscall` and little else.
+function M.mkdir_p(who, path)
+    local made = { }
+    local at = ""
+    for part in path:gmatch("[^/]+") do
+        at = at .. "/" .. part
+        local r = M.mkdir(who, at)
+        if r.ret ~= 0 and r.errno ~= M.E.EXIST then return r end
+        made[#made + 1] = at
+    end
+    return { ret = 0, errno = 0 }
 end
 
 --- A worker process in a new user namespace and mount namespace.

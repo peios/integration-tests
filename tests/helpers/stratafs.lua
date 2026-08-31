@@ -102,8 +102,11 @@ end
 --- `spec.data` overrides the generated option string outright, which is
 --- what the parse-failure cases need: they assert on strings the
 --- builder would not produce.
+--- `vm` may be a worker: the mount point is made with raw syscalls so
+--- the same call works for either, and a worker's mount lands in its
+--- own mount namespace.
 function M.try_mount(vm, spec)
-    vm:mkdir(spec.at, { parents = true })
+    sys.mkdir_p(vm, spec.at)
     return sys.mount(vm, {
         source = "stratafs",
         target = spec.at,
