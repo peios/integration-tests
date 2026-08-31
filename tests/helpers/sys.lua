@@ -124,6 +124,7 @@ local STAT_SIZE = 144
 local STAT = {
     dev = 1, ino = 9, nlink = 17, mode = 25, uid = 29, gid = 33,
     rdev = 41, size = 49,
+    atime = 73, mtime = 89, ctime = 105,
 }
 
 --- stat(2) a path, returning the fields a stratafs test asserts on.
@@ -157,6 +158,11 @@ function M.decode_stat(buf)
         uid   = string.unpack("<I4", buf, STAT.uid),
         gid   = string.unpack("<I4", buf, STAT.gid),
         size  = string.unpack("<i8", buf, STAT.size),
+        -- Seconds only: the copy-up cases compare whole timestamps,
+        -- and nanoseconds add nothing but noise to the message.
+        atime = string.unpack("<i8", buf, STAT.atime),
+        mtime = string.unpack("<i8", buf, STAT.mtime),
+        ctime = string.unpack("<i8", buf, STAT.ctime),
         -- S_IFMT is the top four bits of the type field.
         is_dir     = (mode & 0xF000) == 0x4000,
         is_symlink = (mode & 0xF000) == 0xA000,
@@ -280,12 +286,14 @@ function M.ftruncate(vm, fd, length)
     return vm:syscall(M.NR.ftruncate, fd, length)
 end
 
---- utimensat(2) on a path, setting both times to a fixed second.
-function M.utimes(vm, path, seconds)
+--- utimensat(2) on a path, setting access and modification times to a
+--- fixed second. `opts.follow = false` sets them on a symlink itself.
+function M.utimes(vm, path, seconds, opts)
+    local flags = (opts and opts.follow == false) and M.AT_SYMLINK_NOFOLLOW or 0
     -- struct timespec[2], 32 bytes: {sec, nsec} twice.
     local times = string.pack("<i8i8i8i8", seconds, 0, seconds, 0)
     return vm:syscall(M.NR.utimensat, {
-        args = { M.AT_FDCWD, 0, 0, 0 },
+        args = { M.AT_FDCWD, 0, 0, flags },
         bufs = { M.cstr(path), times },
         ptrs = { 1, 2 },
     })
@@ -426,9 +434,14 @@ function M.chmod(vm, path, mode)
 end
 
 --- chown(2), as fchownat(AT_FDCWD). `-1` leaves a field alone.
-function M.chown(vm, path, uid, gid)
+---
+--- `opts.follow = false` uses AT_SYMLINK_NOFOLLOW, which is what a
+--- case about a symlink itself needs — the default follows, and a
+--- dangling link then fails ENOENT rather than touching the link.
+function M.chown(vm, path, uid, gid, opts)
+    local flags = (opts and opts.follow == false) and M.AT_SYMLINK_NOFOLLOW or 0
     return vm:syscall(M.NR.fchownat, {
-        args = { M.AT_FDCWD, 0, uid or -1, gid or -1, 0 },
+        args = { M.AT_FDCWD, 0, uid or -1, gid or -1, flags },
         bufs = { M.cstr(path) },
         ptrs = { 1 },
     })
