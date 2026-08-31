@@ -7,6 +7,7 @@
 local sys = require("helpers.sys")
 local kacs = require("helpers.kacs")
 local stratafs = require("helpers.stratafs")
+local hooks = require("helpers.hooks")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -429,15 +430,51 @@ test("a published copy is independent of its source",
         end)
     end)
 
--- Two of §4.5.2's claims need a copy-up held open or an attribute write
--- made to fail from outside, and neither is reachable from userspace.
+-- The copy-up-publish rendezvous (§4.A.2) holds the copy-up staged but
+-- unpublished — the exact state this citation says must be invisible.
 test("a copy-up is never observable in a partial state",
-    { spec = "PKM *copy-up.never-partially-observable",
-      skip = "needs a copy-up held open mid-flight. A regular file stages " ..
-             "as an anonymous tmpfile with no directory entry, and the " ..
-             "named path publishes within microseconds; see the note in " ..
-             "lookup.test.lua. Wants a kernel-side delay hook" },
-    function(t) t:fail("no way to hold a copy-up open") end)
+    { spec = "PKM *copy-up.never-partially-observable" }, function(t)
+        copying(t, "held-copy-up", function(s)
+            t:assert(hooks.hold(vm, "copy-up-publish"), "the rendezvous arms")
+            -- The victim runs in a worker: the agent's main connection
+            -- serves syscalls one at a time, so a held syscall there
+            -- would wedge every later call this test needs to observe.
+            local worker = vm:spawn_worker()
+            local ok, err = pcall(function()
+                local fd = sys.open(worker, s:join("f"), sys.O.WRONLY)
+                t:assert(fd, "the merged file opens for writing")
+                local pending = worker:syscall_async(sys.NR.write, {
+                    args = { fd, 0, 8 },
+                    bufs = { "modified" },
+                    ptrs = { 1 },
+                })
+                t:assert(hooks.await_waiting(vm, "copy-up-publish"),
+                    "the copy-up reaches the moment before publication")
+
+                -- Content, attributes and metadata are all staged by
+                -- now. None of it is observable: the merged name still
+                -- resolves to the source, and the create stratum has no
+                -- entry at all — the stage is an anonymous tmpfile.
+                t:assert_eq(vm:read_file(s:join("f")), "original",
+                    "the merged view still provides the source")
+                t:assert_eq(#vm:listdir(s:in_stratum("dest")), 0,
+                    "and the create stratum shows no entry for the stage")
+
+                t:assert(hooks.clear(vm, "copy-up-publish"), "released")
+                local r = pending:await()
+                t:assert_eq(r.ret, 8, "the held write then completes: " ..
+                    sys.errname(r.errno))
+                sys.close(worker, fd)
+                t:assert_eq(vm:read_file(s:join("f")), "modified",
+                    "and publication plus the write become visible at once")
+                t:assert_eq(vm:read_file(s:in_stratum("dest", "f")), "modified",
+                    "with the copy published in the create stratum")
+            end)
+            hooks.clear(vm, "copy-up-publish")
+            worker:kill(); worker:join()
+            if not ok then error(err, 0) end
+        end)
+    end)
 
 test("any extended-attribute failure aborts the copy-up with EIO",
     { spec = "PKM *copy-up.xattr-failure-aborts-with-eio" }, function(t)

@@ -27,6 +27,7 @@ M.NR = {
     write      = 1,
     read       = 0,
     flock      = 73,
+    nanosleep  = 35,
     fsync      = 74,
     unshare    = 272,
     mkdir      = 83,
@@ -108,7 +109,8 @@ M.FS_IMMUTABLE_FL = 0x00000010
 
 -- Errnos, by the name the TRM uses for them.
 M.E = {
-    PERM = 1, NOENT = 2, IO = 5, BADF = 9, AGAIN = 11, ACCES = 13,
+    PERM = 1, NOENT = 2, IO = 5, BADF = 9, AGAIN = 11, NOMEM = 12,
+    ACCES = 13,
     EXIST = 17, XDEV = 18, NODEV = 19, NOTDIR = 20, ISDIR = 21,
     INVAL = 22, ROFS = 30, NOTEMPTY = 39, LOOP = 40, STALE = 116,
     NODATA = 61, RANGE = 34, OPNOTSUPP = 95, NOTTY = 25,
@@ -551,6 +553,26 @@ function M.write(vm, fd, data)
         bufs = { data },
         ptrs = { 1 },
     })
+end
+
+--- nanosleep(2), for polling loops that must yield rather than spin.
+function M.nanosleep(vm, sec, nsec)
+    return vm:syscall(M.NR.nanosleep, {
+        args = { 0, 0 },
+        bufs = { string.pack("<i8i8", sec, nsec) },
+        ptrs = { 0 },
+    })
+end
+
+--- read(2). Returns the data (possibly short, "" at EOF), or `nil, errno`.
+function M.read(vm, fd, size)
+    local r = vm:syscall(M.NR.read, {
+        args = { fd, 0, size },
+        bufs = { string.rep("\0", size) },
+        ptrs = { 1 },
+    })
+    if r.ret < 0 then return nil, r.errno end
+    return r.out_bufs[1]:sub(1, r.ret)
 end
 
 --- close(2).

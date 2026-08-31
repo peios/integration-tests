@@ -5,6 +5,7 @@
 local sys = require("helpers.sys")
 local kacs = require("helpers.kacs")
 local stratafs = require("helpers.stratafs")
+local hooks = require("helpers.hooks")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -397,15 +398,66 @@ test("a rename whose names resolve to one inode is a no-op",
         end)
     end)
 
--- A race backstop with no deterministic trigger. Every path walk
--- re-resolves — `d_revalidate` returns 0 for every dentry but the root
--- (§4.4.2) — so the dentry stratafs receives in `->rename` was built
--- moments earlier by the same syscall. Reaching the mismatch means
--- changing the provider between that lookup and the rename, inside one
--- syscall, from another task: a window no test can steer.
+-- A race backstop: the dentry stratafs receives in `->rename` was
+-- built moments earlier by the same syscall, so the mismatch needs the
+-- provider to change between that walk and the locked re-lookup —
+-- inside one syscall. The rename-provider rendezvous (§4.A.2) holds
+-- exactly that window open.
+--
+-- The refusal is per attempt and the VFS heals it: ESTALE from a
+-- rename retries the whole syscall once with a fresh walk, whose
+-- rebuilt dentry carries the current identity, so the caller sees the
+-- retry's outcome. The refusal itself is recorded at the
+-- stratafs:stratafs_rename_stale tracepoint (§4.5.5), which is where
+-- this test observes it.
 test("a dentry whose provider identity no longer matches is ESTALE",
-    { spec = "PKM *rename.stale-dentry-estale",
-      skip = "a race backstop: the dentry is rebuilt by the same syscall " ..
-             "that renames, so the mismatch needs the provider to change " ..
-             "inside that window. Wants a kernel-side injection point" },
-    function(t) t:fail("no way to steer the window") end)
+    { spec = "PKM *rename.stale-dentry-estale" }, function(t)
+        stratafs.with(vm, "stale-rename", {
+            { name = "only", flags = { "create" }, entries = { f = "first" } },
+        }, function(s)
+            t:assert(hooks.hold(vm, "rename-provider"), "the rendezvous arms")
+            -- In a worker: a held syscall on the agent's main
+            -- connection would wedge every later call.
+            local worker = vm:spawn_worker()
+            local ok, err = pcall(function()
+                local pending = worker:syscall_async(sys.NR.renameat2, {
+                    args = { sys.AT_FDCWD, 0, sys.AT_FDCWD, 0, 0 },
+                    bufs = { sys.cstr(s:join("f")), sys.cstr(s:join("g")) },
+                    ptrs = { 1, 3 },
+                })
+                t:assert(hooks.await_waiting(vm, "rename-provider"),
+                    "the rename holds with its walk-time provider captured")
+
+                -- Replace the provider under it, directly in the
+                -- stratum: same name, different object.
+                t:assert_eq(sys.unlink(vm, s:in_stratum("only", "f")).ret, 0,
+                    "the provider entry is removed behind the rename")
+                vm:write_file(s:in_stratum("only", "f"), "second")
+
+                t:assert(hooks.trace_start(vm, "stratafs"), "tracing starts")
+                t:assert(hooks.clear(vm, "rename-provider"), "released")
+                local r = pending:await()
+                local lines = hooks.trace_stop(vm, "stratafs")
+
+                -- Attempt one hit the backstop; the trace records it.
+                local stale = false
+                for _, line in ipairs(lines or {}) do
+                    if line:match("stratafs_rename_stale:") then stale = true end
+                end
+                t:assert(stale, "the stale identity was detected and refused")
+
+                -- The retry then acted on the current identity: what
+                -- moved to the destination is the replacement object,
+                -- not the one the first walk resolved.
+                t:assert_eq(r.ret, 0, "the healed retry succeeds: " ..
+                    sys.errname(r.errno))
+                t:assert_eq(vm:read_file(s:join("g")), "second",
+                    "and renamed the object now at the name")
+                t:assert(sys.stat(vm, s:join("f")) == nil,
+                    "which no longer provides the source name")
+            end)
+            hooks.clear(vm, "rename-provider")
+            worker:kill(); worker:join()
+            if not ok then error(err, 0) end
+        end)
+    end)

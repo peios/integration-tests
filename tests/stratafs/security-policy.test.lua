@@ -4,6 +4,7 @@
 local sys = require("helpers.sys")
 local kacs = require("helpers.kacs")
 local stratafs = require("helpers.stratafs")
+local hooks = require("helpers.hooks")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -112,13 +113,44 @@ test("what is pinned is the provider's effective descriptor",
         end)
     end)
 
+-- FACS refuses every raw write to the canonical attribute, so a
+-- corrupt or unreadable source descriptor cannot be planted; the
+-- copy-up-begin fail point (§4.A.2) stands in for one, failing the
+-- phase at the moment the source descriptor is read — before any
+-- staging exists. EIO is the probe errno precisely because §4.6.3
+-- notes no real failure on this path produces it: an EIO coming back
+-- is provably the injected one, propagated unaltered.
 test("a descriptor that cannot be replicated fails the operation",
-    { spec = "PKM *security.copy-up-descriptor-failure-fails-operation",
-      skip = "needs the source descriptor to be unresolvable, oversized or " ..
-             "corrupt at the moment of the copy. FACS refuses every raw " ..
-             "write to the canonical attribute, so one cannot be planted. " ..
-             "Wants fault injection in the KACS copy-up context" },
-    function(t) t:fail("no way to break the descriptor") end)
+    { spec = "PKM *security.copy-up-descriptor-failure-fails-operation" },
+    function(t)
+        copying(t, "sd-fail", function(s)
+            t:assert(hooks.fail(vm, "copy-up-begin", sys.E.IO),
+                "the fail point arms")
+            local ok, err = pcall(function()
+                local fd = sys.open(vm, s:join("f"), sys.O.WRONLY)
+                t:assert(fd, "the open succeeds; routing happens per write")
+                local r = sys.write(vm, fd, "modified")
+                sys.close(vm, fd)
+                t:assert(r.ret < 0, "the write that needs the copy-up fails")
+                t:assert_eq(r.errno, sys.E.IO,
+                    "carrying the copy-up's failure: " .. sys.errname(r.errno))
+
+                -- The phase failed before the destination was created:
+                -- nothing was staged, published, or half-written.
+                t:assert_eq(#vm:listdir(s:in_stratum("dest")), 0,
+                    "the create stratum is untouched")
+                t:assert_eq(vm:read_file(s:join("f")), "original",
+                    "and the merged view still provides the source")
+
+                -- The one-shot is spent; the operation as a whole is
+                -- repeatable and now succeeds.
+                t:assert(stratafs.try_write(vm, s:join("f"), "modified"),
+                    "the same write succeeds once the failure is spent")
+            end)
+            hooks.clear(vm, "copy-up-begin")
+            if not ok then error(err, 0) end
+        end)
+    end)
 
 test("a stratafs mount carries the deny-missing policy class",
     { spec = "PKM *security.mount-policy-is-deny-missing" }, function(t)

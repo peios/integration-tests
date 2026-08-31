@@ -5,6 +5,7 @@
 local sys = require("helpers.sys")
 local kacs = require("helpers.kacs")
 local stratafs = require("helpers.stratafs")
+local hooks = require("helpers.hooks")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -153,12 +154,43 @@ test("linking an unnamed file into another mount is EXDEV",
         if not ok then error(err, 0) end
     end)
 
+-- The rollback path runs only where installing the outer inode fails
+-- after the lower link succeeded — an allocation failure between two
+-- steps of one syscall. The link-install fail point (§4.A.2) makes
+-- that step fail once, on demand; the rollback it triggers is the real
+-- one.
 test("a failed install rolls the lower link back",
-    { spec = "PKM *link.rolled-back-on-install-failure",
-      skip = "the rollback path runs only where installing the outer inode " ..
-             "fails after the lower link succeeded — an allocation failure " ..
-             "between two steps of one syscall. Wants fault injection" },
-    function(t) t:fail("no way to fail the install") end)
+    { spec = "PKM *link.rolled-back-on-install-failure" }, function(t)
+        stratafs.with(vm, "link-rollback", {
+            { name = "only", flags = { "create" }, entries = { f = "original" } },
+        }, function(s)
+            t:assert(hooks.fail(vm, "link-install", sys.E.NOMEM),
+                "the fail point arms")
+            local ok, err = pcall(function()
+                local r = sys.link(vm, s:join("f"), s:join("g"))
+                t:assert_neq(r.ret, 0, "the link fails")
+                t:assert_eq(r.errno, sys.E.NOMEM,
+                    "reporting the install's failure: " .. sys.errname(r.errno))
+
+                local st = sys.stat(vm, s:in_stratum("only", "f"))
+                t:assert_eq(st.nlink, 1,
+                    "the lower link that had already succeeded is undone")
+                t:assert(sys.stat(vm, s:in_stratum("only", "g")) == nil,
+                    "no second name in the stratum")
+                t:assert(sys.stat(vm, s:join("g")) == nil,
+                    "and none through the mount")
+
+                local mode = hooks.state(vm, "link-install")
+                t:assert_eq(mode, "none", "the fail point consumed itself")
+
+                -- The one-shot is spent, so the same link now succeeds.
+                t:assert_eq(sys.link(vm, s:join("f"), s:join("g")).ret, 0,
+                    "the same link succeeds once the failure is spent")
+            end)
+            hooks.clear(vm, "link-install")
+            if not ok then error(err, 0) end
+        end)
+    end)
 
 test("a symbolic link's target is stored and returned verbatim",
     { spec = "PKM *link.symlink-target-verbatim" }, function(t)

@@ -23,4 +23,8 @@ root = "{out}/root"
 
 # panic=1 so a kernel that dies takes the VM down instead of hanging
 # the run until it times out.
-cmdline = "console=hvc0 quiet panic=1"
+#
+# stratafs.test_hooks=1 registers the stratafs test rendezvous/fail
+# points (PKM §4.A.2) in debugfs. Test profiles only; production images
+# never pass it.
+cmdline = "console=hvc0 quiet panic=1 stratafs.test_hooks=1"

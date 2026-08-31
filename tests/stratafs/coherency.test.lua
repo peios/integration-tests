@@ -4,6 +4,7 @@
 
 local sys = require("helpers.sys")
 local stratafs = require("helpers.stratafs")
+local hooks = require("helpers.hooks")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -172,18 +173,51 @@ test("every dentry but the root is invalidated on every walk",
         end)
     end)
 
--- Refusing RCU-walk is a property of `d_revalidate` returning -ECHILD
--- in LOOKUP_RCU, which the VFS handles by silently retrying in
--- ref-walk mode. The retry is invisible to the caller by design: the
--- syscall succeeds either way and returns nothing that distinguishes
--- them. Confirming it wants a kernel-side counter — a tracepoint or a
--- debugfs statistic — not a bigger VM.
+-- The refusal is invisible to the caller — the VFS silently retries in
+-- ref-walk mode — so it is observed at the stratafs: tracepoints
+-- (§4.4.2). The section names two refusal points, and in practice the
+-- directory permission check fires first: MAY_NOT_BLOCK turns the walk
+-- back at the first stratafs directory (stratafs_rcu_walk_refused), so
+-- d_revalidate's own -ECHILD branch is the backstop and every traced
+-- d_revalidate call arrives already in ref-walk mode.
 test("RCU-walk is refused unconditionally",
-    { spec = "PKM *coherency.revalidate.rcu-walk-refused",
-      skip = "the ref-walk fallback is invisible to userspace: the syscall " ..
-             "succeeds either way and reports nothing that distinguishes " ..
-             "them. Wants a tracepoint or a counter" },
-    function(t) t:fail("no userspace-visible signal") end)
+    { spec = "PKM *coherency.revalidate.rcu-walk-refused" }, function(t)
+        local SYSTEM = "stratafs"  -- enable the whole trace system
+        stratafs.with(vm, "rcu-refused", {
+            { name = "only", flags = { "create" }, entries = { f = "f" } },
+        }, function(s)
+            -- Prime the dentry cache, so the traced walk has cached
+            -- state an RCU walk could in principle use.
+            t:assert(sys.stat(vm, s:join("f")), "the name resolves")
+
+            local started, err = hooks.trace_start(vm, SYSTEM)
+            t:assert(started, "tracing starts: " .. tostring(err))
+            t:assert(sys.stat(vm, s:join("f")), "the walk succeeds regardless")
+            t:assert(sys.stat(vm, s:join("f")), "and again")
+            local lines = hooks.trace_stop(vm, SYSTEM)
+
+            local refused, revalidated = false, false
+            for _, line in ipairs(lines or {}) do
+                if line:match("stratafs_rcu_walk_refused:") then
+                    refused = true
+                end
+                if line:match("stratafs_d_revalidate:") then
+                    revalidated = true
+                    -- The backstop's contract: an RCU-mode call, if one
+                    -- ever arrives, is refused; a ref-walk call on a
+                    -- non-root dentry rebuilds (returns 0).
+                    t:assert(not line:match("rcu=1 ret=0"),
+                        "no RCU-mode call may proceed: " .. line)
+                    t:assert(not line:match("rcu=0 ret=%-"),
+                        "no ref-walk call may error: " .. line)
+                end
+            end
+            t:assert(refused,
+                "the walk was turned back in RCU mode at the directory check")
+            t:assert(revalidated,
+                "and the ref-walk retry reached d_revalidate")
+        end)
+    end)
 
 test("inode numbers are allocated, not derived from the provider's",
     { spec = "PKM *inode.number-allocated-not-derived" }, function(t)

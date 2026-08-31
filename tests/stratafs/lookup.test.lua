@@ -5,6 +5,7 @@
 local sys = require("helpers.sys")
 local kacs = require("helpers.kacs")
 local stratafs = require("helpers.stratafs")
+local hooks = require("helpers.hooks")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -171,34 +172,79 @@ test("a non-directory is the provider's object, forwarded",
         end)
     end)
 
--- Not reachable from userspace, and not for want of privilege.
---
 -- Suppression is keyed on the staged name in a per-superblock list of
 -- what *this* mount has in flight (`stratafs_is_staging`), so a
 -- hand-made `.stratafs-stage-` file is not suppressed and proves
--- nothing. Catching a real one needs the copy-up to be in flight while
--- something else looks, and neither path allows it:
---
---   * a regular file stages into an anonymous O_TMPFILE inode and has
---     no directory entry at all until it is published, so there is
---     never a name to be hidden;
---   * a directory or symlink does take a `.stratafs-stage-` name, but
---     that path is create, set attributes, copy xattrs, rename — it
---     holds the name for microseconds.
---
--- Tried and rejected: a 96 MB source through the merged view with the
--- write in flight (`vm:syscall_async`) and a 1 ms poll of the create
--- stratum for 10 s. Nothing ever appears, because that is the
--- anonymous path.
---
--- Covering this wants a kernel-side hook that holds a copy-up open —
--- fault injection or a debugfs delay — not a bigger VM.
+-- nothing: only a real copy-up, held mid-flight, carries a genuinely
+-- suppressed name. A symlink copy-up takes the named staging path (the
+-- anonymous tmpfile path has no name to hide), and the copy-up-publish
+-- rendezvous (§4.A.2) holds it with the staged name in place.
 test("a staging name is invisible through the mount that owns it",
-    { spec = "PKM *resolution.staged-names-hidden",
-      skip = "needs a copy-up held open mid-flight: regular files stage " ..
-             "anonymously (no name to hide) and the named path holds its " ..
-             "name for microseconds. Wants a kernel-side delay hook" },
-    function(t) t:fail("no way to hold a copy-up open") end)
+    { spec = "PKM *resolution.staged-names-hidden" }, function(t)
+        stratafs.with(vm, "staged-hidden", {
+            { name = "dest", flags = { "create" } },
+            { name = "src", flags = { "ro" }, entries = {
+                d = stratafs.DIR,
+                ["d/l"] = stratafs.symlink("target"),
+            } },
+        }, function(s)
+            t:assert(hooks.hold(vm, "copy-up-publish"), "the rendezvous arms")
+            -- In a worker: a held syscall on the agent's main
+            -- connection would wedge every later call.
+            local worker = vm:spawn_worker()
+            local ok, err = pcall(function()
+                -- chown on the link modifies the object itself, which
+                -- copies it up through the named staging path.
+                local pending = worker:syscall_async(sys.NR.fchownat, {
+                    args = { sys.AT_FDCWD, 0, 4242, 4243,
+                             sys.AT_SYMLINK_NOFOLLOW },
+                    bufs = { sys.cstr(s:join("d", "l")) },
+                    ptrs = { 1 },
+                })
+                t:assert(hooks.await_waiting(vm, "copy-up-publish"),
+                    "the copy-up reaches the moment before publication")
+
+                -- A direct reader of the create stratum sees the staged
+                -- name — the suppression is local to the owning mount.
+                local staged
+                for _, e in ipairs(vm:listdir(s:in_stratum("dest", "d"))) do
+                    if e.name:match("^%.stratafs%-stage%-") then staged = e.name end
+                end
+                t:assert(staged, "the create stratum holds a staged name")
+
+                -- Through the mount: enumeration drops it, and looking
+                -- it up by name finds nothing.
+                for _, e in ipairs(vm:listdir(s:join("d"))) do
+                    t:assert(not e.name:match("^%.stratafs%-stage%-"),
+                        "enumeration through the mount never shows it")
+                end
+                local target, errno = sys.readlink(vm, s:join("d", staged))
+                t:assert(not target, "resolution through the mount finds nothing")
+                t:assert_eq(errno, sys.E.NOENT,
+                    "reporting ENOENT: " .. sys.errname(errno))
+
+                -- That lookup carried the staging prefix, which triggers
+                -- a recovery scan — and recovery must leave a live
+                -- mount's stage alone (§4.3.1).
+                local still = false
+                for _, e in ipairs(vm:listdir(s:in_stratum("dest", "d"))) do
+                    if e.name == staged then still = true end
+                end
+                t:assert(still, "the live stage survives the recovery scan")
+
+                t:assert(hooks.clear(vm, "copy-up-publish"), "released")
+                local r = pending:await()
+                t:assert_eq(r.ret, 0, "the held chown then completes: " ..
+                    sys.errname(r.errno))
+                local copy = sys.stat(vm, s:in_stratum("dest", "d/l"),
+                    { follow = false })
+                t:assert(copy and copy.is_symlink, "the copy published")
+            end)
+            hooks.clear(vm, "copy-up-publish")
+            worker:kill(); worker:join()
+            if not ok then error(err, 0) end
+        end)
+    end)
 
 test("re-entering a superblock during resolution is ELOOP",
     { spec = "PKM *resolution.reentrant-superblock-eloop" }, function(t)
