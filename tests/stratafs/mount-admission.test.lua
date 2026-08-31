@@ -379,9 +379,10 @@ test("a loop through another stratafs mount is refused",
 
 test("mount cookie exhaustion",
     { spec = "PKM *mount.admit.cookie-exhaustion-eagain",
-      skip = "needs sixteen consecutive collisions of a random u64 in the " ..
-             "live-mount table; not provokable from userspace, and not " ..
-             "observable without a way to steer get_random_u64" },
+      covered_by = "kunit:stratafs_kunit_live_mount_cookie",
+      skip = "sixteen consecutive collisions of a random u64. The registry " ..
+             "it exercises already has a KUnit case, which is where the " ..
+             "RNG can be steered" },
     function(t) t:fail("unreachable") end)
 
 test("two strata are the same when they resolve to one directory",

@@ -253,17 +253,33 @@ end
 -- others); a synthesising class can, and makes the filesystem usable
 -- while leaving its objects without stored descriptors.
 M.NR = { fsopen = 430, fsconfig = 431, fsmount = 432, move_mount = 429 }
+M.FSCONFIG_SET_FLAG = 0
+M.FSCONFIG_SET_STRING = 1
 M.FSCONFIG_CMD_CREATE = 6
 M.MOVE_MOUNT_F_EMPTY_PATH = 4
 
 --- Create a filesystem, give it a policy class, and attach it at `at`.
 ---
+--- `opts.flags` is a list of flag-shaped mount options (`usrquota`),
+--- applied before the filesystem is created.
+---
 --- Returns `true`, or `nil, stage, errno`.
-function M.new_mount(vm, fstype, at, policy)
+function M.new_mount(vm, fstype, at, policy, opts)
     local fs = vm:syscall(M.NR.fsopen, {
         args = { 0, 0 }, bufs = { sys.cstr(fstype) }, ptrs = { 0 },
     })
     if fs.ret < 0 then return nil, "fsopen", fs.errno end
+
+    for _, flag in ipairs((opts or {}).flags or {}) do
+        local r = vm:syscall(M.NR.fsconfig, {
+            args = { fs.ret, M.FSCONFIG_SET_FLAG, 0, 0, 0 },
+            bufs = { sys.cstr(flag) }, ptrs = { 2 },
+        })
+        if r.ret ~= 0 then
+            sys.close(vm, fs.ret)
+            return nil, "fsconfig " .. flag, r.errno
+        end
+    end
 
     local created = vm:syscall(M.NR.fsconfig, fs.ret, M.FSCONFIG_CMD_CREATE,
         0, 0, 0)

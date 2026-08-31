@@ -605,9 +605,3 @@ test("querying a lease returns the stronger of the two files'",
         end)
     end)
 
-test("a copy is accounted to the owner it preserved",
-    { spec = "PKM *durability.copy-up-accounted-to-preserved-owner",
-      skip = "quota accounting keys on the POSIX owner, and tmpfs in this " ..
-             "VM has no quota support to observe the charge through. The " ..
-             "ownership half is covered by durability.copy-up-preserves-posix-owner" },
-    function(t) t:fail("no quota accounting available") end)

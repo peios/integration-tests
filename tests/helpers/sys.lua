@@ -54,7 +54,13 @@ M.NR = {
     fgetxattr  = 193,
     listxattr  = 194,
     flistxattr = 195,
+    quotactl_fd = 443,
 }
+
+-- quotactl commands. QCMD packs the command and the quota type into
+-- one argument: (cmd << 8) | type.
+M.Q_GETQUOTA, M.USRQUOTA, M.GRPQUOTA = 0x800007, 0, 1
+function M.QCMD(cmd, qtype) return (cmd << 8) | (qtype & 0xFF) end
 
 -- mmap(2) protections and flags.
 M.PROT = { NONE = 0, READ = 1, WRITE = 2 }
@@ -335,6 +341,29 @@ function M.fgetxattr(vm, fd, name, size)
     if r.ret < 0 then return nil, r.errno end
     if size == 0 then return r.ret end
     return r.out_bufs[2]:sub(1, r.ret)
+end
+
+-- struct if_dqblk, 72 bytes. 1-based offsets.
+local DQBLK = { curspace = 17, curinodes = 41 }
+
+--- quotactl_fd(2) Q_GETQUOTA against an open fd on the filesystem.
+---
+--- `quotactl` names a block device, which a tmpfs does not have;
+--- `quotactl_fd` takes a descriptor instead, which is the only form
+--- that works for the filesystems reachable here.
+---
+--- Returns `{curspace, curinodes}`, or `nil, errno`.
+function M.getquota(vm, fd, id, qtype)
+    local r = vm:syscall(M.NR.quotactl_fd, {
+        args = { fd, M.QCMD(M.Q_GETQUOTA, qtype or M.USRQUOTA), id, 0 },
+        bufs = { string.rep("\0", 72) },
+        ptrs = { 3 },
+    })
+    if r.ret ~= 0 then return nil, r.errno end
+    return {
+        curspace = string.unpack("<I8", r.out_bufs[1], DQBLK.curspace),
+        curinodes = string.unpack("<I8", r.out_bufs[1], DQBLK.curinodes),
+    }
 end
 
 --- listxattr(2). Returns the names as a list, or `nil, errno`.

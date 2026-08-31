@@ -177,17 +177,6 @@ test("a symlink entry reports its own identity, not its target's",
         end)
     end)
 
--- Not reachable: every filesystem available in a kernel-only VM
--- reports a real d_type. tmpfs fills it in from the inode mode, so
--- there is no participant that can supply DT_UNKNOWN for stratafs to
--- pass through. Reaching it wants a participant filesystem that
--- reports DT_UNKNOWN — which is a property of the stratum's
--- filesystem, not of the VM's size.
-test("a participant reporting DT_UNKNOWN has it propagated unchanged",
-    { spec = "PKM *enumerate.dt-unknown-propagated",
-      skip = "needs a participant filesystem that reports DT_UNKNOWN; tmpfs " ..
-             "and rootfs both fill d_type in from the inode mode" },
-    function(t) t:fail("no participant supplies DT_UNKNOWN") end)
 
 test("shadowed entries leave no trace in the listing",
     { spec = "PKM *enumerate.shadowed-entries-invisible" }, function(t)

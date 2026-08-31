@@ -165,9 +165,11 @@ test("a stratum path is not absolute",
 
 test("a stratum path is empty after unescaping",
     { spec = "PKM *mount.parse.empty-after-unescape",
-      skip = "defensive branch with no reachable input: the absolute-path " ..
-             "test runs first and guarantees at least one byte, so every " ..
-             "value that would unescape to nothing is refused before it" },
+      covered_by = "unreachable",
+      skip = "a defensive branch with no reachable input: the " ..
+             "absolute-path test runs first and guarantees at least one " ..
+             "byte, so nothing can unescape to nothing. Dead from every " ..
+             "interface, not just this one" },
     function(t)
         t:fail("unreachable")
     end)

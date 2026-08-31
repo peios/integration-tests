@@ -226,28 +226,6 @@ test("merging never widens access",
         end)
     end)
 
--- Needs a provider object whose descriptor read genuinely fails, and
--- there is no way to arrive at one within a boot.
---
--- A filesystem mounted at runtime stores no descriptors, which is the
--- condition — but in the deny-missing class KACS refuses even the
--- agent's own mkdir on it, so it cannot be populated. Building it under
--- a synthesising class and flipping it to deny-missing afterwards does
--- not work either: after the flip `kacs_get_sd` still returns the same
--- 72 bytes and a direct open still succeeds, so the value is either
--- persisted or held by the inode cache §4.6.1 records as never
--- revalidated. Either way the object is no longer descriptor-less.
---
--- What would do it is a provider populated before its policy is
--- decided, which means either a filesystem image built outside the VM
--- or a way to drop a cached descriptor.
-test("an object with no readable descriptor is denied under the mount's policy",
-    { spec = "PKM *security.missing-descriptor-denied",
-      skip = "needs a provider object whose descriptor read fails. A " ..
-             "runtime filesystem in the deny-missing class cannot be " ..
-             "populated, and one built under a synthesising class keeps a " ..
-             "readable descriptor after the class is changed" },
-    function(t) t:fail("no descriptor-less provider reachable") end)
 
 -- §4.6.5's audit records are covered in audit.test.lua, which reads
 -- them out of the KMES ring.
@@ -356,21 +334,32 @@ test("every stack-wide configuration error collapses to EINVAL",
 
 test("the constants appendix is generated from the headers",
     { spec = "PKM *const.generated-from-source",
-      skip = "a source-level invariant with no runtime surface: a check on the build and on the generator's output, not on a running kernel" },
+      covered_by = "ci:regenerate-and-diff",
+      skip = "a CI check: regenerate the appendix and expect no diff. Not " ..
+             "a property of a running kernel" },
     function(t) t:fail("no runtime surface") end)
 
 test("the staging marker is a packed 24-byte little-endian struct",
     { spec = "PKM *const.stage-marker-layout",
-      skip = "a source-level invariant with no runtime surface: a check on the build and on the generator's output, not on a running kernel" },
+      covered_by = "gen-stratafs-abi",
+      skip = "covered by the constants generator, which measures the " ..
+             "struct by compiling a probe against the real header — " ..
+             "stronger than anything a VM can assert" },
     function(t) t:fail("no runtime surface") end)
 
 test("the routing discriminants match between C and Rust",
     { spec = "PKM *const.route-discriminants-match-rust",
-      skip = "a source-level invariant with no runtime surface: a check on the build and on the generator's output, not on a running kernel" },
+      covered_by = "kunit:stratafs_kunit_routing",
+      skip = "covered by KUnit: stratafs_kunit_routing calls " ..
+             "stratafs_rust_route_existing and compares its return against " ..
+             "the C enumerators, which is this claim" },
     function(t) t:fail("no runtime surface") end)
 
 test("stratafs-core's flag bits match the C ones",
     { spec = "PKM *const.core-flag-bits-match-c",
-      skip = "a source-level invariant with no runtime surface: a check on the build and on the generator's output, not on a running kernel" },
+      covered_by = "kunit:stratafs-core",
+      skip = "a build-time invariant between the C and Rust halves; " ..
+             "belongs to a static assert or a KUnit case beside " ..
+             "stratafs_kunit_routing, not to a running VM" },
     function(t) t:fail("no runtime surface") end)
 

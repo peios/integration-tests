@@ -481,9 +481,3 @@ test("any extended-attribute failure aborts the copy-up with EIO",
         end)
     end)
 
-test("a copy is accounted to the owner it preserved",
-    { spec = "PKM *copy-up.accounted-to-preserved-owner",
-      skip = "quota accounting keys on the POSIX owner, and tmpfs in this " ..
-             "VM has no quota support to observe it through. The ownership " ..
-             "half is covered by copy-up.posix-ownership-preserved" },
-    function(t) t:fail("no quota accounting available") end)
