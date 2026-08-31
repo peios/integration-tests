@@ -28,7 +28,16 @@ M.NR = {
     read       = 0,
     flock      = 73,
     fsync      = 74,
+    unshare    = 272,
+    mkdir      = 83,
+    getuid     = 102,
+    fchmodat   = 268,
 }
+
+-- Namespace flags, for the cases about what a mounter must be
+-- entitled to.
+M.CLONE_NEWNS   = 0x00020000
+M.CLONE_NEWUSER = 0x10000000
 
 -- flock(2) operations.
 M.LOCK_SH, M.LOCK_EX, M.LOCK_UN, M.LOCK_NB = 1, 2, 8, 4
@@ -172,6 +181,15 @@ function M.symlink(vm, target, linkpath)
     })
 end
 
+--- chmod(2), as fchmodat(AT_FDCWD).
+function M.chmod(vm, path, mode)
+    return vm:syscall(M.NR.fchmodat, {
+        args = { M.AT_FDCWD, 0, mode, 0 },
+        bufs = { M.cstr(path) },
+        ptrs = { 1 },
+    })
+end
+
 --- chown(2), as fchownat(AT_FDCWD). `-1` leaves a field alone.
 function M.chown(vm, path, uid, gid)
     return vm:syscall(M.NR.fchownat, {
@@ -249,6 +267,36 @@ end
 
 --- fsync(2).
 function M.fsync(vm, fd) return vm:syscall(M.NR.fsync, fd) end
+
+--- mkdir(2), without asserting.
+function M.mkdir(vm, path, mode)
+    return vm:syscall(M.NR.mkdir, {
+        args = { 0, mode or tonumber("755", 8) },
+        bufs = { M.cstr(path) },
+        ptrs = { 0 },
+    })
+end
+
+--- A worker process in a new user namespace and mount namespace.
+---
+--- Everything the agent does otherwise runs as root in the initial
+--- namespaces, which is the one thing §4.2.3's entitlement cases need
+--- not to be. The worker is a separate process, so its namespaces and
+--- its mounts are its own and nothing here leaks back.
+---
+--- With no `uid_map` written the caller's uid maps to the overflow uid,
+--- which is what makes it unprivileged outside the new namespace while
+--- holding a full capability set inside it. Returns `nil, errno` where
+--- the unshare is refused.
+---
+--- Every `M.*` call in this module takes the worker in place of the vm:
+--- both expose the same `syscall` method.
+function M.unprivileged_worker(vm)
+    local worker = vm:spawn_worker()
+    local r = worker:syscall(M.NR.unshare, M.CLONE_NEWUSER | M.CLONE_NEWNS)
+    if r.ret ~= 0 then return nil, r.errno end
+    return worker
+end
 
 --- Bind-mount `from` at `to`, read-only.
 ---
