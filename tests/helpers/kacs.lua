@@ -33,6 +33,8 @@ M.SYS = {
     OPEN = 1020,
     GET_SD = 1021,
     SET_SD = 1022,
+    GET_MOUNT_POLICY = 1026,
+    SET_MOUNT_POLICY = 1027,
 }
 
 M.IOC = {
@@ -54,6 +56,12 @@ M.DISPOSITION = {
     OPEN_IF = 3, OVERWRITE = 4, OVERWRITE_IF = 5,
 }
 M.CREATE_OPT = { DIRECTORY = 0x0001, DELETE_ON_CLOSE = 0x0002 }
+
+-- FACS mount policy classes.
+M.MOUNT_POLICY = {
+    UNMANAGED = 1, DENY_MISSING = 2,
+    SYNTHESIZE_EPHEMERAL = 3, SYNTHESIZE_PERSISTENT = 4,
+}
 M.TOKEN_TYPE_PRIMARY, M.TOKEN_TYPE_IMPERSONATION = 1, 2
 
 -- security_information bits for get_sd / set_sd.
@@ -209,6 +217,27 @@ function M.open(who, path, how)
     })
     if r.ret < 0 then return nil, r.errno end
     return r.ret, string.unpack("<I4", r.out_bufs[3])
+end
+
+--- kacs_get_mount_policy(2) against an open fd on the mount.
+--- Returns the policy class, or `nil, errno`.
+function M.get_mount_policy(who, fd)
+    local r = who:syscall(M.SYS.GET_MOUNT_POLICY, {
+        args = { fd, 0, 32 },
+        bufs = { string.rep("\0", 32) },
+        ptrs = { 1 },
+    })
+    if r.ret ~= 0 then return nil, r.errno end
+    return string.unpack("<I4", r.out_bufs[1])
+end
+
+--- kacs_set_mount_policy(2). Returns the raw syscall result.
+function M.set_mount_policy(who, fd, policy)
+    return who:syscall(M.SYS.SET_MOUNT_POLICY, {
+        args = { fd, 0, 32 },
+        bufs = { string.pack("<I4I4I4I4I8I4I4", policy, 0, 0, 0, 0, 0, 0) },
+        ptrs = { 1 },
+    })
 end
 
 --- Run `fn` in a worker process bound by the descriptors it meets.
