@@ -52,6 +52,8 @@ M.NR = {
     linkat     = 265,
     unlinkat   = 263,
     renameat2  = 316,
+    futex      = 202,
+    sched_setaffinity = 203,
     fgetxattr  = 193,
     listxattr  = 194,
     flistxattr = 195,
@@ -112,7 +114,7 @@ M.E = {
     PERM = 1, NOENT = 2, IO = 5, BADF = 9, AGAIN = 11, NOMEM = 12,
     ACCES = 13,
     EXIST = 17, XDEV = 18, NODEV = 19, NOTDIR = 20, ISDIR = 21,
-    INVAL = 22, ROFS = 30, NOTEMPTY = 39, LOOP = 40, STALE = 116,
+    INVAL = 22, FAULT = 14, ROFS = 30, NOTEMPTY = 39, LOOP = 40, STALE = 116,
     NODATA = 61, RANGE = 34, OPNOTSUPP = 95, NOTTY = 25,
     NAMETOOLONG = 36, NOSPC = 28, MLINK = 31, TXTBSY = 26,
 }

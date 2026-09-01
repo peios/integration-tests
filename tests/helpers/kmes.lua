@@ -15,6 +15,23 @@ local M = {}
 
 M.SYS = { EMIT = 1090, ATTACH = 1091, EMIT_BATCH = 1092 }
 
+-- The privilege bits the three syscalls check (PKM §2.B): the emit
+-- gate, the attach gate, and the rate-limit exemption.
+M.PRIV = { AUDIT = 1 << 21, SECURITY = 1 << 8, TCB = 1 << 7 }
+
+-- The compiled-in configuration defaults (PKM §2.A). The kernel-only
+-- profile has no registry source, so these are always the live values
+-- — which is itself the §2.6 bootstrap contract.
+M.DEFAULT = {
+    BUFFER_CAPACITY = 4194304,
+    MAX_EVENT_SIZE = 65536,
+    MAX_NESTING_DEPTH = 32,
+    MAX_EMIT_RATE = 10000,
+}
+
+M.BATCH_MAX_ENTRIES = 256
+M.HEADER_BASE = 77
+
 --- Ask for the slot count rather than probing upwards: slots are
 --- indexed by logical CPU id, so counting until EINVAL stops at the
 --- first hole and misses every ring above it.
@@ -83,6 +100,139 @@ local function unpack_value(b, at)
     if tag == 0xd2 then return string.unpack(">i4", b, at + 1), at + 5 end
     if tag == 0xd3 then return string.unpack(">i8", b, at + 1), at + 9 end
     error(string.format("msgpack: unhandled tag 0x%02x at %d", tag, at))
+end
+
+--- A minimal msgpack map payload, for the many cases whose subject is
+--- not the payload: {"k": 1}.
+M.PAYLOAD = "\x81\xa1k\x01"
+
+--- A msgpack value nested exactly `depth` containers deep: arrays of
+--- one element ending in an empty array. Depth counts from 1 at the
+--- top-level value (§2.2), so nested(1) is the bare empty array.
+function M.nested(depth)
+    return string.rep("\x91", depth - 1) .. "\x90"
+end
+
+--- kmes_emit. `opts` overrides the declared lengths (for the cases
+--- about arithmetic on lengths) or replaces a pointer with a raw
+--- address (for the EFAULT cases).
+function M.emit(who, event_type, payload, opts)
+    opts = opts or {}
+    local args = { opts.type_ptr or 0, opts.type_len or #event_type,
+                   opts.payload_ptr or 0,
+                   opts.payload_len or (payload and #payload or 0) }
+    local bufs, ptrs = {}, {}
+    if not opts.type_ptr then
+        bufs[#bufs + 1] = event_type
+        ptrs[#ptrs + 1] = 0
+    end
+    if payload and #payload > 0 and not opts.payload_ptr then
+        bufs[#bufs + 1] = payload
+        ptrs[#ptrs + 1] = 2
+    end
+    return who:syscall(M.SYS.EMIT, { args = args, bufs = bufs, ptrs = ptrs })
+end
+
+--- kmes_emit_batch. `entries` is a list of `{type=, payload=}`, each
+--- optionally overriding `type_len`, `payload_len`, `pad0`, `pad1`.
+--- `opts.count` overrides the count argument;
+--- `opts.emitted_ptr` replaces the emitted_out pointer with a raw
+--- address. Returns the syscall result with `r.emitted` decoded.
+function M.emit_batch(who, entries, opts)
+    opts = opts or {}
+    local desc, bufs, nested = {}, { "", string.rep("\0", 4) }, {}
+    -- Identical strings share one buffer: the wire protocol indexes
+    -- buffers with a byte, and a 256-entry batch of distinct buffers
+    -- would overflow it.
+    local interned = {}
+    local function buf_index(s)
+        if not interned[s] then
+            bufs[#bufs + 1] = s
+            interned[s] = #bufs
+        end
+        return interned[s]
+    end
+    for i, e in ipairs(entries) do
+        local base = (i - 1) * 32
+        desc[i] = string.pack("<I8I2c6I8I4c4",
+            0, e.type_len or #e.type,
+            e.pad0 or string.rep("\0", 6),
+            0, e.payload_len or (e.payload and #e.payload or 0),
+            e.pad1 or string.rep("\0", 4))
+        nested[#nested + 1] = { parent = 1, child = buf_index(e.type),
+                                offset = base }
+        if e.payload and #e.payload > 0 then
+            nested[#nested + 1] = { parent = 1, child = buf_index(e.payload),
+                                    offset = base + 16 }
+        end
+    end
+    bufs[1] = table.concat(desc)
+    local args = { 0, opts.count or #entries, opts.emitted_ptr or 0 }
+    local ptrs = opts.emitted_ptr and { 0 } or { 0, 2 }
+    local r = who:syscall(M.SYS.EMIT_BATCH,
+        { args = args, bufs = bufs, ptrs = ptrs, nested = nested })
+    if r.out_bufs and r.out_bufs[2] then
+        r.emitted = string.unpack("<I4", r.out_bufs[2])
+    end
+    return r
+end
+
+--- Write guest memory: read() from a pipe deposits bytes at any
+--- address in the target process — there is no write_mem primitive.
+function M.poke(who, addr, bytes)
+    local p = who:syscall(sys.NR.pipe2, {
+        args = { 0, 0 }, bufs = { string.rep("\0", 8) }, ptrs = { 0 },
+    })
+    assert(p.ret == 0, "pipe2: " .. sys.errname(p.errno))
+    local rd, wr = string.unpack("<i4i4", p.out_bufs[1])
+    local w = who:syscall(sys.NR.write, {
+        args = { wr, 0, #bytes }, bufs = { bytes }, ptrs = { 1 },
+    })
+    assert(w.ret == #bytes, "pipe fill")
+    local r = who:syscall(sys.NR.read, rd, addr, #bytes)
+    sys.close(who, rd); sys.close(who, wr)
+    return r.ret == #bytes
+end
+
+--- Read guest memory through the same pipe trick — works in a
+--- worker, which has no read_mem.
+function M.peek(who, addr, len)
+    local p = who:syscall(sys.NR.pipe2, {
+        args = { 0, 0 }, bufs = { string.rep("\0", 8) }, ptrs = { 0 },
+    })
+    assert(p.ret == 0, "pipe2: " .. sys.errname(p.errno))
+    local rd, wr = string.unpack("<i4i4", p.out_bufs[1])
+    assert(who:syscall(sys.NR.write, wr, addr, len).ret == len, "pipe fill")
+    local r = who:syscall(sys.NR.read, {
+        args = { rd, 0, len }, bufs = { string.rep("\0", len) }, ptrs = { 1 },
+    })
+    sys.close(who, rd); sys.close(who, wr)
+    return r.out_bufs[1]
+end
+
+local IOC_ADJUST_PRIVS = 0x40184B01
+local ATTR_ENABLED = 0x2
+
+--- Enable or disable one privilege on the caller's own token, in
+--- place. The §2.4 gates require "held, enabled" — this is how a test
+--- makes the held-but-disabled caller.
+function M.adjust_priv(who, kacs_helper, bit_value, enable)
+    local luid = math.floor(math.log(bit_value, 2) + 0.5)
+    local token = who:syscall(kacs_helper.SYS.OPEN_SELF_TOKEN, 0,
+        kacs_helper.TOKEN_ALL_ACCESS)
+    if token.ret < 0 then return nil, token.errno end
+    local r = who:syscall(sys.NR.ioctl, {
+        args = { token.ret, IOC_ADJUST_PRIVS, 0 },
+        bufs = {
+            string.pack("<I4I4I8I8", 1, 0, 0, 0),
+            string.pack("<I4I4", luid, enable and ATTR_ENABLED or 0),
+        },
+        ptrs = { 2 },
+        nested = { { parent = 1, child = 2, offset = 8 } },
+    })
+    sys.close(who, token.ret)
+    if r.ret ~= 0 then return nil, r.errno end
+    return true
 end
 
 --- Attach to a CPU's ring and map it.
@@ -155,6 +305,8 @@ function M.drain(ring)
             process_guid = bytes:sub(at + E.process_guid - 1,
                 at + E.process_guid - 2 + GUID_SIZE),
             type = bytes:sub(at + HEADER_BASE, at + HEADER_BASE + type_len - 1),
+            header_size = header_size,
+            raw = bytes:sub(at, at + size - 1),
         }
         -- header_size locates the payload; a future revision may grow
         -- the header, so this must not count from the type string's end.

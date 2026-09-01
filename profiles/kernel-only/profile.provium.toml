@@ -25,6 +25,6 @@ root = "{out}/root"
 # the run until it times out.
 #
 # stratafs.test_hooks=1 registers the stratafs test rendezvous/fail
-# points (PKM §4.A.2) in debugfs. Test profiles only; production images
-# never pass it.
+# points (PKM §4.A.2) on securityfs. Test profiles only; production
+# images never pass it.
 cmdline = "console=hvc0 quiet panic=1 stratafs.test_hooks=1"
