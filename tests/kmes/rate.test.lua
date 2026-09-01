@@ -174,15 +174,6 @@ test("a failing batch charges only what it emitted",
         end, { privs = kmes.PRIV.TCB })
     end)
 
-test("a rate change reconfigures every live bucket at once",
-    { spec = "PKM *emit.rate.reconfigure-applies-immediately",
-      covered_by = "kunit:pkm_kunit_kmes",
-      skip = "changing MaxEmitRatePerProcess needs a registry source; " ..
-             "the live-clamp runs under " ..
-             "pkm_kunit_kmes_runtime_rate_change_clamps_live_bucket" },
-    function(t)
-    end)
-
 test("the exemption and the refund arithmetic under refill",
     { spec = "PKM *emit.rate.reserve-then-refund",
       covered_by = "kunit:pkm_kunit_kmes",

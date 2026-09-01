@@ -185,15 +185,6 @@ test("every traced reason is from the documented vocabulary",
         t:assert(seen >= 3, "several kmes: events were decoded: " .. seen)
     end)
 
-test("a capacity swap's lifecycle markers",
-    { spec = "PKM *abi.trace.swap-reasons",
-      covered_by = "kunit:pkm_kunit_kmes",
-      skip = "a swap needs a BufferCapacity change through a registry " ..
-             "source, which the kernel-only profile does not have yet; " ..
-             "the swap paths themselves run under " ..
-             "pkm_kunit_kmes_swap_* in the KUnit suite" }, function(t)
-    end)
-
 test("the tail resynchronisation guard",
     { spec = "PKM *ring.tail-resync-guard",
       covered_by = "unreachable",

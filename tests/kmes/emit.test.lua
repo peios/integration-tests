@@ -226,21 +226,3 @@ test("validation stops at the first failing check",
         t:assert_eq(r.errno, sys.E.FAULT,
             "the copy before UTF-8: " .. sys.errname(r.errno))
     end)
-
-test("the capacity/2 stage of validation, re-checked at the target ring",
-    { spec = "PKM *emit.half-capacity-enospc",
-      skip = "unreachable at the compiled-in defaults — MaxEventSize " ..
-             "(64 KiB) rejects first, 2 MiB below the structural bound; " ..
-             "needs BufferCapacity at its 64 KiB minimum via a registry " ..
-             "source, which the kernel-only profile does not have yet" },
-    function(t)
-    end)
-
-test("half the ring capacity bounds an event regardless of MaxEventSize",
-    { spec = "PKM *event.limits.half-capacity",
-      skip = "with the compiled-in defaults MaxEventSize (64 KiB) is far " ..
-             "below capacity/2 (2 MiB), so the syscall path cannot reach " ..
-             "the structural bound; it needs BufferCapacity configured to " ..
-             "its 64 KiB minimum through a registry source, which the " ..
-             "kernel-only profile does not have yet" }, function(t)
-    end)

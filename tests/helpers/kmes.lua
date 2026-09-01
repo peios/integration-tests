@@ -91,6 +91,20 @@ local function unpack_value(b, at)
         local n = string.unpack(">I2", b, at + 1)
         return b:sub(at + 3, at + 2 + n), at + 3 + n
     end
+    if tag == 0xc4 then                                          -- bin8
+        local n = b:byte(at + 1)
+        return b:sub(at + 2, at + 1 + n), at + 2 + n
+    end
+    if tag == 0xc5 then                                          -- bin16
+        local n = string.unpack(">I2", b, at + 1)
+        return b:sub(at + 3, at + 2 + n), at + 3 + n
+    end
+    if tag >= 0x90 and tag <= 0x9f then                          -- fixarray
+        local n, out = tag - 0x90, {}
+        at = at + 1
+        for i = 1, n do out[i], at = unpack_value(b, at) end
+        return out, at
+    end
     if tag == 0xcc then return string.unpack(">I1", b, at + 1), at + 2 end
     if tag == 0xcd then return string.unpack(">I2", b, at + 1), at + 3 end
     if tag == 0xce then return string.unpack(">I4", b, at + 1), at + 5 end
