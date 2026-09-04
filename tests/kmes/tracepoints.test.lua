@@ -184,12 +184,3 @@ test("every traced reason is from the documented vocabulary",
         end
         t:assert(seen >= 3, "several kmes: events were decoded: " .. seen)
     end)
-
-test("the tail resynchronisation guard",
-    { spec = "PKM *ring.tail-resync-guard",
-      covered_by = "unreachable",
-      skip = "fires only on a corrupt size field read back at the tail, " ..
-             "and consumers cannot write the data region (the mmap " ..
-             "clears the write upgrade), so no guest can plant the " ..
-             "corruption; NOTE: no KUnit case covers it either" }, function(t)
-    end)

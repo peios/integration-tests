@@ -53,6 +53,7 @@ M.NR = {
     unlinkat   = 263,
     renameat2  = 316,
     futex      = 202,
+    poll       = 7,
     sched_setaffinity = 203,
     fgetxattr  = 193,
     listxattr  = 194,

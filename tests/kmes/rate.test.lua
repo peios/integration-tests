@@ -173,14 +173,3 @@ test("a failing batch charges only what it emitted",
                 "a full valid batch still fits: the reservations came back")
         end, { privs = kmes.PRIV.TCB })
     end)
-
-test("the exemption and the refund arithmetic under refill",
-    { spec = "PKM *emit.rate.reserve-then-refund",
-      covered_by = "kunit:pkm_kunit_kmes",
-      skip = "the reserve-refund-clamp arithmetic is not distinguishable " ..
-             "from refill at syscall granularity: the compiled-in rate " ..
-             "refills 10000 tokens a second, faster than failing emits can " ..
-             "be issued to measure the difference; needs the rate " ..
-             "configured low through a registry source, which the " ..
-             "kernel-only profile does not have yet" }, function(t)
-    end)

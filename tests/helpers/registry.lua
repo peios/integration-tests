@@ -381,22 +381,25 @@ function Source:step()
     return opcode
 end
 
---- Pump until the device stays quiet for `quiet_ms` (default 150 —
+--- Pump until the device stays quiet for `quiet_ms` (default 100 —
 --- the watch-refresh workqueue fires within a few ms of a commit).
---- Returns the number of requests served.
+--- Idle waiting is one poll() with that timeout rather than a sleep
+--- loop, so a request is served the moment it arrives and a settled
+--- source costs exactly one timed-out syscall. Returns the number of
+--- requests served.
 function Source:pump(quiet_ms)
-    quiet_ms = quiet_ms or 150
-    local served, idle = 0, 0
-    while idle * 5 < quiet_ms do
-        if self:step() then
-            served = served + 1
-            idle = 0
-        else
-            idle = idle + 1
-            sys.nanosleep(self.vm, 0, 5 * 1000 * 1000)
-        end
+    quiet_ms = quiet_ms or 100
+    local served = 0
+    while true do
+        local p = self.worker:syscall(sys.NR.poll, {
+            args = { 0, 1, quiet_ms },
+            bufs = { string.pack("<i4i2i2", self.fd, 1, 0) }, -- POLLIN
+            ptrs = { 0 },
+        })
+        if p.ret == 0 then return served end
+        assert(p.ret > 0, "source poll: " .. sys.errname(p.errno))
+        while self:step() do served = served + 1 end
     end
-    return served
 end
 
 --- Launch an operation that will bounce through this source (as a

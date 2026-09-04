@@ -139,7 +139,8 @@ test("bulk losses bypass the drop counter",
       covered_by = "kunit:pkm_kunit_kmes",
       skip = "the drop counter is readable only through the KUnit " ..
              "interface; the shrink half runs under " ..
-             "pkm_kunit_kmes_swap_downsize_preserves_newest_suffix — " ..
-             "NOTE: the tail-resync half has no coverage anywhere, like " ..
-             "the guard itself" }, function(t)
+             "pkm_kunit_kmes_swap_downsize_preserves_newest_suffix; the " ..
+             "tail-resync half is observed only through PEI-659's misfire " ..
+             "(adversarial.test.lua) — no legitimate trigger exists" },
+    function(t)
     end)
