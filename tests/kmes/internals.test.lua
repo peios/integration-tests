@@ -265,11 +265,3 @@ test("enumeration skips holes in a sparse possible-CPU mask",
              "-smp cannot produce one here, so every mask this profile " ..
              "sees is dense" }, function(t)
     end)
-
-test("CPUs possible but offline at initialisation have rings",
-    { spec = "PKM *attach.offline-possible-cpus-attachable",
-      skip = "needs a guest booted with maxcpus= below its possible set; " ..
-             "the profile's cmdline is fixed, so the boot-time offline " ..
-             "state cannot be arranged (the taken-offline-later case is " ..
-             "failure-modes.test.lua's)" }, function(t)
-    end)
