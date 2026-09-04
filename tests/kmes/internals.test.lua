@@ -236,14 +236,6 @@ kunit_stub("identity stamps are null without task context",
     "pkm_kunit_kmes_identity_stamps_match_kacs_state",
     "interrupt-context emission cannot be provoked from a guest")
 
-test("preemption is disabled across the kernel emission path",
-    { spec = "PKM *kernel-emit.preemption-disabled-throughout",
-      covered_by = "unreachable",
-      skip = "a scheduling property with no userspace-visible witness; " ..
-             "its consequences (single writer, stable cpu stamp) are " ..
-             "tested, the mechanism is not" }, function(t)
-    end)
-
 test("pre-initialisation kernel emission is a silent no-op",
     { spec = "PKM *kernel-emit.pre-init-silent",
       covered_by = "unreachable",
@@ -259,41 +251,12 @@ test("a ring/CPU identity mismatch discards the event",
              "produce — NOTE: no KUnit case covers it either" }, function(t)
     end)
 
-test("the kernel batch has no entry-count ceiling",
-    { spec = "PKM *kernel-emit.batch-unbounded",
-      covered_by = "unreachable",
-      skip = "the absence of a bound has no boundary to probe, and only " ..
-             "kernel callers reach the API" }, function(t)
-    end)
-
-test("the write path takes no locks and no cross-CPU atomics",
-    { spec = "PKM *ring.lock-free-single-writer",
-      covered_by = "unreachable",
-      skip = "an implementation property of kernel code; its observable " ..
-             "consequence — per-CPU rings that never interfere — is " ..
-             "tested in wire.test.lua" }, function(t)
-    end)
-
 test("the wake is skipped before any consumer attaches",
     { spec = "PKM *ring.wake-skipped-before-attach",
       covered_by = "unreachable",
       skip = "the private counter that still advances is not visible " ..
              "until a consumer attaches, at which point the window is " ..
              "over — NOTE: no KUnit case covers it either" }, function(t)
-    end)
-
-test("a batch's staging is held simultaneously",
-    { spec = "PKM *batch.staging-held-simultaneously",
-      covered_by = "unreachable",
-      skip = "transient kernel allocation is not measurable from a guest" },
-    function(t)
-    end)
-
-test("a faulting final emitted_out store reports EFAULT after emitting",
-    { spec = "PKM *batch.emitted-out-fault-after-emit",
-      covered_by = "unreachable",
-      skip = "needs the pointer to become unwritable between the zeroing " ..
-             "store and the final one, inside a single syscall" }, function(t)
     end)
 
 test("enumeration skips holes in a sparse possible-CPU mask",

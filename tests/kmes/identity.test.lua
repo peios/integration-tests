@@ -309,11 +309,3 @@ test("identity is null only without task context",
              "pkm_kunit_kmes_identity_stamps_match_kacs_state drives the " ..
              "accessors directly" }, function(t)
     end)
-
-test("KMES is the sole emission path",
-    { spec = "PKM *event.sole-emission-path",
-      covered_by = "unreachable",
-      skip = "a universal negative — that no other emission path exists " ..
-             "is an architectural property with no test-shaped witness" },
-    function(t)
-    end)

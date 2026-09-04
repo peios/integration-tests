@@ -126,14 +126,6 @@ test("suspend keeps the ring and the sequence, jumping only the clock",
              "has no wakeup path for a suspended VM" }, function(t)
     end)
 
-test("steady-state ring memory is num_cpus x BufferCapacity",
-    { spec = "PKM *failure.steady-state-memory",
-      covered_by = "unreachable",
-      skip = "kernel allocations are not measurable from inside the " ..
-             "guest; the formula is a design bound with no syscall-shaped " ..
-             "witness" }, function(t)
-    end)
-
 test("bulk losses bypass the drop counter",
     { spec = "PKM *failure.bulk-loss-outside-drop-counter",
       covered_by = "kunit:pkm_kunit_kmes",
