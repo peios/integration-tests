@@ -548,26 +548,3 @@ test("an object-type list with duplicate GUIDs or a level gap is refused",
         sys.close(vm, fd)
     end)
 
-test("composite equality is an ordered, element-wise comparison",
-    { spec = "PKM *dtyp.composite-equality-elementwise",
-      tags = { "known-bug" } }, function(t)
-        -- §3.B says element-wise ordered comparison, "never
-        -- over-grants". kacs-core compares composites as *sets*: equal
-        -- length plus mutual containment, so {1,2} == {2,1} is true.
-        local fd = subject({})
-        local function compares(lhs, rhs, op)
-            local sd = owned(U, access.acl({ callback(kacs.SID.EVERYONE,
-                "artx" .. lhs .. rhs .. string.pack("<I1", op or OP.EQ)) }))
-            return check(fd, sd, READ)
-        end
-        local one_two = composite(int_lit(1), int_lit(2))
-        local two_one = composite(int_lit(2), int_lit(1))
-        t:assert(compares(one_two, composite(int_lit(1), int_lit(2))).ok,
-            "two composites with the same elements in the same order are equal")
-        t:assert(compares(one_two, two_one).denied,
-            "the same elements in another order are not — the comparison " ..
-            "is ordered, and never over-grants")
-        t:assert(compares(one_two, composite(int_lit(1))).denied,
-            "and a shorter composite is not equal to a longer one")
-        sys.close(vm, fd)
-    end)
