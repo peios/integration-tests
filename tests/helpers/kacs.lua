@@ -252,6 +252,34 @@ end
 -- UNMANAGED cannot be set (the resolver assigns it, to procfs among
 -- others); a synthesising class can, and makes the filesystem usable
 -- while leaving its objects without stored descriptors.
+M.AT_EMPTY_PATH = 0x1000
+
+--- kacs_set_sd(2) against a descriptor rather than a pathname.
+---
+--- The descriptor form is `dirfd = fd`, an empty pathname and
+--- `AT_EMPTY_PATH`; §3.9.6 gives it two different treatments depending on
+--- whether the descriptor is `O_PATH` (a live AccessCheck, where
+--- SeRestorePrivilege can fire) or an ordinary open file (the cached
+--- mask, where it cannot). Returns the raw syscall result.
+function M.set_sd_fd(who, fd, descriptor, info, flags)
+    return who:syscall(M.SYS.SET_SD, {
+        args = { fd, 0, info or M.SI.DACL, 0, #descriptor, flags or M.AT_EMPTY_PATH },
+        bufs = { sys.cstr(""), descriptor },
+        ptrs = { 1, 3 },
+    })
+end
+
+--- kacs_get_sd(2) against a descriptor. Returns the bytes, or `nil, errno`.
+function M.get_sd_fd(who, fd, info, flags)
+    local r = who:syscall(M.SYS.GET_SD, {
+        args = { fd, 0, info or M.SI.DACL, 0, 4096, flags or M.AT_EMPTY_PATH },
+        bufs = { sys.cstr(""), string.rep("\0", 4096) },
+        ptrs = { 1, 3 },
+    })
+    if r.ret < 0 then return nil, r.errno end
+    return r.out_bufs[2]:sub(1, r.ret)
+end
+
 M.NR = { fsopen = 430, fsconfig = 431, fsmount = 432, move_mount = 429 }
 M.FSCONFIG_SET_FLAG = 0
 M.FSCONFIG_SET_STRING = 1
@@ -358,6 +386,65 @@ function M.as_dacl_bound(t, vm, fn, opts)
     worker:kill()
     worker:join()
     if not ok then error(err, 0) end
+end
+
+--- kacs_set_mount_policy(2) in full — the form §3.9.5's template and
+--- generation cases need.
+---
+--- `M.set_mount_policy` above sends a zero-filled `kacs_mount_policy_args`;
+--- this one fills in the rest of the struct: `opts.template` is a
+--- self-relative descriptor pointed at by `template_sd_ptr`,
+--- `opts.template_len` overrides the length field (so a case can send a
+--- length that disagrees with the pointer), and `opts.flags`,
+--- `opts.generation`, `opts.pad0`, `opts.pad1` and `opts.argsize` drive
+--- the input-validation cases. `opts.template_ptr_only = true` sends a
+--- non-null pointer with a zero length.
+---
+--- Layout (uapi/pkm/file.h): policy u32, flags u32, generation u32,
+--- __pad0 u32, template_sd_ptr u64, template_sd_len u32, __pad1 u32.
+function M.set_mount_policy_ex(who, fd, policy, opts)
+    opts = opts or {}
+    local template = opts.template
+    local len = opts.template_len or (template and #template) or 0
+    local args = string.pack("<I4I4I4I4I8I4I4",
+        policy, opts.flags or 0, opts.generation or 0, opts.pad0 or 0,
+        0, len, opts.pad1 or 0)
+    local bufs, nested = { args }, nil
+    if template then
+        bufs[2] = template
+        nested = { { parent = 1, child = 2, offset = 16 } }
+    end
+    return who:syscall(M.SYS.SET_MOUNT_POLICY, {
+        args = { fd, 0, opts.argsize or 32 },
+        bufs = bufs, ptrs = { 1 }, nested = nested,
+    })
+end
+
+--- kacs_get_mount_policy(2) in full. Returns
+--- `{ policy, flags, generation, template_len, template }` or `nil, errno`.
+---
+--- The kernel only copies the template out when the caller supplies a
+--- pointer whose length is at least the stored one, so a buffer is
+--- always sent; `opts.template_room` sizes it.
+function M.get_mount_policy_ex(who, fd, opts)
+    opts = opts or {}
+    local room = opts.template_room or 4096
+    local args = string.pack("<I4I4I4I4I8I4I4", 0, 0, 0, 0, 0, room, 0)
+    local r = who:syscall(M.SYS.GET_MOUNT_POLICY, {
+        args = { fd, 0, opts.argsize or 32 },
+        bufs = { args, string.rep("\0", room) },
+        ptrs = { 1 },
+        nested = { { parent = 1, child = 2, offset = 16 } },
+    })
+    if r.ret ~= 0 then return nil, r.errno end
+    local policy, flags, generation, _, _, tlen =
+        string.unpack("<I4I4I4I4I8I4", r.out_bufs[1])
+    local out = { policy = policy, flags = flags, generation = generation,
+                  template_len = tlen }
+    if tlen > 0 and tlen <= room then
+        out.template = r.out_bufs[2]:sub(1, tlen)
+    end
+    return out
 end
 
 return M

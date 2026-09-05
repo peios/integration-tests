@@ -266,4 +266,99 @@ function M.caap_spec(rules)
     return table.concat(out)
 end
 
+-- Reading a descriptor back ----------------------------------------------------------
+
+--- Parse a self-relative ACL into `{ revision, count, aces }`, each ACE
+--- `{ type, flags, mask, sid, data }` — `data` being whatever follows the
+--- trustee SID (a callback condition, or a resource attribute's claim
+--- entry).
+function M.parse_acl(bytes)
+    local rev, _, size, count = string.unpack("<I1I1I2I2", bytes)
+    local out = { revision = rev, size = size, count = count, aces = {} }
+    local at = 9
+    for _ = 1, count do
+        local atype, aflags, asize = string.unpack("<I1I1I2", bytes, at)
+        local mask = string.unpack("<I4", bytes, at + 4)
+        local sid_at = at + 8
+        if atype >= 0x05 and atype <= 0x08 then
+            local oflags = string.unpack("<I4", bytes, at + 8)
+            sid_at = at + 12
+            if (oflags & 1) ~= 0 then sid_at = sid_at + 16 end
+            if (oflags & 2) ~= 0 then sid_at = sid_at + 16 end
+        end
+        local _, sid_end = token.parse_sid(bytes, sid_at)
+        out.aces[#out.aces + 1] = {
+            type = atype, flags = aflags, mask = mask,
+            sid = bytes:sub(sid_at, sid_end - 1),
+            data = bytes:sub(sid_end, at + asize - 1),
+        }
+        at = at + asize
+    end
+    return out
+end
+
+--- Parse a self-relative security descriptor into
+--- `{ revision, control, owner, group, sacl, dacl }`. `owner` and `group`
+--- are binary SIDs or nil; `sacl` and `dacl` are `M.parse_acl` results,
+--- nil where the component is absent.
+---
+--- §3.9.5's seeded-descriptor and synthesis-fallback cases assert on the
+--- components rather than on a hex blob, so a failure names the part that
+--- is wrong.
+function M.parse_sd(bytes)
+    local rev, _, control, owner_off, group_off, sacl_off, dacl_off =
+        string.unpack("<I1I1I2I4I4I4I4", bytes)
+    local function sid_at(off)
+        if off == 0 then return nil end
+        local _, e = token.parse_sid(bytes, off + 1)
+        return bytes:sub(off + 1, e - 1)
+    end
+    local function acl_at(off, present)
+        if off == 0 or not present then return nil end
+        return M.parse_acl(bytes:sub(off + 1))
+    end
+    return {
+        revision = rev, control = control,
+        owner = sid_at(owner_off), group = sid_at(group_off),
+        sacl = acl_at(sacl_off, (control & M.CONTROL.SACL_PRESENT) ~= 0),
+        dacl = acl_at(dacl_off, (control & M.CONTROL.DACL_PRESENT) ~= 0),
+    }
+end
+
+-- Resource attributes ----------------------------------------------------------------
+
+M.CLAIM_TYPE = { INT64 = 0x0001, UINT64 = 0x0002, STRING = 0x0003,
+                 SID = 0x0005, BOOLEAN = 0x0006, OCTET = 0x0010 }
+M.CLAIM_FLAG = { MANDATORY = 0x0020, DISABLED = 0x0010,
+                 NON_INHERITABLE = 0x0001, CASE_SENSITIVE = 0x0002 }
+
+--- One CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 entry carrying a single
+--- int64 value. Offsets are relative to the entry.
+---
+---     u32 name_offset; u16 value_type; u16 reserved; u32 flags;
+---     u32 value_count; u32 value_offsets[count]; i64 values[count];
+---     utf16 NUL-terminated name
+function M.claim_entry(name, value, flags)
+    local utf16 = {}
+    for i = 1, #name do utf16[#utf16 + 1] = string.pack("<I2", name:byte(i)) end
+    utf16[#utf16 + 1] = string.pack("<I2", 0)
+    local values_start = 20              -- 16 header + one 4-byte offset
+    local name_offset = values_start + 8 -- one 8-byte value
+    return string.pack("<I4I2I2I4I4I4i8", name_offset, M.CLAIM_TYPE.INT64, 0,
+        flags or 0, 1, values_start, value or 1) .. table.concat(utf16)
+end
+
+--- A SYSTEM_RESOURCE_ATTRIBUTE_ACE carrying one int64 claim.
+---
+--- §3.9.6's mandatory-attribute rule keys on
+--- CLAIM_SECURITY_ATTRIBUTE_MANDATORY (0x0020) in the entry's flags, so
+--- `flags` is the interesting argument; `mask` and `sid` are the ACE's
+--- own, and are not consulted by that rule.
+function M.resource_attribute_ace(name, value, flags, opts)
+    opts = opts or {}
+    return M.ace(M.ACE.RESOURCE_ATTRIBUTE, opts.mask or 0,
+        opts.sid or token.SID.EVERYONE, opts.ace_flags or 0,
+        { condition = M.claim_entry(name, value, flags) })
+end
+
 return M
