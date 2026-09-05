@@ -58,7 +58,7 @@ M.NR = {
     sched_setaffinity = 203,
     fgetxattr  = 193,
     listxattr  = 194,
-    flistxattr = 195,
+    flistxattr = 196,  -- 195 is llistxattr
     quotactl_fd = 443,
 }
 
