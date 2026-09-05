@@ -1,7 +1,7 @@
 -- PKM §2.5/§2.6 — what still cannot be driven from a live guest even
 -- with the Lua-served registry source (helpers/registry): planted
 -- migration corruption and the plan machinery's defensive branches.
--- Each is flagged open on PEI-604 or is an image-level property.
+-- Each is flagged open on PEI-604.
 
 test("a migration abort abandons the swap with no event",
     { spec = "PKM *ring.swap.abort-emits-no-event",
@@ -34,11 +34,4 @@ test("at most four invalid-value reports per read",
              "ignored rather than reported, so no real source can " ..
              "produce a fifth report — the cap is a defensive bound; " ..
              "no KUnit case counts to it (PEI-604)" }, function(t)
-    end)
-
-test("the configuration keys inherit the Machine hive root descriptor",
-    { spec = "PKM *config.keys-inherit-machine-root-sd",
-      skip = "an image-level property of the composed hive that loregd " ..
-             "serves, not of the kernel-only guest, whose hive is test " ..
-             "apparatus" }, function(t)
     end)
