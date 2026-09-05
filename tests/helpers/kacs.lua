@@ -289,7 +289,8 @@ M.MOVE_MOUNT_F_EMPTY_PATH = 4
 --- Create a filesystem, give it a policy class, and attach it at `at`.
 ---
 --- `opts.flags` is a list of flag-shaped mount options (`usrquota`),
---- applied before the filesystem is created.
+--- applied before the filesystem is created; `opts.source` is the
+--- block device a disk filesystem is created from.
 ---
 --- Returns `true`, or `nil, stage, errno`.
 function M.new_mount(vm, fstype, at, policy, opts)
@@ -297,6 +298,17 @@ function M.new_mount(vm, fstype, at, policy, opts)
         args = { 0, 0 }, bufs = { sys.cstr(fstype) }, ptrs = { 0 },
     })
     if fs.ret < 0 then return nil, "fsopen", fs.errno end
+
+    if (opts or {}).source then
+        local r = vm:syscall(M.NR.fsconfig, {
+            args = { fs.ret, M.FSCONFIG_SET_STRING, 0, 0, 0 },
+            bufs = { sys.cstr("source"), sys.cstr(opts.source) }, ptrs = { 2, 3 },
+        })
+        if r.ret ~= 0 then
+            sys.close(vm, fs.ret)
+            return nil, "fsconfig source", r.errno
+        end
+    end
 
     for _, flag in ipairs((opts or {}).flags or {}) do
         local r = vm:syscall(M.NR.fsconfig, {

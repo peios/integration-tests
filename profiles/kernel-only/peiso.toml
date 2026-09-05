@@ -9,3 +9,10 @@ edition = "kernel-only"
 # no boot flavour. Without this it would carry live-boot, and a kernel
 # test would be running against packages the kernel does not need.
 first_boot = "none"
+
+# The kernel's modules, for the two the tests load into the guest:
+# test_firmware, the firmware loader's self-test device, and ntfs3.
+# build.sh copies just those two out of the composed root into the
+# fixture initramfs; the tree itself never boots.
+[[package]]
+name = "kernel-modules"

@@ -173,14 +173,17 @@ function M.perf_attr()
     return string.pack("<I4I4I8I8", 1, 128, 0, 0) .. string.rep("\0", 104)
 end
 
---- perf_event_open(attr, pid, cpu, -1, 0). Returns the raw result.
-function M.perf(who, pid, cpu)
+--- perf_event_open(attr, pid, cpu, -1, flags). Returns the raw result.
+function M.perf(who, pid, cpu, flags)
     return who:syscall(M.NR.perf_event_open, {
-        args = { 0, pid, cpu, -1, 0 },
+        args = { 0, pid, cpu, -1, flags or 0 },
         bufs = { M.perf_attr() },
         ptrs = { 0 },
     })
 end
+
+-- perf_event_open flags.
+M.PERF_FLAG_PID_CGROUP = 0x4
 
 -- Assorted call shapes -------------------------------------------------------
 

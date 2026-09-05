@@ -23,16 +23,19 @@ local M = {}
 M.SECURITYFS_AT = "/sfs"
 M.TRACEFS_AT = "/trc"
 
+-- Keyed by guest as well as path: a file that boots two VMs mounts
+-- each one's tracefs separately.
 local mounted = {}
 
 local function ensure_mount(vm, fstype, at)
-    if mounted[at] then return true end
+    local key = tostring(vm) .. " " .. at
+    if mounted[key] then return true end
     local ok, step, errno = kacs.new_mount(vm, fstype, at,
         kacs.MOUNT_POLICY.SYNTHESIZE_EPHEMERAL)
     if not ok then
         return nil, ("%s: %s: %s"):format(fstype, step, sys.errname(errno))
     end
-    mounted[at] = true
+    mounted[key] = true
     return true
 end
 

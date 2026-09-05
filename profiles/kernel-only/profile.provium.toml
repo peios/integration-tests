@@ -16,10 +16,15 @@ build = "./build.sh {out}"
 # version bump moves nothing here.
 root = "{out}/root"
 
-# No `initrd` either. This VM has no userspace of its own — the agent
-# overlay is the whole initramfs and the agent comes up as PID 1 and
-# does init's mounts itself. There is nothing to boot into, which is
-# the point: what the tests reach is the kernel and only the kernel.
+# The initrd is not a userspace. This VM has none of its own — the agent
+# overlay is concatenated onto this archive and the agent comes up as
+# PID 1 and does init's mounts itself. There is nothing to boot into,
+# which is the point: what the tests reach is the kernel and only the
+# kernel. What the archive carries is /fixtures: the two kernel modules
+# the tests load, signed and unsigned firmware blobs, an NTFS image —
+# things a claim needs that a kernel alone cannot provide. build.sh
+# describes each.
+initrd = "{out}/extras.cpio.gz"
 
 # panic=1 so a kernel that dies takes the VM down instead of hanging
 # the run until it times out.
