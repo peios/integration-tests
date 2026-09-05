@@ -13,6 +13,7 @@ local M = {}
 
 -- Syscall numbers.
 M.NR = {
+    getpid = 39, gettid = 186, pidfd_open = 434,
     mount      = 165,
     umount2    = 166,
     newfstatat = 262,
