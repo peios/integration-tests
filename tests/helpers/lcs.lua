@@ -1414,4 +1414,441 @@ function M.create_layer(src, who, name, o)
     return fd
 end
 
+--- A hand-built LCS call the builders above cannot express — a NULL
+--- pointer behind a non-zero length, a sentinel-filled output buffer, a
+--- deliberately wrong ioctl size or direction (§5.5.1).
+---
+--- `call.nr` is the syscall number (`sys.NR.ioctl` or one of `M.SYS`),
+--- `call.args` the raw syscall arguments, `call.ptr_slot` the argument
+--- slot that receives a pointer to `call.struct` (2 for an ioctl, 0 for
+--- `reg_create_key`), and `call.children` a list of
+--- `{ offset =, bytes = }` nested into that structure. A child with no
+--- `bytes` leaves its pointer NULL, which is how a case probes a length
+--- with no buffer; `bytes` may be pre-filled with a sentinel to show an
+--- output buffer was left unwritten. `src` may be nil for a call that
+--- contacts no source.
+---
+--- Returns the raw result plus `args_out` (the structure as it came
+--- back) and `child_out[i]` for each child that carried bytes.
+function M.raw_call(src, who, call)
+    local s = bufset()
+    local args_i = s:add(call.struct)
+    local idx = {}
+    for i, c in ipairs(call.children or {}) do
+        local ci = c.bytes and s:add(c.bytes) or nil
+        idx[i] = ci
+        s:nest(args_i, ci, c.offset)
+    end
+    local spec = s:spec(call.args, { call.ptr_slot })
+    local r
+    if src then
+        r = src:run(function() return who:syscall_async(call.nr, spec) end)
+    else
+        r = who:syscall(call.nr, spec)
+    end
+    r.args_out = r.out_bufs and r.out_bufs[args_i] or nil
+    r.child_out = {}
+    for i, ci in pairs(idx) do
+        r.child_out[i] = r.out_bufs and r.out_bufs[ci] or nil
+    end
+    return r
+end
+
+-- ---- the backup stream (§5.9.1; the format is PSPK §5.2–§5.4) --------
+--
+-- A test about backup decodes what LCS wrote; a test about restore has
+-- to build or edit a stream, and the trailer's SHA-256 means editing
+-- one byte means recomputing the digest. Both halves live here.
+
+local SHA_K = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+}
+local function rotr(x, n) return ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF end
+
+--- SHA-256 of a byte string, as the 32 raw bytes a `TRAILER` carries.
+function M.sha256(msg)
+    local h = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 }
+    local len = #msg
+    msg = msg .. "\128" .. string.rep("\0", (55 - len) % 64) .. string.pack(">I8", len * 8)
+    for i = 1, #msg, 64 do
+        local w = {}
+        for j = 0, 15 do w[j] = string.unpack(">I4", msg, i + j * 4) end
+        for j = 16, 63 do
+            local x, y = w[j - 15], w[j - 2]
+            local s0 = rotr(x, 7) ~ rotr(x, 18) ~ (x >> 3)
+            local s1 = rotr(y, 17) ~ rotr(y, 19) ~ (y >> 10)
+            w[j] = (w[j - 16] + s0 + w[j - 7] + s1) & 0xFFFFFFFF
+        end
+        local a, b, c, d, e, f, g, hh = h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]
+        for j = 0, 63 do
+            local S1 = rotr(e, 6) ~ rotr(e, 11) ~ rotr(e, 25)
+            local ch = (e & f) ~ ((~e & 0xFFFFFFFF) & g)
+            local t1 = (hh + S1 + ch + SHA_K[j + 1] + w[j]) & 0xFFFFFFFF
+            local S0 = rotr(a, 2) ~ rotr(a, 13) ~ rotr(a, 22)
+            local t2 = (S0 + ((a & b) ~ (a & c) ~ (b & c))) & 0xFFFFFFFF
+            hh = g; g = f; f = e; e = (d + t1) & 0xFFFFFFFF
+            d = c; c = b; b = a; a = (t1 + t2) & 0xFFFFFFFF
+        end
+        local v = { a, b, c, d, e, f, g, hh }
+        for j = 1, 8 do h[j] = (h[j] + v[j]) & 0xFFFFFFFF end
+    end
+    local out = {}
+    for j = 1, 8 do out[j] = string.pack(">I4", h[j]) end
+    return table.concat(out)
+end
+
+M.BACKUP_MAGIC = "PEIOSREG"
+M.BACKUP_VERSION = 21
+M.KEY_FLAG_VOLATILE, M.KEY_FLAG_SYMLINK = 0x1, 0x2
+
+--- One record: the six-byte framing header (`record_type` u16,
+--- `record_len` u32 counting the header) and the payload.
+function M.backup_record(rtype, payload)
+    payload = payload or ""
+    return string.pack("<I2I4", rtype, 6 + #payload) .. payload
+end
+
+local function lp(s) return string.pack("<s4", s) end
+
+--- `HEADER`. `o.version`, `o.min_reader` (both 21), `o.magic`,
+--- `o.timestamp` — each so a case can write the wrong one.
+function M.backup_header(root_guid, hive_name, o)
+    o = o or {}
+    return M.backup_record(M.BACKUP_RECORD.HEADER,
+        (o.magic or M.BACKUP_MAGIC) ..
+        string.pack("<I4I4i8", o.version or M.BACKUP_VERSION,
+            o.min_reader or M.BACKUP_VERSION, o.timestamp or 0) ..
+        root_guid .. lp(hive_name))
+end
+
+--- `LAYER`, a manifest entry: `o.precedence` (0), `o.enabled` (1),
+--- `o.owner` (a binary SID, empty by default).
+function M.backup_layer(name, o)
+    o = o or {}
+    return M.backup_record(M.BACKUP_RECORD.LAYER,
+        lp(name) .. string.pack("<I4I1", o.precedence or 0,
+            o.enabled == nil and 1 or (o.enabled and 1 or 0)) .. lp(o.owner or ""))
+end
+
+--- `KEY`: `o.flags` (bit 0 volatile, bit 1 symlink), `o.sd`
+--- (a permissive one by default), `o.lwt`.
+function M.backup_key(guid, o)
+    o = o or {}
+    return M.backup_record(M.BACKUP_RECORD.KEY,
+        guid .. string.pack("<I4", o.flags or 0) ..
+        lp(o.sd or M.permissive_sd()) .. string.pack("<i8", o.lwt or 0))
+end
+
+--- `PATH_ENTRY`. A nil `child_guid` writes the all-zero GUID, which is
+--- what HIDDEN means.
+function M.backup_path_entry(parent_guid, child_name, child_guid, layer, seq)
+    return M.backup_record(M.BACKUP_RECORD.PATH_ENTRY,
+        parent_guid .. lp(child_name) .. (child_guid or M.NULL_GUID) ..
+        lp(layer or "base") .. string.pack("<I8", seq or 1))
+end
+
+--- `VALUE`.
+function M.backup_value(key_guid, name, vtype, data, layer, seq)
+    return M.backup_record(M.BACKUP_RECORD.VALUE,
+        key_guid .. lp(name) .. string.pack("<I4", vtype) .. lp(data or "") ..
+        lp(layer or "base") .. string.pack("<I8", seq or 1))
+end
+
+--- `BLANKET_TOMBSTONE`.
+function M.backup_blanket(key_guid, layer, seq)
+    return M.backup_record(M.BACKUP_RECORD.BLANKET_TOMBSTONE,
+        key_guid .. lp(layer or "base") .. string.pack("<I8", seq or 1))
+end
+
+--- The records concatenated and closed with a `TRAILER` whose record
+--- count and SHA-256 are computed over them, as §5.9.1 requires. The
+--- checksum covers everything up to and including the trailer's own
+--- framing header and `RecordCount`. `o.count` and `o.checksum`
+--- override each, for the cases about a stream that fails its own
+--- self-verification; `o.trailing` appends bytes after it.
+function M.backup_stream(records, o)
+    o = o or {}
+    local body = table.concat(records)
+    local count = o.count or (#records + 1)
+    local prefix = body .. string.pack("<I2I4I8", M.BACKUP_RECORD.TRAILER, 46, count)
+    return prefix .. (o.checksum or M.sha256(prefix)) .. (o.trailing or "")
+end
+
+local function decode_backup_record(rec)
+    local p, at = rec.payload, 1
+    if rec.type == M.BACKUP_RECORD.HEADER then
+        rec.magic = p:sub(1, 8)
+        rec.version, rec.min_reader, rec.timestamp = string.unpack("<I4I4i8", p, 9)
+        rec.root_guid = p:sub(25, 40)
+        rec.hive = string.unpack("<s4", p, 41)
+    elseif rec.type == M.BACKUP_RECORD.LAYER then
+        rec.name, at = string.unpack("<s4", p, 1)
+        rec.precedence, rec.enabled, at = string.unpack("<I4I1", p, at)
+        rec.owner = string.unpack("<s4", p, at)
+    elseif rec.type == M.BACKUP_RECORD.KEY then
+        rec.guid = p:sub(1, 16)
+        rec.flags = string.unpack("<I4", p, 17)
+        rec.sd, at = string.unpack("<s4", p, 21)
+        rec.volatile = rec.flags & M.KEY_FLAG_VOLATILE ~= 0
+        rec.symlink = rec.flags & M.KEY_FLAG_SYMLINK ~= 0
+        rec.lwt = string.unpack("<i8", p, at)
+    elseif rec.type == M.BACKUP_RECORD.PATH_ENTRY then
+        rec.parent = p:sub(1, 16)
+        rec.name, at = string.unpack("<s4", p, 17)
+        rec.child = p:sub(at, at + 15); at = at + 16
+        rec.hidden = rec.child == M.NULL_GUID
+        rec.layer, at = string.unpack("<s4", p, at)
+        rec.sequence = string.unpack("<I8", p, at)
+    elseif rec.type == M.BACKUP_RECORD.VALUE then
+        rec.key_guid = p:sub(1, 16)
+        rec.name, at = string.unpack("<s4", p, 17)
+        rec.vtype, at = string.unpack("<I4", p, at)
+        rec.data, at = string.unpack("<s4", p, at)
+        rec.layer, at = string.unpack("<s4", p, at)
+        rec.sequence = string.unpack("<I8", p, at)
+    elseif rec.type == M.BACKUP_RECORD.BLANKET_TOMBSTONE then
+        rec.key_guid = p:sub(1, 16)
+        rec.layer, at = string.unpack("<s4", p, 17)
+        rec.sequence = string.unpack("<I8", p, at)
+    elseif rec.type == M.BACKUP_RECORD.TRAILER then
+        rec.count = string.unpack("<I8", p, 1)
+        rec.checksum = p:sub(9, 40)
+    end
+    return rec
+end
+
+--- Split a stream into records, each `{ type, len, offset, payload }`
+--- plus that type's fields. The result also carries `header`,
+--- `trailer`, `records`, the records by type (`layers`, `keys`,
+--- `path_entries`, `values`, `blankets`), and `count_ok` /
+--- `checksum_ok` from verifying the trailer against the bytes.
+--- Raises on framing the format forbids, since a test asserting on a
+--- decoded field wants that as a failure, not as nil.
+function M.decode_backup_stream(bytes)
+    local s = { bytes = bytes, records = {}, layers = {}, keys = {},
+                path_entries = {}, values = {}, blankets = {} }
+    local at = 1
+    while at <= #bytes do
+        assert(#bytes - at + 1 >= 6, "truncated record framing at offset " .. at - 1)
+        local rtype, rlen = string.unpack("<I2I4", bytes, at)
+        assert(rlen >= 6, "record_len " .. rlen .. " below the six-byte minimum")
+        assert(at + rlen - 1 <= #bytes, "record at offset " .. at - 1 .. " runs past the stream")
+        local rec = decode_backup_record({ type = rtype, len = rlen, offset = at - 1,
+                                           payload = bytes:sub(at + 6, at + rlen - 1) })
+        s.records[#s.records + 1] = rec
+        if rtype == M.BACKUP_RECORD.HEADER then s.header = rec
+        elseif rtype == M.BACKUP_RECORD.LAYER then s.layers[#s.layers + 1] = rec
+        elseif rtype == M.BACKUP_RECORD.KEY then s.keys[#s.keys + 1] = rec
+        elseif rtype == M.BACKUP_RECORD.PATH_ENTRY then s.path_entries[#s.path_entries + 1] = rec
+        elseif rtype == M.BACKUP_RECORD.VALUE then s.values[#s.values + 1] = rec
+        elseif rtype == M.BACKUP_RECORD.BLANKET_TOMBSTONE then s.blankets[#s.blankets + 1] = rec
+        elseif rtype == M.BACKUP_RECORD.TRAILER then s.trailer = rec end
+        at = at + rlen
+    end
+    if s.trailer then
+        s.count_ok = s.trailer.count == #s.records
+        s.checksum_ok = s.trailer.checksum ==
+            M.sha256(bytes:sub(1, s.trailer.offset + 14))
+    end
+    return s
+end
+
+--- The section a record belongs to: the index into `stream.keys` of
+--- the last `KEY` record at or before it, or 0 for the records before
+--- the first one.
+function M.backup_section_of(stream, rec)
+    local n = 0
+    for _, r in ipairs(stream.records) do
+        if r.type == M.BACKUP_RECORD.KEY then n = n + 1 end
+        if r == rec then return n end
+    end
+    return nil
+end
+
+-- ---- streams through a file ------------------------------------------
+--
+-- Backup writes to an fd and restore reads from one. A file on a
+-- tmpfs is the shape both cases want: no capacity limit to deadlock
+-- against, and the bytes can be read back and decoded.
+
+--- Create (or truncate) `path` in `who`'s process and return the fd.
+function M.stream_file(who, path, flags)
+    local fd, errno = sys.open(who, path,
+        flags or (sys.O.RDWR | sys.O.CREAT | sys.O.TRUNC), 420)
+    return fd, errno
+end
+
+--- Every byte of `fd` from offset 0.
+function M.read_all(who, fd)
+    sys.lseek(who, fd, 0, 0)
+    local out = {}
+    while true do
+        local chunk, errno = sys.read(who, fd, 65536)
+        if not chunk then return nil, errno end
+        if #chunk == 0 then break end
+        out[#out + 1] = chunk
+    end
+    return table.concat(out)
+end
+
+--- `REG_IOC_BACKUP` of `key_fd` into a fresh file at `path`, then the
+--- stream decoded. Returns the ioctl result and, on success, the
+--- decoded stream and its raw bytes.
+function M.backup_to_file(src, who, key_fd, path)
+    local fd = assert(M.stream_file(who, path), "creating " .. path)
+    local r = M.backup(src, who, key_fd, fd)
+    if r.ret ~= 0 then sys.close(who, fd); return r end
+    local bytes = M.read_all(who, fd)
+    sys.close(who, fd)
+    return r, M.decode_backup_stream(bytes), bytes
+end
+
+--- Write `bytes` to `path` and `REG_IOC_RESTORE` `key_fd` from it.
+--- Returns the ioctl result.
+function M.restore_bytes(src, who, key_fd, path, bytes)
+    local fd = assert(M.stream_file(who, path), "creating " .. path)
+    local n = sys.write(who, fd, bytes)
+    assert(n.ret == #bytes, "short write staging the stream")
+    sys.lseek(who, fd, 0, 0)
+    local r = M.restore(src, who, key_fd, fd)
+    sys.close(who, fd)
+    return r
+end
+
+-- ---- watch queues (§5.6) --------------------------------------------
+
+local F_SETFL = 4
+
+--- Put a key fd into `O_NONBLOCK`, so that `read_events` on an empty
+--- queue answers `EAGAIN` instead of blocking the worker (§5.6.2).
+--- A key fd comes back blocking, so every case that drains a watch
+--- queue and then asserts it is empty wants this first.
+function M.nonblock(who, fd)
+    local r = who:syscall(72, { args = { fd, F_SETFL, O_NONBLOCK } }) -- fcntl
+    return r.ret == 0, r.errno
+end
+
+--- Open a key and put its fd in non-blocking mode. Same arguments as
+--- `open_key`; returns the raw result, whose `ret` is the fd.
+function M.open_watchable(src, who, parent_fd, path, access, flags)
+    local r = M.open_key(src, who, parent_fd, path, access, flags)
+    if r.ret >= 0 then M.nonblock(who, r.ret) end
+    return r
+end
+
+--- Every record queued on an armed non-blocking fd, across as many
+--- `read()` calls as it takes. Returns the decoded list (empty when
+--- the queue is), so a case can assert on what a mutation delivered.
+function M.drain_events(who, fd, size)
+    local out = {}
+    while true do
+        local r = M.read_events(nil, who, fd, size)
+        if r.ret <= 0 or not r.events or #r.events == 0 then return out end
+        for _, e in ipairs(r.events) do out[#out + 1] = e end
+    end
+end
+
+--- A one-line summary of a record list — `VALUE_SET(Answer)
+--- SUBKEY_CREATED(Child@1:A/B)` — for an assertion message.
+function M.event_summary(events)
+    local out = {}
+    for _, e in ipairs(events or {}) do
+        local s = (M.WATCH_NAME[e.type] or tostring(e.type)) .. "(" .. e.name
+        if e.depth then
+            s = s .. "@" .. e.depth
+            if e.components and #e.components > 0 then
+                s = s .. ":" .. table.concat(e.components, "/")
+            end
+        end
+        out[#out + 1] = s .. ")"
+    end
+    return #out > 0 and table.concat(out, " ") or "<nothing>"
+end
+
+--- The event type names of a record list, in order.
+function M.event_types(events)
+    local out = {}
+    for _, e in ipairs(events or {}) do
+        out[#out + 1] = M.WATCH_NAME[e.type] or tostring(e.type)
+    end
+    return out
+end
+
+--- `poll()` one fd for `POLLIN`, returning the revents mask. This is
+--- how §5.6.1's "the fd is pollable" is observed.
+function M.poll_revents(who, fd, timeout_ms)
+    local p = who:syscall(sys.NR.poll, {
+        args = { 0, 1, timeout_ms or 0 },
+        bufs = { string.pack("<i4i2i2", fd, 0x1, 0) }, ptrs = { 0 },
+    })
+    if p.ret < 0 then return nil, p.errno end
+    return (select(3, string.unpack("<i4i2i2", p.out_bufs[1])))
+end
+
+--- Seed one key in one layer under an existing parent GUID, without
+--- creating the intermediates `Source:key` would create in that layer.
+--- §5.2.5's overlay pattern needs exactly this: a path entry for
+--- `(parent, name, layer)` pointing at a fresh key record, with the
+--- ancestors left in whatever layer already names them. `o`: `sd`,
+--- `volatile`, `symlink`, `seq`, `guid`. Returns the new key's GUID.
+--- Host-side seeding: call it before `register`.
+function M.seed_key_in_layer(src, parent, name, layer, o)
+    o = o or {}
+    local guid = o.guid or M.guid()
+    src.store.keys[guid] = {
+        name = name, parent = parent, sd = o.sd or M.permissive_sd(),
+        volatile = o.volatile or false, symlink = o.symlink or false, lwt = o.lwt or 0,
+    }
+    local per = src.store.entries[parent]
+    if not per then per = {}; src.store.entries[parent] = per end
+    local slot = per[M.fold(name)]
+    if not slot then slot = { name = name, by_layer = {} }; per[M.fold(name)] = slot end
+    slot.by_layer[M.fold(layer)] = {
+        layer = layer, hidden = false, guid = guid, seq = o.seq or src:next_seq(),
+    }
+    return guid
+end
+
+--- The path entry the source holds for `(parent, name, layer)`, or nil
+--- — `{ layer, hidden, guid, seq }`. What a source stores is what LCS
+--- told it to store, so this is how a case checks that a create, a
+--- hide or a delete reached the storage it claims to have reached.
+function M.entry(src, parent, name, layer)
+    local per = src.store.entries[parent]
+    local slot = per and per[M.fold(name)]
+    return slot and slot.by_layer[M.fold(layer or "base")] or nil
+end
+
+--- The GUID LCS minted in the most recent `RSI_CREATE_KEY` at or after
+--- log index `from` (`src:mark()`), or nil. Key GUIDs are assigned by
+--- LCS and pushed to the source (§5.2.3), so the request is the only
+--- place a test can see one for a key it just created.
+function M.created_guid(src, from)
+    local reqs = src:served(M.OP.CREATE_KEY, from)
+    local last = reqs[#reqs]
+    return last and last.payload:sub(1, 16) or nil
+end
+
+--- The key name an `RSI_LOOKUP` request asked about, or nil for any
+--- other op. A LOOKUP payload is the parent GUID followed by a
+--- length-prefixed name, so this is how a case reads the bootstrap's
+--- walk out of `src.log`: "System", "Registry", "Layers", "KMES",
+--- "Network" (§5.10.4).
+function M.lookup_name(req)
+    if not req or req.op ~= M.OP.LOOKUP or #req.payload < 20 then return nil end
+    local ok, name = pcall(string.unpack, "<s4", req.payload, 17)
+    return ok and name or nil
+end
+
 return M
