@@ -89,11 +89,11 @@ test("LCS captures the calling thread's effective token: with none impersonated,
 -- is the same KACS capture PKM §3.5.1 covers.
 test("an impersonation token set on the calling thread is the one LCS captures",
     { spec = "PKM *access-flow.effective-token-capture",
-      covered_by = "kunit:",
+      covered_by = "kunit:pkm_lcs_kunit_open",
       skip = "a blocking registry call must be issued on a harness-spawned thread, which " ..
              "does not inherit the caller thread's impersonation token, so no guest can " ..
-             "witness the impersonation branch; no LCS KUnit case found — candidate for a " ..
-             "new one" },
+             "witness the impersonation branch" ..
+             "; runs under pkm_lcs_kunit_open_captures_the_impersonation_token" },
     function(t) end)
 
 test("no access check happens during the walk: only the final key is evaluated",

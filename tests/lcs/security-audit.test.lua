@@ -768,10 +768,11 @@ test("if KMES cannot retain a key-open event the decision and the fd are unaffec
 
 test("LCS_BACKUP_START and LCS_RESTORE_START failing to emit returns EIO and does not start",
     { spec = "PKM *lcs-audit.emit-failure.start-events-block-the-operation",
-      covered_by = "kunit:",
+      covered_by = "kunit:pkm_lcs_kunit_key",
       skip = "a guest cannot make KMES refuse an event: with no consumer attached the " ..
              "event is still enqueued successfully, and there is no interface to fail " ..
-             "the emission itself; no LCS KUnit case found — candidate for a new one" },
+             "the emission itself" ..
+             "; runs under pkm_lcs_kunit_key_fd_backup_start_audit_failure_is_eio" },
     function(t) end)
 
 test("a completion event that cannot be emitted does not change a result already determined",

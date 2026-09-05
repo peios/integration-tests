@@ -406,17 +406,6 @@ test("exceeding SymlinkDepthLimit is ELOOP",
         done(w)
     end)
 
-test("two paths in the walk use the compiled-in default rather than the configured value",
-    { spec = "PKM *symlink.depth.limit-not-honoured-on-two-paths",
-      covered_by = "kunit:",
-      skip = "the two call sites are pkm_lcs_walk_absolute_components (path_walk.c), "
-          .. "reached only from layer_metadata.c and self_config.c, which take their "
-          .. "own limits snapshot rather than the caller's; both resolve "
-          .. "Machine\\System\\Registry paths that no caller can put a symlink into "
-          .. "while the refresh is running, so no guest can witness the difference. "
-          .. "No KUnit case found — candidate for a new one" },
-    function(t) end)
-
 -- REG_OPEN_LINK ----------------------------------------------------------
 
 test("REG_OPEN_LINK opens the link itself rather than following it",

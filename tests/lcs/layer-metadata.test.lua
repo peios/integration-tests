@@ -187,11 +187,11 @@ test("the Owner selection falls back when the metadata value is absent",
 
 test("a layer whose owner cannot be resolved at all cannot be published",
     { spec = "PKM *layer.metadata.unresolvable-owner-blocks-publication",
-      covered_by = "kunit:",
+      covered_by = "kunit:pkm_lcs_kunit_layer",
       skip = "the fallback chain ends at the metadata key's own descriptor owner, and " ..
              "LCS validates a source's key descriptors as complete, so no guest can " ..
-             "present a metadata key with no owner anywhere in the chain; no KUnit " ..
-             "case found — candidate for a new one" },
+             "present a metadata key with no owner anywhere in the chain" ..
+             "; runs under pkm_lcs_kunit_layer_owner_unresolvable_blocks_publication" },
     function(t) end)
 
 test("creating a key under Layers creates a layer and deleting it deletes one",
@@ -296,11 +296,11 @@ test("the published unit is the table entry, the metadata key's GUID and its cac
 
 test("a snapshot reader that finds a published layer incomplete returns EIO",
     { spec = "PKM *layer.metadata.incomplete-publication-is-eio",
-      covered_by = "kunit:",
+      covered_by = "kunit:pkm_lcs_kunit_layer",
       skip = "all three parts are written under one lock, so no guest can observe the " ..
              "half-populated window the check exists for (layer_table.c, the -EIO on " ..
-             "an occupied entry with no metadata_sd or owner_sid); no KUnit case found " ..
-             "— candidate for a new one" },
+             "an occupied entry with no metadata_sd or owner_sid)" ..
+             "; runs under pkm_lcs_kunit_layer_snapshot_incomplete_entry_is_eio" },
     function(t) end)
 
 test("a layer with no metadata key GUID and no authorisation descriptor is not in the table",

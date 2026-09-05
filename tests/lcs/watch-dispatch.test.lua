@@ -324,17 +324,6 @@ test("dispatch does no source I/O, however many watches it walks",
         sys.close(w, deep)
     end)
 
-test("dispatch runs under a single global registry lock",
-    { spec = "PKM *watch.dispatch.serialised-under-the-global-registry-lock",
-      covered_by = "kunit:",
-      skip = "lock discipline is not observable from a guest: system-wide " ..
-             "serialisation of dispatch has no user-visible consequence " ..
-             "distinguishable from per-hive or per-source serialisation, " ..
-             "and the batch-atomicity consequence that is observable is " ..
-             "covered by watch.dispatch.commit-batch-queued-in-operation-" ..
-             "order-without-interleaving; no KUnit case found — candidate " ..
-             "for a new one" }, function(t) end)
-
 -- ---- depth ------------------------------------------------------------
 --
 -- These two write MaxSubtreeWatchDepth, which is global, so they run

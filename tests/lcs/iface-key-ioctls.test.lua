@@ -103,10 +103,10 @@ test("an ioctl number this fd type does not implement is ENOTTY",
 
 test("kernel allocation failure inside an ioctl is ENOMEM",
     { spec = "PKM *ioctl.enomem-on-allocation-failure",
-      covered_by = "kunit:",
+      covered_by = "kunit:pkm_lcs_kunit_key",
       skip = "no guest can force a kernel allocation to fail at a chosen ioctl; the " ..
-             "allocation sites are internal to key_fd.c — no LCS KUnit case found, " ..
-             "candidate for a new one" },
+             "allocation sites are internal to key_fd.c" ..
+             "; runs under pkm_lcs_kunit_key_fd_set_value_allocation_failure_is_enomem" },
     function(t) end)
 
 test("every mutating ioctl accepts a transaction fd, and so do the four read ioctls",
@@ -394,11 +394,12 @@ test("a layer operation produces a single generation increment covering all of i
 
 test("a hive generation saturating at U64_MAX is EOVERFLOW",
     { spec = "PKM *ioctl.hive-generation.saturation-is-eoverflow",
-      covered_by = "kunit:",
+      covered_by = "kunit:pkm_lcs_kunit_key",
       skip = "the generation baseline comes from the source's reported maximum sequence, " ..
              "and a source that reports one near U64_MAX is refused at registration " ..
              "rather than admitted with a saturating counter, so no guest can drive a " ..
-             "live hive to the ceiling; no LCS KUnit case found — candidate for a new one" },
+             "live hive to the ceiling" ..
+             "; runs under pkm_lcs_kunit_key_fd_set_value_generation_saturation_is_eoverflow" },
     function(t) end)
 
 -- Writing ------------------------------------------------------------------

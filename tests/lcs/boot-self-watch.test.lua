@@ -167,14 +167,14 @@ test("the internal watch is not subject to MaxSubtreeWatchDepth",
 
 test("the internal watch is not subject to the transaction burst suppressor",
     { spec = "PKM *self-watch.exempt-from-depth-and-burst-limits",
-      covered_by = "kunit:",
+      covered_by = "kunit:pkm_lcs_kunit_transaction",
       skip = "the burst half of the claim cannot be told apart from inside a " ..
              "guest: any one admitted event of a commit drives a full re-read " ..
              "of the configuration key, which already sees the committed " ..
              "state, so a suppressor that dropped every event after the first " ..
              "256 would leave exactly the same configuration in force as no " ..
-             "suppressor at all; the depth half is the live case above, and " ..
-             "no KUnit case covers the burst half either — candidate for a new one" },
+             "suppressor at all; the depth half is the live case above" ..
+             "; runs under pkm_lcs_kunit_transaction_watch_burst_spares_the_internal_watch" },
     function(t) end)
 
 test("each internal target admits only the event types it cares about",

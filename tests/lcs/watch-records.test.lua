@@ -351,12 +351,12 @@ test("KEY_DELETED reaches a subtree watcher in the subtree form, with a path_dep
 
 test("an unrepresentable name or component length becomes an OVERFLOW instead",
     { spec = "PKM *watch.record.unrepresentable-length-becomes-overflow",
-      covered_by = "kunit:",
+      covered_by = "kunit:pkm_lcs_kunit_key",
       skip = "name_len and each component length are 16-bit, and " ..
              "MaxPathComponentLength tops out at 1024 while " ..
              "MaxTotalPathLength tops out at 65535, so no key, value or " ..
              "layer name a source or a caller can produce reaches 65536 " ..
              "bytes; the substitution lives in lcs_core's " ..
-             "plan_watch_event_record (WatchEventRecordPlan::OverflowInstead) " ..
-             "and no KUnit case found — candidate for a new one" },
+             "plan_watch_event_record (WatchEventRecordPlan::OverflowInstead)" ..
+             "; runs under pkm_lcs_kunit_watch_event_unrepresentable_length_is_overflow" },
     function(t) end)
