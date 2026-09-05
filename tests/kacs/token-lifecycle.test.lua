@@ -217,6 +217,74 @@ test("an impersonating thread keeps its impersonation across an install; reverti
         if not ok then error(err, 0) end
     end)
 
+test("installing needs TOKEN_ASSIGN_PRIMARY, a primary token, and SeAssignPrimaryTokenPrivilege on the real token",
+    { spec = "PKM *token.install.gates" }, function(t)
+        local ASSIGN, CREATE = token.bit(token.PRIV.ASSIGN_PRIMARY_TOKEN), token.bit(token.PRIV.CREATE_TOKEN)
+        -- Handle without the right; an impersonation-type token.
+        local worker = vm:spawn_worker()
+        local ok, err = pcall(function()
+            local new = assert(token.mint(worker, {}))
+            local narrow = assert(token.duplicate(worker, new, { access = R.ALL_ACCESS & ~R.ASSIGN_PRIMARY }))
+            t:assert_eq(token.install(worker, narrow).errno, sys.E.ACCES, "without TOKEN_ASSIGN_PRIMARY: EACCES")
+            local imp = assert(token.duplicate(worker, new, { token_type = token.TYPE.IMPERSONATION,
+                impersonation_level = token.LEVEL.IMPERSONATION }))
+            t:assert_eq(token.install(worker, imp).errno, sys.E.INVAL, "an impersonation token cannot be a primary: EINVAL")
+        end)
+        worker:kill(); worker:join()
+        if not ok then error(err, 0) end
+        -- The privilege is judged on the real token, and marked used.
+        local IMP = token.bit(token.PRIV.IMPERSONATE)
+        token.as_principal(t, vm, { privs_present = TCB | CREATE | ASSIGN | IMP, privs_enabled = TCB | CREATE | IMP }, function(w)
+            local own = assert(token.open_self(w, R.QUERY | R.ADJUST_PRIVS))
+            local mine = assert(token.mint(w, {}))
+            t:assert_eq(token.install(w, mine).errno, sys.E.ACCES, "SeAssignPrimaryTokenPrivilege held but disabled: EACCES")
+            -- An impersonated token carrying it enabled does not help. The
+            -- donor is another user (a self-minted token's descriptor would
+            -- not grant its creator TOKEN_IMPERSONATE), so SeImpersonatePrivilege
+            -- is what lets the principal wear it.
+            local donor = assert(token.mint(w, { user_sid = token.SID.TEST_USER_2, projected_uid = 1102,
+                privs_present = ASSIGN, privs_enabled = ASSIGN }))
+            local dimp, de = token.duplicate(w, donor, { access = R.QUERY | R.IMPERSONATE,
+                token_type = token.TYPE.IMPERSONATION, impersonation_level = token.LEVEL.IMPERSONATION })
+            assert(dimp, "duplicate the donor: " .. sys.errname(de or 0))
+            assert(token.impersonate(w, dimp).ret == 0, "impersonate the donor")
+            t:assert_eq(token.install(w, mine).errno, sys.E.ACCES, "the effective token's privilege does not satisfy the gate")
+            assert(token.revert(w).ret == 0)
+            t:assert_eq(token.enable_priv(w, own, token.PRIV.ASSIGN_PRIMARY_TOKEN).ret, 0, "enable it on the real token")
+            t:assert_eq(token.privileges(w, own).used & ASSIGN, 0, "not yet used")
+            t:assert_eq(token.install(w, mine).ret, 0, "now the install succeeds")
+            -- `own` still names the outgoing token object; the used mark landed there.
+            t:assert(token.privileges(w, own).used & ASSIGN ~= 0, "and the privilege is marked used")
+        end)
+    end)
+
+test("without SeTcbPrivilege the installed token has to share the caller's user SID and LogonSession",
+    { spec = "PKM *token.install.same-user-same-session-unless-tcb" }, function(t)
+        local ASSIGN, CREATE = token.bit(token.PRIV.ASSIGN_PRIMARY_TOKEN), token.bit(token.PRIV.CREATE_TOKEN)
+        token.as_principal(t, vm, { privs_present = TCB | CREATE | ASSIGN, privs_enabled = TCB | CREATE | ASSIGN }, function(w)
+            local own = assert(token.open_self(w, R.QUERY | R.ADJUST_PRIVS))
+            local my_session = token.statistics(w, own).auth_id
+            -- Candidates, minted while SeTcbPrivilege is still enabled.
+            local other_user = assert(token.mint(w, { user_sid = token.SID.TEST_USER_2, projected_uid = 1102 }))
+            local other_session = assert(token.mint(w, {}))
+            -- Same identity, same session; keeps SeTcbPrivilege (disabled) and
+            -- SeAssignPrimaryTokenPrivilege so the second install can follow.
+            local same = assert(token.create(w, { auth_id = my_session, privs_present = TCB | ASSIGN, privs_enabled = ASSIGN }))
+            t:assert_eq(token.disable_priv(w, own, token.PRIV.TCB).ret, 0, "drop SeTcbPrivilege")
+            t:assert_eq(token.install(w, other_user).errno, sys.E.PERM, "another user SID: EPERM")
+            t:assert_eq(token.install(w, other_session).errno, sys.E.PERM, "same user, another LogonSession: EPERM")
+            t:assert_eq(token.install(w, same).ret, 0, "same user and session: installs")
+            -- Now as the new primary (same identity), re-enable SeTcbPrivilege
+            -- on it and install a token of another user and session.
+            local own2 = assert(token.open_self(w, R.QUERY | R.ADJUST_PRIVS))
+            t:assert(token.privileges(w, own2).present & TCB ~= 0, "the same-identity token was minted with SeTcbPrivilege")
+            t:assert_eq(token.enable_priv(w, own2, token.PRIV.TCB).ret, 0, "enable it")
+            t:assert_eq(token.install(w, other_user).ret, 0, "with SeTcbPrivilege the identity constraints are bypassed")
+            local eff = assert(token.open_self(w, R.QUERY))
+            t:assert_eq(token.query(w, eff, token.CLASS.USER), token.SID.TEST_USER_2, "the caller is now TEST_USER_2")
+        end)
+    end)
+
 test("sibling threads converge through queued credential work with no completion barrier",
     { spec = "PKM *token.install.siblings-converge-asynchronously",
       skip = "no coverage anywhere: a worker is single-threaded and the agent cannot install; the transition " ..
