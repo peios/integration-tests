@@ -665,4 +665,40 @@ function M.as_principal(t, vm, spec, fn)
     if not ok then error(err, 0) end
 end
 
+--- A handle on `worker`'s current *effective* token, opened by `vm`.
+---
+--- A thread that has impersonated cannot always read its own effective
+--- token back: the impersonation gate may have capped the level to
+--- Identification, and an Identification-level token is barred from
+--- AccessCheck (§3.5.1) — including the check on the token's own
+--- descriptor. The agent is SYSTEM and can open any thread's token, so
+--- the impersonation cases read the result from outside instead.
+---
+--- A worker issues every syscall on one thread, so its tid is its pid.
+--- Returns fd, or nil, errno.
+function M.effective_token(vm, worker, access)
+    local pid = worker:syscall(sys.NR.getpid).ret
+    local pidfd, e = M.pidfd_open(vm, pid)
+    if not pidfd then return nil, e end
+    local fd, e2 = M.open_thread(vm, pidfd, pid, access or M.RIGHT.ALL_ACCESS)
+    sys.close(vm, pidfd)
+    if not fd then return nil, e2 end
+    return fd
+end
+
+--- What `worker`'s thread is currently acting as: `level`, `type`,
+--- `user` (binary SID) and `integrity`. Returns nil, errno on failure.
+function M.effective(vm, worker)
+    local fd, e = M.effective_token(vm, worker, M.RIGHT.QUERY)
+    if not fd then return nil, e end
+    local out = {
+        level = M.query_u32(vm, fd, M.CLASS.IMPERSONATION_LEVEL),
+        type = M.query_u32(vm, fd, M.CLASS.TYPE),
+        user = M.query(vm, fd, M.CLASS.USER),
+        integrity = M.integrity(vm, fd),
+    }
+    sys.close(vm, fd)
+    return out
+end
+
 return M
