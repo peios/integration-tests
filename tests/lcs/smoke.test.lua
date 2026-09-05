@@ -11,7 +11,7 @@ local lcs = require("helpers.lcs")
 local vm = provium:vm("v", "kernel-only"):boot()
 
 test("a Lua-served Machine hive registers and serves a key open",
-    { spec = "PKM *hive.routing.absolute-path-names-a-registered-hive" }, function(t)
+    { spec = "PKM *hive.routing.active-routes-to-source" }, function(t)
         local src, test_key = assert(lcs.machine(vm))
         local w = vm:spawn_worker()
         local r = lcs.open_key(src, w, -1, "Machine\\Software\\Test", lcs.KEY_ALL_ACCESS)
@@ -89,7 +89,7 @@ test("a Lua-served Machine hive registers and serves a key open",
 -- source in the same VM cannot take "Machine" with a different root:
 -- it registers a hive of its own.
 test("a second source registers a global and a private hive of the same name",
-    { spec = "PKM *private-hive.routing.invisible-without-scope" }, function(t)
+    { spec = "PKM *hive.route-identity.same-name-in-different-scopes" }, function(t)
         local scope = lcs.guid()
         local src = lcs.source(vm, { hives = {
             { name = "Smoke" }, { name = "Smoke", private = true, scope = scope },
