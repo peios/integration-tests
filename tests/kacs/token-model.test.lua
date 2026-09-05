@@ -210,12 +210,19 @@ kunit_stub("user-originated asynchronous work with neither captured credentials 
 
 test("credentials installed by override_creds carry their token and are evaluated normally",
     { spec = "PKM *token.override-creds-authoritative",
-      skip = "no coverage anywhere: override_creds() is reached only by in-kernel callers " ..
-             "(io_uring workers, workqueues); no KUnit case drives an evaluation through one" },
+      covered_by = "kunit:pkm_kunit_misc",
+      skip = "override_creds() is reached only by in-kernel callers (io_uring " ..
+             "workers, workqueues), so no syscall exercises it; runs under " ..
+             "pkm_kunit_override_creds_credential_is_authoritative, where a kernel " ..
+             "thread overrides its credential with a lesser token and every " ..
+             "evaluation follows that token until it reverts" },
     function(t) end)
 
 test("kernel-originated work under the boot SYSTEM credential evaluates as SYSTEM",
     { spec = "PKM *token.kernel-work-evaluates-as-system",
-      skip = "no coverage anywhere: the boot credential's evaluations (write-back, seeding) " ..
-             "leave no user-visible verdict to compare against SYSTEM's" },
+      covered_by = "kunit:pkm_kunit_misc",
+      skip = "the boot credential's evaluations (write-back, seeding) leave no " ..
+             "user-visible verdict to compare against SYSTEM's; runs under " ..
+             "pkm_kunit_kernel_work_evaluates_as_system, where the KUnit kernel " ..
+             "thread's token is SYSTEM's and its gates answer as SYSTEM" },
     function(t) end)

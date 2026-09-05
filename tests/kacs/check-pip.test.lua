@@ -356,12 +356,3 @@ test("the effective axes used for the verdict are the ones recorded in the event
         t:assert_eq(b[1].payload.success, true, "agreeing with the verdict again")
     end)
 
-test("the record of which bits PIP decided is threaded through and exported but never read",
-    { spec = "PKM *check.pip.decided-record-unconsumed",
-      skip = "no coverage anywhere: this is a claim about the absence of " ..
-             "a consumer. The value is carried in PipEnforcementState, " ..
-             "PreSaclWalkState.pip_decided and AccessCheckCoreState." ..
-             "pip_decided, and no ABI writeback, KMES payload field or " ..
-             "enforcement branch reads it — which no guest syscall and " ..
-             "no KUnit assertion can witness, only a source audit" },
-    function(t) end)

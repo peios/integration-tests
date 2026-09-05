@@ -314,10 +314,11 @@ test("only Protected at PeiosTcb trust is producible; Isolated is unreachable",
 
 test("neither None nor Isolated is a named constant in the public ABI",
     { spec = "PKM *psb.pip.none-isolated-absent-from-abi",
-      skip = "no coverage anywhere: this is an assertion about which " ..
-             "constants uapi/pkm/*.h defines, which neither a guest " ..
-             "syscall nor a KUnit case can observe — it belongs to the " ..
-             "§3.A ABI-appendix generator" },
+      covered_by = "pekit:pkm test.uapi",
+      skip = "this is an assertion about which constants uapi/pkm/*.h " ..
+             "defines, which neither a guest syscall nor a KUnit case can " ..
+             "observe; pkm's uapi/check-userspace-clean.sh fails the UAPI " ..
+             "check if any header defines a None or Isolated PIP constant" },
     function(t) end)
 
 test("library signature verification enforces a trust floor at the process's PIP trust",

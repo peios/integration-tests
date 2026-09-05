@@ -296,8 +296,9 @@ test("anonymous executable mappings are governed by wxp alone",
 
 test("a platform reporting speculation as not-affected satisfies sml activation by that fact",
     { spec = "PKM *psb.sml.not-affected-satisfies",
-      skip = "no coverage anywhere: this vCPU reports PR_SPEC_PRCTL | " ..
-             "PR_SPEC_ENABLE for store bypass and indirect branch, not " ..
-             "PR_SPEC_NOT_AFFECTED, so sml takes the force-disable route; " ..
-             "no KUnit case drives the not-affected branch either" },
+      covered_by = "kunit:pkm_kunit_process",
+      skip = "this vCPU reports PR_SPEC_PRCTL | PR_SPEC_ENABLE for store " ..
+             "bypass and indirect branch, not PR_SPEC_NOT_AFFECTED, so sml " ..
+             "takes the force-disable route; runs under " ..
+             "pkm_kunit_sml_not_affected_satisfies_activation" },
     function(t) end)

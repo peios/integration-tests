@@ -281,18 +281,20 @@ test("a create over a whiteout is one creation, not two",
 
 test("releasing the credential releases the descriptor",
     { spec = "PKM *facs.ovl-copy-up.release-frees-descriptor",
-      skip = "no coverage anywhere: the descriptor's lifetime is a kernel " ..
-             "allocation freed by the credential destructor, with no " ..
-             "guest-visible effect and no KUnit case over the LSM cred hooks" },
+      covered_by = "kunit:pkm_kunit_copy_up",
+      skip = "the descriptor's lifetime is a kernel allocation freed by the " ..
+             "credential destructor, with no guest-visible effect; runs under " ..
+             "pkm_kunit_overlay_release_frees_the_pending_descriptor" },
     function(t) end)
 
 test("a credential derived from one carrying a pending descriptor does not inherit it",
     { spec = "PKM *facs.ovl-copy-up.derived-credential-does-not-inherit",
-      skip = "no coverage anywhere: deriving a credential inside the " ..
-             "override scope is something only overlayfs itself can do — " ..
-             "the scope wraps exactly one creation and never returns to " ..
-             "userspace inside it — and no KUnit case covers the cred " ..
-             "prepare hook for this field" }, function(t) end)
+      covered_by = "kunit:pkm_kunit_copy_up",
+      skip = "deriving a credential inside the override scope is something " ..
+             "only overlayfs itself can do — the scope wraps exactly one " ..
+             "creation and never returns to userspace inside it; runs under " ..
+             "pkm_kunit_overlay_copy_up_sd_is_not_inherited, for both the " ..
+             "prepare and the transfer hook" }, function(t) end)
 
 -- ---- what a copied-up object keeps ----------------------------------------
 
@@ -427,10 +429,13 @@ test("a descriptor supplied explicitly to a native create is honoured through th
 
 test("a caller with no token is left alone rather than denied here",
     { spec = "PKM *facs.ovl-copy-up.no-token-passes-through",
-      skip = "no coverage anywhere: every task in the guest carries a KACS " ..
-             "token — the boot token is installed before userspace — so a " ..
-             "tokenless creator cannot be produced from a syscall, and no " ..
-             "KUnit case drives the overlayfs create hooks" }, function(t) end)
+      covered_by = "kunit:pkm_kunit_copy_up",
+      skip = "every task in the guest carries a KACS token — the boot token is " ..
+             "installed before userspace — so a tokenless creator cannot be " ..
+             "produced from a syscall; runs under " ..
+             "pkm_kunit_overlay_create_without_a_token_defers and " ..
+             "pkm_kunit_overlay_create_without_a_token_keeps_mounter_ids" },
+    function(t) end)
 
 -- ---- the canonical xattr --------------------------------------------------
 

@@ -252,13 +252,20 @@ test("binding a port is an access check against the reservation, not a privilege
 
 test("SeChangeNotifyPrivilege is in authd's issuer floor for Everyone",
     { spec = "PKM *priv.default.change-notify-to-everyone",
-      skip = "no coverage anywhere: the issuer floor is authd policy, and the " ..
-             "kernel-only profile has no authd — the kernel neither applies nor " ..
-             "records a default grant, and KUnit covers kernel code only" },
+      covered_by = "authd:policy::principal::tests",
+      skip = "the issuer floor is authd policy, and the kernel-only profile has " ..
+             "no authd — the kernel neither applies nor records a default grant; " ..
+             "runs under authd's the_floor_keeps_an_unseeded_machine_usable, " ..
+             "which resolves an unconfigured machine's floor to exactly " ..
+             "SeChangeNotifyPrivilege for a principal known only as Everyone" },
     function(t) end)
 
 test("SeCreateSymbolicLinkPrivilege is deliberately left out of the floor",
     { spec = "PKM *priv.default.symlink-not-granted",
-      skip = "no coverage anywhere: the same authd issuer floor, plus the shipped " ..
-             "seeds, neither of which exists in a kernel-only guest" },
+      covered_by = "authd:policy::principal::tests",
+      skip = "the same authd issuer floor, plus the shipped seeds, neither of " ..
+             "which exists in a kernel-only guest; runs under authd's " ..
+             "the_floor_grants_no_administrative_privilege (the floor grants " ..
+             "nothing beyond ChangeNotify) and " ..
+             "the_seed_does_not_grant_the_privileges_reserved_to_the_tcb" },
     function(t) end)

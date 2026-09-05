@@ -72,11 +72,13 @@ test("procfs and sysfs are unmanaged — FACS holds no descriptor for them at al
 
 test("nullfs is unmanaged",
     { spec = "PKM *facs.storage.nullfs-unmanaged",
-      skip = "no coverage anywhere: nullfs is SB_NOUSER and absent from " ..
-             "/proc/filesystems, and the one instance — the mount-namespace " ..
-             "root — is permanently covered by the rootfs mounted on top of " ..
-             "it, so no path in the guest resolves to it and no fd can name " ..
-             "its superblock" }, function(t) end)
+      covered_by = "kunit:pkm_kunit_file",
+      skip = "nullfs is SB_NOUSER and absent from /proc/filesystems, and the " ..
+             "one instance — the mount-namespace root — is permanently covered " ..
+             "by the rootfs mounted on top of it, so no path in the guest " ..
+             "resolves to it; runs under " ..
+             "pkm_kunit_nullfs_root_is_unmanaged_and_unseeded, which steps up " ..
+             "from the root mount to it" }, function(t) end)
 
 test("StrataFS is fixed at deny-missing for the superblock's lifetime",
     { spec = "PKM *facs.storage.stratafs-fixed-deny-missing" }, function(t)
@@ -217,9 +219,12 @@ test("the devtmpfs root is seeded before kdevtmpfs starts",
 
 test("the nullfs root is not seeded",
     { spec = "PKM *facs.storage.nullfs-not-seeded",
-      skip = "no coverage anywhere: the nullfs namespace root is covered by " ..
-             "the rootfs mounted over it and is unreachable by path or fd " ..
-             "from the guest" }, function(t) end)
+      covered_by = "kunit:pkm_kunit_file",
+      skip = "the nullfs namespace root is covered by the rootfs mounted over " ..
+             "it and is unreachable by path or fd from the guest; runs under " ..
+             "pkm_kunit_nullfs_root_is_unmanaged_and_unseeded, which finds no " ..
+             "descriptor on it and one on the rootfs root above" },
+    function(t) end)
 
 test("the seed is byte-for-byte identical on both mounts",
     { spec = "PKM *facs.storage.seeded-descriptor-contents" }, function(t)

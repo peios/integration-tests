@@ -215,9 +215,12 @@ test("lazy population from the xattr installs the parsed object by compare-and-s
 
 test("eviction frees the cached descriptor RCU-safely",
     { spec = "PKM *facs.storage.eviction-rcu-safe",
-      skip = "no coverage anywhere: inode eviction is not something the " ..
-             "guest can schedule against an in-flight permission check, " ..
-             "and no KUnit case covers the destructor's pin draining" },
+      covered_by = "kunit:pkm_kunit_file",
+      skip = "inode eviction is not something the guest can schedule against " ..
+             "an in-flight permission check; runs under " ..
+             "pkm_kunit_inode_eviction_drains_pins_before_freeing, which pins a " ..
+             "cached descriptor, runs the eviction destructor and finds the " ..
+             "pinned object whole until the pin is released" },
     function(t) end)
 
 test("set-security releases the inode security lock across the xattr write",

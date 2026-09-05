@@ -587,29 +587,18 @@ test("the runtime-enforced build configuration held at initialisation",
                 ("absent: " .. sys.errname(merr or 0))))
     end)
 
-test("CONFIG_BPF_LSM is refused at runtime rather than by Kconfig",
-    { spec = "PKM *abi-notes.build.bpf-lsm-refused-at-runtime",
-      skip = "no coverage anywhere: the claim is about a kernel built " ..
-             "with both CONFIG_SECURITY_PKM and CONFIG_BPF_LSM, which " ..
-             "configures and builds and then fails to initialise. This " ..
-             "profile's kernel is not that kernel, and a guest cannot " ..
-             "rebuild one; no KUnit case covers an init-time refusal " ..
-             "either" }, function(t) end)
 
-test("CONFIG_LSM is never parsed",
-    { spec = "PKM *abi-notes.build.config-lsm-never-parsed",
-      skip = "no coverage anywhere: CONFIG_LSM and the lsm= command " ..
-             "line select the LSM ordering at boot, and the kernel-only " ..
-             "profile's command line is fixed, so a test cannot vary it " ..
-             "and observe that it made no difference" }, function(t) end)
 
 test("CONFIG_SECURITY_PKM_KUNIT compiles in the harness and a test key",
     { spec = "PKM *abi-notes.build.kunit-test-key",
-      skip = "no coverage anywhere: which verification key was compiled " ..
-             "in is visible only to the signing path, and a guest with " ..
-             "no signed binary of its own cannot tell the test key from " ..
-             "the production one; the KUnit harness itself reports " ..
-             "through debugfs, which lockdown closes on this profile" },
+      covered_by = "kunit:pkm_kunit_signing",
+      skip = "which verification key was compiled in is visible only to the " ..
+             "signing path, and a guest with no signed binary of its own cannot " ..
+             "tell the test key from the production one; runs under " ..
+             "pkm_kunit_builtin_signing_key_table_has_one_tcb_key and every " ..
+             "pkm_kunit_signing verification case, whose vectors are signed with " ..
+             "the publicly known test key and verify only because that is the " ..
+             "key the KUnit build compiles in" },
     function(t) end)
 
 test("CONFIG_STRATAFS_FS is what makes the copy-up API live",

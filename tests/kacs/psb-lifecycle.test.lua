@@ -136,17 +136,15 @@ test("no_child_process persists across exec",
 
 test("the process GUID is not reset at exec: it identifies the process, not the binary",
     { spec = "PKM *psb.exec.guid-preserved",
-      skip = "no coverage anywhere: process_guid is exposed nowhere but the " ..
-             "stamp on a KMES event a process emits itself — the KACS " ..
-             "syscall range (§3.A) carries no PSB query, so a pidfd cannot " ..
-             "be asked for one — and no process here can be questioned " ..
-             "either side of its own exec: a worker has already exec'd by " ..
-             "the time the harness can speak to it, and the child a worker " ..
-             "spawns is a fresh agent with no connection back. " ..
-             "pkm_kunit_exec_commit_preserves_mitigations_and_no_child " ..
-             "compares the process_sd and rate-bucket pointers across the " ..
-             "exec commit without comparing process_guid — a " ..
-             "pkm_kunit_expect_guid_eq on that case would close it" },
+      covered_by = "kunit:pkm_kunit_process",
+      skip = "process_guid is exposed nowhere but the stamp on a KMES event a " ..
+             "process emits itself — the KACS syscall range (§3.A) carries no " ..
+             "PSB query, so a pidfd cannot be asked for one — and no process " ..
+             "here can be questioned either side of its own exec: a worker has " ..
+             "already exec'd by the time the harness can speak to it, and the " ..
+             "child a worker spawns is a fresh agent with no connection back; " ..
+             "runs under pkm_kunit_exec_commit_preserves_mitigations_and_no_child, " ..
+             "which compares process_guid across the exec commit" },
     function(t) end)
 
 test("the process descriptor is preserved unchanged across exec",

@@ -250,9 +250,13 @@ test("the CAP_SYS_BOOT mapping marks SeShutdownPrivilege only after the remote-o
 
 test("a gate whose used-bit record fails returns EPERM or EACCES rather than proceeding",
     { spec = "PKM *priv.used.record-failure-fails-operation",
-      skip = "no coverage anywhere: kacs_rust_token_mark_privileges_used is an " ..
-             "atomic fetch_or that fails only for a NULL token pointer, which no " ..
-             "gate can reach with a live credential; no KUnit case forces it either" },
+      covered_by = "kunit:pkm_kunit_misc",
+      skip = "kacs_rust_token_mark_privileges_used is an atomic fetch_or that " ..
+             "fails only for a NULL token pointer, which no gate can reach with a " ..
+             "live credential; runs under " ..
+             "pkm_kunit_privilege_use_record_failure_fails_the_gate, which makes " ..
+             "the recorder fail and watches the capability and manage-volume gates " ..
+             "refuse what they had just admitted" },
     function(t) end)
 
 -- The two enforcement categories ---------------------------------------------

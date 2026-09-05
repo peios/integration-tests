@@ -374,10 +374,11 @@ test("Linux file capabilities stay dead: non-empty security.capability is refuse
 
 test("a privilege consulted through security_capable is marked used twice",
     { spec = "PKM *cred.dac.privilege-use-double-counted",
-      skip = "no coverage anywhere: privilege use is recorded as a bitmask " ..
-             "(kacs_rust_token_mark_privileges_used ORs into it) with no " ..
-             "counter and no per-use audit event, so a double count has no " ..
-             "witness from the guest and none in KUnit" },
+      covered_by = "kunit:pkm_kunit_misc",
+      skip = "privilege use is recorded as a bitmask with no counter and no " ..
+             "per-use audit event, so a double count has no witness from the " ..
+             "guest; runs under pkm_kunit_security_capable_marks_privilege_use_twice, " ..
+             "which counts the recorder's calls across one security_capable()" },
     function(t) end)
 
 -- ---- the LSM stack ---------------------------------------------------
@@ -424,10 +425,3 @@ test("non-MAC LSMs stack safely alongside KACS",
             "at least one of landlock/lockdown/yama stacks with KACS: " .. tostring(raw))
     end)
 
-test("the conflicting-LSM check is a build-configuration test, not a live-stack inspection",
-    { spec = "PKM *cred.dac.lsm-check-build-config",
-      skip = "no coverage anywhere: the check reads IS_ENABLED() at " ..
-             "pkm_init() and returns -EINVAL before KACS activates, so a " ..
-             "guest on a running KACS cannot tell it from an inspection of " ..
-             "the registered stack, and there is no KUnit case for it" },
-    function(t) end)

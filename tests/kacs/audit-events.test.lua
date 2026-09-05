@@ -502,21 +502,24 @@ test("an audit event cannot be suppressed by a bad output pointer",
 
 test("a logon-session-destroyed with an invalid UTF-8 package drops silently",
     { spec = "PKM *audit-events.best-effort-logon-session-utf8",
-      skip = "no coverage anywhere: kacs_create_logon_session validates " ..
-             "the auth-package name as UTF-8 and refuses anything else " ..
-             "(pkm_kunit_create_logon_session_non_utf8_auth_package_" ..
-             "fails_closed), so no live session can reach the encoder's " ..
-             "sanitiser; the drop path itself has no KUnit case" },
+      covered_by = "kunit:pkm_kunit_misc",
+      skip = "kacs_create_logon_session validates the auth-package name as " ..
+             "UTF-8 and refuses anything else " ..
+             "(pkm_kunit_create_logon_session_non_utf8_auth_package_fails_closed), " ..
+             "so no live session can hand the encoder anything else; runs under " ..
+             "pkm_kunit_logon_session_destroyed_encoder_drops_non_utf8, which " ..
+             "probes the encoder directly and sees the refusal the emitter drops on" },
     function(t) end)
 
 test("the two StrataFS records drop rather than failing the operation",
     { spec = "PKM *audit-events.best-effort-stratafs",
-      skip = "no coverage anywhere: the two drop conditions are an " ..
-             "allocation failure and an over-long operation string. The " ..
-             "operation strings are compile-time constants, and the " ..
-             "stratafs test-hook points (copy-up-begin, copy-up-publish, " ..
-             "rename-provider, link-install) cannot fail the audit " ..
-             "emitter's allocation; no KUnit case covers it either" },
+      covered_by = "kunit:pkm_kunit_misc",
+      skip = "the two drop conditions are an allocation failure and an " ..
+             "over-long operation string; the operation strings are " ..
+             "compile-time constants, and the stratafs test-hook points cannot " ..
+             "fail the emitter's allocation. Runs under " ..
+             "pkm_kunit_stratafs_audit_emission_is_best_effort for the over-long " ..
+             "operation and path; the allocation failure has no witness" },
     function(t) end)
 
 test("a self-emitted payload that would overflow its buffer is dropped",

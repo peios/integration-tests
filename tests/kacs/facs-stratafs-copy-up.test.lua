@@ -13,11 +13,11 @@
 -- xattr protections and the audit rule. It does not reach the phase
 -- state machine — arming, binding, mismatch, rebinding, generations,
 -- internal-file scoping — because every one of those is a property of a
--- call sequence only the in-kernel StrataFS implementation can make, and
--- the KACS KUnit suites contain no cases over `copy_up.c` beyond the
--- three backing-file ones. Those citations are recorded here as
--- uncovered so a KUnit case can be written for each; the skip reason on
--- each one says what a test would have to be able to do.
+-- call sequence only the in-kernel StrataFS implementation can make.
+-- Those citations are covered by the `pkm_kunit_copy_up` KUnit suite in
+-- `pkm/kacs/copy_up.c`, which drives the same entry points StrataFS
+-- calls against a tmpfs it mounts for itself, as a principal the tree
+-- grants nothing; each stub below names the case that carries it.
 --
 -- The live cases run as a minted principal wherever the point is that a
 -- right was *not* required: the agent is SYSTEM and would pass either
@@ -100,13 +100,8 @@ local function as_user(t, fn)
                                 privs_enabled = CHANGE_NOTIFY }, fn)
 end
 
-local function uncovered(name, spec, why)
-    test(name, { spec = "PKM *" .. spec, skip = "no coverage anywhere: " .. why },
-        function(t) end)
-end
-
-local function kunit_stub(name, spec, case, why)
-    test(name, { spec = "PKM *" .. spec, covered_by = "kunit:pkm_kunit_file",
+local function kunit_stub(name, spec, case, why, suite)
+    test(name, { spec = "PKM *" .. spec, covered_by = "kunit:" .. (suite or "pkm_kunit_file"),
                  skip = why .. "; runs under " .. case }, function(t) end)
 end
 
@@ -505,214 +500,277 @@ test("the outer authorized handle operation remains subject to ordinary audit",
 --
 -- Everything below is a property of the copy-up API's own call sequence.
 -- §3.9.7 states that the API has no userspace surface at all, so none of
--- it is reachable from the guest; the KACS KUnit suites cover only the
--- three backing-file cases named here. Each skip says what a case would
--- need to be able to drive.
+-- it is reachable from the guest. Each claim runs under a case of the
+-- `pkm_kunit_copy_up` suite (pkm/kacs/copy_up.c) unless another suite is
+-- named. The suite has two kinds of case: the predicate cases build
+-- synthetic dentries and ask the hook predicates directly
+-- (scope_is_exact and its neighbours), and the flow cases mount a tmpfs,
+-- create a provider and a destination parent, and drive the entry points
+-- StrataFS calls — begin, begin_create, vfs_create, bind_staging,
+-- begin_populate, set_capability, begin_publish_link, vfs_link,
+-- finish_publish, rebind_staging, begin_cleanup, vfs_unlink — as a
+-- LocalService principal the tree grants nothing, so that every
+-- refusal is ordinary authorization and every admission is the context.
 
 local NO_SURFACE = "the copy-up API is kernel-private with no ABI, fd, ioctl, " ..
     "syscall or securityfs control, so the guest cannot make the call sequence " ..
     "this is about"
 
-uncovered("creating a context performs no authorization check of its own",
+local function copy_up(name, spec, case, why)
+    kunit_stub(name, spec, case, why or NO_SURFACE, "pkm_kunit_copy_up")
+end
+
+copy_up("creating a context performs no authorization check of its own",
     "facs.stratafs-copy-up.creation-performs-no-check",
-    NO_SURFACE .. "; the absence of a check inside a kernel-private constructor " ..
-    "has no guest-visible effect either")
+    "pkm_kunit_copy_up_begin_pins_provider_without_a_check, where a principal " ..
+    "refused even a read of the provider creates a context over it")
 
-uncovered("a context attaches to at most one task and a task carries at most one",
+copy_up("a context attaches to at most one task and a task carries at most one",
     "facs.stratafs-copy-up.one-context-per-task",
-    NO_SURFACE .. "; a second creation or attachment can only be attempted in-kernel")
+    "pkm_kunit_copy_up_attachment_is_exclusive_and_transferable (a second " ..
+    "creation on an attached task is EBUSY, and a worker cannot enter a held " ..
+    "context) and pkm_kunit_copy_up_context_is_non_nesting")
 
-uncovered("a context is not inherited by fork, clone or execve",
+copy_up("a context is not inherited by fork, clone or execve",
     "facs.stratafs-copy-up.not-inherited",
-    NO_SURFACE .. "; a minted principal can fork and exec here now, but with no way " ..
-    "to tell an armed phase from an unarmed one, neither side of the exec says anything")
+    "pkm_kunit_copy_up_attachment_is_exclusive_and_transferable: a task the " ..
+    "context was never attached to carries none, and the exec commit hook " ..
+    "detaches and clears it — the task-allocation hook's explicit clearing is " ..
+    "the fork half, by inspection")
 
-uncovered("a refcounted context can be transferred to a kernel worker",
-    "facs.stratafs-copy-up.worker-transfer", NO_SURFACE)
+copy_up("a refcounted context can be transferred to a kernel worker",
+    "facs.stratafs-copy-up.worker-transfer",
+    "pkm_kunit_copy_up_attachment_is_exclusive_and_transferable, where a " ..
+    "kthread enters the context the originator left, arms and ends a phase " ..
+    "with the next generation, and leaves it")
 
-uncovered("leaving, exit, an error path and completion all clear the armed phase",
-    "facs.stratafs-copy-up.detach-clears-phase", NO_SURFACE)
+copy_up("leaving, exit, an error path and completion all clear the armed phase",
+    "facs.stratafs-copy-up.detach-clears-phase",
+    "pkm_kunit_copy_up_attachment_is_exclusive_and_transferable (leave, task " ..
+    "exit, exec commit, a refused begin_create, end_phase) and " ..
+    "pkm_kunit_copy_up_named_flow_is_exact_and_exempt (a failed finish_publish)")
 
-uncovered("the interface fails closed on nesting, concurrent attachment, a stale phase or a mismatch",
+copy_up("the interface fails closed on nesting, concurrent attachment, a stale phase or a mismatch",
     "facs.stratafs-copy-up.fails-closed-on-misuse",
-    NO_SURFACE .. "; every one of the four misuses is a second in-kernel call")
+    "pkm_kunit_copy_up_phases_are_exclusive_and_generations_sealed (a second " ..
+    "arm is EBUSY, an unbound populate or publish EINVAL, an untracked cleanup " ..
+    "victim ESTALE) with pkm_kunit_copy_up_attachment_is_exclusive_and_transferable " ..
+    "and pkm_kunit_copy_up_context_is_non_nesting for attachment")
 
-uncovered("a mismatched operation is evaluated normally and does not consume the exemption",
+copy_up("a mismatched operation is evaluated normally and does not consume the exemption",
     "facs.stratafs-copy-up.mismatch-evaluated-normally",
-    NO_SURFACE .. "; interleaving an unrelated operation with a copy-up mid-phase " ..
-    "would need the phase to be observable, which it is not")
+    "pkm_kunit_copy_up_named_flow_is_exact_and_exempt: creating another name, " ..
+    "or the right name as a directory, is refused for the principal by ordinary " ..
+    "authorization and leaves the armed creation unconsumed")
 
-uncovered("creation pins the provider path, inode, descriptor and capability value",
-    "facs.stratafs-copy-up.creation-pins-provider", NO_SURFACE)
+copy_up("creation pins the provider path, inode, descriptor and capability value",
+    "facs.stratafs-copy-up.creation-pins-provider",
+    "pkm_kunit_copy_up_begin_pins_provider_without_a_check, which compares " ..
+    "the pinned path, inode, descriptor bytes and capability (present and absent) " ..
+    "against the provider's own")
 
-uncovered("every later positive path is paired with a pinned inode",
+copy_up("every later positive path is paired with a pinned inode",
     "facs.stratafs-copy-up.paths-paired-with-inode",
-    NO_SURFACE .. "; unlinking and recreating the provider mid-copy-up cannot be " ..
-    "scheduled against an unobservable phase")
+    "pkm_kunit_copy_up_scope_is_exact, where the provider dentry is re-pointed " ..
+    "at another inode and every match fails")
 
-uncovered("exactly one phase is armed at a time",
-    "facs.stratafs-copy-up.one-phase-armed", NO_SURFACE)
+copy_up("exactly one phase is armed at a time",
+    "facs.stratafs-copy-up.one-phase-armed",
+    "pkm_kunit_copy_up_phases_are_exclusive_and_generations_sealed")
 
-uncovered("path comparison includes the mount",
+copy_up("path comparison includes the mount",
     "facs.stratafs-copy-up.match-includes-mount",
-    NO_SURFACE .. "; reaching the pinned dentry through a second mount of the same " ..
-    "superblock is only meaningful inside an armed phase")
+    "pkm_kunit_copy_up_scope_is_exact, where the same dentry through a second " ..
+    "mount of the same superblock does not match")
 
-uncovered("a phase never acts as a wildcard for other objects",
-    "facs.stratafs-copy-up.no-wildcard-matching", NO_SURFACE)
+copy_up("a phase never acts as a wildcard for other objects",
+    "facs.stratafs-copy-up.no-wildcard-matching",
+    "pkm_kunit_copy_up_scope_is_exact (another inode of the same filesystem " ..
+    "matches nothing) and pkm_kunit_copy_up_named_flow_is_exact_and_exempt " ..
+    "(another name in the armed parent is refused)")
 
-uncovered("a rename or parent substitution invalidates the staged binding",
-    "facs.stratafs-copy-up.rename-invalidates-binding", NO_SURFACE)
+copy_up("a rename or parent substitution invalidates the staged binding",
+    "facs.stratafs-copy-up.rename-invalidates-binding",
+    "pkm_kunit_copy_up_named_flow_is_exact_and_exempt, where the bound staged " ..
+    "file is renamed into another directory and the populate exemptions stop, " ..
+    "then resume when it is renamed back; pkm_kunit_copy_up_scope_is_exact " ..
+    "covers the parent-substitution predicate")
 
-uncovered("named creation is bound to the exact final component",
-    "facs.stratafs-copy-up.named-creation-exact-component", NO_SURFACE)
+copy_up("named creation is bound to the exact final component",
+    "facs.stratafs-copy-up.named-creation-exact-component",
+    "pkm_kunit_copy_up_named_flow_is_exact_and_exempt")
 
-uncovered("an anonymous object must be bound as the staged object before it can be used",
-    "facs.stratafs-copy-up.anonymous-must-be-bound", NO_SURFACE)
+copy_up("an anonymous object must be bound as the staged object before it can be used",
+    "facs.stratafs-copy-up.anonymous-must-be-bound",
+    "pkm_kunit_copy_up_anonymous_object_must_be_bound, where a tmpfile created " ..
+    "under the phase can be neither populated, published nor cleaned up until " ..
+    "bind_staging names it")
 
-uncovered("a stacking destination's transition is authenticated at the exact outer dentry",
+copy_up("a stacking destination's transition is authenticated at the exact outer dentry",
     "facs.stratafs-copy-up.stacking-transition-authenticated",
-    NO_SURFACE .. "; and a stacking filesystem beneath a StrataFS create stratum " ..
-    "is not something the mount options can be made to produce here")
+    "pkm_kunit_copy_up_stacked_tmpfile_binds_outer_inode")
 
-uncovered("a missing, repeated, mismatched or out-of-order transition fails closed",
-    "facs.stratafs-copy-up.transition-out-of-order-fails", NO_SURFACE)
+copy_up("a missing, repeated, mismatched or out-of-order transition fails closed",
+    "facs.stratafs-copy-up.transition-out-of-order-fails",
+    "pkm_kunit_copy_up_stacked_tmpfile_binds_outer_inode, where a repeated " ..
+    "transition is EACCES and the real filesystem's own post-create event is " ..
+    "rejected as the outer anchor")
 
-uncovered("cleanup can be armed only for a retained object or the bound staging object",
+copy_up("cleanup can be armed only for a retained object or the bound staging object",
     "facs.stratafs-copy-up.cleanup-victim-restricted",
-    NO_SURFACE .. "; the ESTALE this describes is returned to an in-kernel caller")
+    "pkm_kunit_copy_up_named_flow_is_exact_and_exempt (the retained staging " ..
+    "name and the bound object are admitted, the provider is ESTALE) and " ..
+    "pkm_kunit_copy_up_scope_is_exact")
 
-uncovered("rebinding the staging identity requires mount, inode and parent all to match",
-    "facs.stratafs-copy-up.rebind-conditions", NO_SURFACE)
+copy_up("rebinding the staging identity requires mount, inode and parent all to match",
+    "facs.stratafs-copy-up.rebind-conditions",
+    "pkm_kunit_copy_up_named_flow_is_exact_and_exempt: the published path " ..
+    "rebinds, a different inode is ESTALE, and so is any rebind while a phase " ..
+    "is armed")
 
-uncovered("the rebind API exists and is not called by StrataFS",
+copy_up("the rebind API exists and is not called by StrataFS",
     "facs.stratafs-copy-up.rebind-unused",
-    NO_SURFACE .. "; this is a statement about which kernel-private entry points " ..
-    "the caller uses, with no runtime manifestation at all")
+    "pkm_kunit_copy_up_named_flow_is_exact_and_exempt for the API's existence " ..
+    "and conditions; that fs/stratafs never calls it is a property of the " ..
+    "caller, checked by inspection rather than by a test")
 
-uncovered("the staging marker is admitted only on the bound inode or during authenticated recovery",
+copy_up("the staging marker is admitted only on the bound inode or during authenticated recovery",
     "facs.stratafs-copy-up.staging-marker-admission",
-    NO_SURFACE .. "; the caller-facing half of this rule — that every " ..
-    "caller-originated write and removal is denied — is covered above, but the " ..
-    "admitted half happens only inside a phase")
+    "pkm_kunit_copy_up_orphan_recovery_binds_the_marker_object (a write as well " ..
+    "as a removal on the exact orphan, nothing on its sibling) and " ..
+    "pkm_kunit_copy_up_scope_is_exact for the bound staging inode in populate")
 
-uncovered("orphan deletion is bound to the exact dentry, inode and parent supplied",
+copy_up("orphan deletion is bound to the exact dentry, inode and parent supplied",
     "facs.stratafs-copy-up.orphan-deletion-exact-binding",
-    NO_SURFACE .. "; staging recovery runs from StrataFS's own mount-time path")
+    "pkm_kunit_copy_up_orphan_recovery_binds_the_marker_object")
 
-uncovered("a permission match must also match the requested mask",
-    "facs.stratafs-copy-up.mask-must-match", NO_SURFACE)
+copy_up("a permission match must also match the requested mask",
+    "facs.stratafs-copy-up.mask-must-match",
+    "pkm_kunit_copy_up_named_flow_is_exact_and_exempt and " ..
+    "pkm_kunit_copy_up_scope_is_exact")
 
-uncovered("staging access is limited to the masks population needs",
-    "facs.stratafs-copy-up.staging-mask-limits", NO_SURFACE)
+copy_up("staging access is limited to the masks population needs",
+    "facs.stratafs-copy-up.staging-mask-limits",
+    "pkm_kunit_copy_up_named_flow_is_exact_and_exempt, where read, write and " ..
+    "append are admitted on the staged file and execute is not")
 
-uncovered("unknown mask bits fail closed",
+copy_up("unknown mask bits fail closed",
     "facs.stratafs-copy-up.unknown-mask-fails-closed",
-    NO_SURFACE .. "; the mask compared is the kernel's own MAY_* value, which no " ..
-    "syscall can be made to carry an unknown bit in")
+    "pkm_kunit_copy_up_named_flow_is_exact_and_exempt")
 
-uncovered("internal copy-up files are additionally denied statfs, truncate, fsync and fallocate",
+copy_up("internal copy-up files are additionally denied statfs, truncate, fsync and fallocate",
     "facs.stratafs-copy-up.internal-file-denied-ops",
-    NO_SURFACE .. "; an internal copy-up file is never installed in a userspace " ..
-    "file table, so no syscall can name one")
+    "pkm_kunit_copy_up_internal_file_is_denied_the_listed_operations")
 
-uncovered("an internally opened file is marked copy-up-internal and carries a zero granted mask",
-    "facs.stratafs-copy-up.internal-file-zero-mask", NO_SURFACE)
+copy_up("an internally opened file is marked copy-up-internal and carries a zero granted mask",
+    "facs.stratafs-copy-up.internal-file-zero-mask",
+    "pkm_kunit_copy_up_internal_file_fails_closed and " ..
+    "pkm_kunit_copy_up_internal_file_is_denied_the_listed_operations")
 
-uncovered("an internal file is unusable after phase completion, from another task, or after SCM_RIGHTS",
+copy_up("an internal file is unusable after phase completion, from another task, or after SCM_RIGHTS",
     "facs.stratafs-copy-up.internal-file-scope",
-    NO_SURFACE .. "; the file cannot be obtained in the first place, so the three " ..
-    "escapes cannot be attempted")
+    "pkm_kunit_copy_up_internal_file_fails_closed")
 
-uncovered("each armed phase has a distinct generation and an internal file is sealed to it",
-    "facs.stratafs-copy-up.generation-seal", NO_SURFACE)
+copy_up("each armed phase has a distinct generation and an internal file is sealed to it",
+    "facs.stratafs-copy-up.generation-seal",
+    "pkm_kunit_copy_up_internal_file_fails_closed, " ..
+    "pkm_kunit_copy_up_phases_are_exclusive_and_generations_sealed (the " ..
+    "overflow) and pkm_kunit_copy_up_anonymous_object_must_be_bound (a file " ..
+    "from the create phase is refused in populate)")
 
-uncovered("the read-only provider-directory cursor resumes across a bounded recovery batch",
+copy_up("the read-only provider-directory cursor resumes across a bounded recovery batch",
     "facs.stratafs-copy-up.directory-cursor-resume",
-    NO_SURFACE .. "; bounded staging recovery runs entirely inside StrataFS")
+    "pkm_kunit_copy_up_source_directory_resume_is_exact")
 
 kunit_stub("one copy-up-internal backing file can be adopted by the outer description",
     "facs.stratafs-copy-up.backing-adoption",
-    "pkm_kunit_backing_file_inherits_exact_outer_snapshot",
-    "the adoption entry point is kernel-private and the internal file it adopts " ..
-    "never reaches a userspace file table")
+    "pkm_kunit_copy_up_backing_file_requires_explicit_adoption",
+    NO_SURFACE)
 
 kunit_stub("adoption copies the outer description's granted and continuous-audit snapshot",
     "facs.stratafs-copy-up.adoption-copies-snapshot",
-    "pkm_kunit_backing_file_inherits_exact_outer_snapshot",
-    "the snapshot copied is an in-kernel field of the file blob with no read-back " ..
-    "surface")
+    "pkm_kunit_backing_file_inherits_exact_outer_snapshot, with " ..
+    "pkm_kunit_copy_up_adopts_outer_descriptor_snapshot in pkm_kunit_copy_up",
+    NO_SURFACE)
 
 kunit_stub("adoption is one-shot and requires the backing file mode",
     "facs.stratafs-copy-up.adoption-one-shot",
-    "pkm_kunit_copy_up_backing_file_requires_explicit_adoption and " ..
     "pkm_kunit_backing_file_rejects_unsettled_outer_handles",
-    "a second adoption attempt is a second kernel-private call")
+    NO_SURFACE)
 
-uncovered("adoption happens before the anonymous staged object is published",
+copy_up("adoption happens before the anonymous staged object is published",
     "facs.stratafs-copy-up.adoption-before-publish",
-    NO_SURFACE .. "; the ordering is StrataFS's own, and neither order has a " ..
-    "distinguishable outcome from the guest")
+    "pkm_kunit_copy_up_anonymous_object_must_be_bound, where the backing file " ..
+    "is adopted against the still-bound tmpfile binding, idle, and refused " ..
+    "while a phase is armed — the ordering itself is StrataFS's")
 
-uncovered("the deletion scope is bound once to the exact provider parent, dentry and inode",
+copy_up("the deletion scope is bound once to the exact provider parent, dentry and inode",
     "facs.stratafs-copy-up.deletion-scope-binding",
-    NO_SURFACE .. "; the scope is armed and cleared inside one close, and only " ..
-    "the corresponding unlink calls can attempt to match it")
+    "pkm_kunit_copy_up_deferred_deletion_is_bound_to_the_exact_entry")
 
-uncovered("an entry that no longer names the descriptor's inode is never unlinked",
+copy_up("an entry that no longer names the descriptor's inode is never unlinked",
     "facs.stratafs-copy-up.deletion-identity-check",
-    NO_SURFACE .. "; substituting the provider entry between the arming and the " ..
-    "unlink means acting inside one synchronous close")
+    "pkm_kunit_copy_up_deferred_deletion_is_bound_to_the_exact_entry, where " ..
+    "the bound entry and the outer entry are each unlinked and re-created " ..
+    "under the same name and the scope admits neither")
 
-uncovered("an unresolvable, corrupt or oversized provider descriptor fails the phase",
+copy_up("an unresolvable, corrupt or oversized provider descriptor fails the phase",
     "facs.stratafs-copy-up.unresolvable-descriptor-fails-phase",
-    "a provider object whose descriptor is missing or corrupt cannot be reached " ..
-    "through a StrataFS handle at all — the outer authorization against the " ..
-    "merged inode is denied first, so the phase is never armed; and a corrupt " ..
-    "descriptor cannot be planted from the guest (§3.9.5's raw-write denial)")
+    "pkm_kunit_copy_up_begin_pins_provider_without_a_check, where a provider " ..
+    "wearing bytes that do not parse fails begin_create with nothing armed " ..
+    "and the destination still negative",
+    "a corrupt descriptor cannot be planted from the guest (§3.9.5's raw-write " ..
+    "denial), and a provider without one is denied before any phase is armed")
 
-uncovered("there is no window in which a staging inode carries a weaker descriptor",
+copy_up("there is no window in which a staging inode carries a weaker descriptor",
     "facs.stratafs-copy-up.no-weak-window",
-    NO_SURFACE .. "; the window is between two steps of one in-kernel creation, " ..
-    "and the staged inode is not yet reachable by name while it is open")
+    "pkm_kunit_copy_up_exact_sd_is_installed_and_cached (the descriptor is " ..
+    "installed and the cache seeded inside inode creation, and a second " ..
+    "initialisation fails) and pkm_kunit_copy_up_named_flow_is_exact_and_exempt")
 
-uncovered("on a stacking destination the pinned bytes are installed on the real inode",
+copy_up("on a stacking destination the pinned bytes are installed on the real inode",
     "facs.stratafs-copy-up.stacking-real-inode-install",
-    NO_SURFACE .. "; a stacking create stratum under StrataFS is not constructible " ..
-    "from the mount options available here")
+    "pkm_kunit_copy_up_stacked_tmpfile_binds_outer_inode")
 
-uncovered("the context does not override the unconditional denial of POSIX ACL mutation",
+copy_up("the context does not override the unconditional denial of POSIX ACL mutation",
     "facs.stratafs-copy-up.posix-acl-still-denied",
-    "no filesystem the kernel-only guest can mount supports POSIX ACLs — tmpfs " ..
-    "and ramfs both answer EOPNOTSUPP from the filesystem before the hook's own " ..
-    "EACCES is distinguishable — so the denial cannot be told apart from the " ..
-    "filesystem's refusal, inside the context or out")
+    "pkm_kunit_copy_up_named_flow_is_exact_and_exempt, at the hook, on the " ..
+    "bound staged object in populate",
+    "no filesystem the kernel-only guest can mount supports POSIX ACLs, so " ..
+    "the hook's denial cannot be told from the filesystem's refusal there")
 
-uncovered("the capability clone call accepts only an exactly matching kernel buffer",
+copy_up("the capability clone call accepts only an exactly matching kernel buffer",
     "facs.stratafs-copy-up.clone-call-preconditions",
-    NO_SURFACE .. "; the dedicated clone entry point takes a kernel buffer and " ..
-    "has no syscall wrapper")
+    "pkm_kunit_copy_up_anonymous_object_must_be_bound and " ..
+    "pkm_kunit_copy_up_scope_is_exact")
 
-uncovered("the clone re-reads the provider and fails with ESTALE if the value changed",
+copy_up("the clone re-reads the provider and fails with ESTALE if the value changed",
     "facs.stratafs-copy-up.clone-estale-on-change",
-    NO_SURFACE .. "; changing the provider's security.capability between the pin " ..
-    "and the install means acting inside one phase")
+    "pkm_kunit_copy_up_anonymous_object_must_be_bound, where the provider's " ..
+    "capability is changed between the pin and the install")
 
-uncovered("the clone installs through the ordinary VFS path with XATTR_CREATE",
-    "facs.stratafs-copy-up.clone-through-vfs", NO_SURFACE)
+copy_up("the clone installs through the ordinary VFS path with XATTR_CREATE",
+    "facs.stratafs-copy-up.clone-through-vfs",
+    "pkm_kunit_copy_up_anonymous_object_must_be_bound, where the installed " ..
+    "bytes are read back and a second install is the VFS's EEXIST")
 
-uncovered("the CAP_SETFCAP gate is satisfied only synchronously inside the validated call",
+copy_up("the CAP_SETFCAP gate is satisfied only synchronously inside the validated call",
     "facs.stratafs-copy-up.setfcap-synchronous-only",
+    "pkm_kunit_copy_up_anonymous_object_must_be_bound (the install succeeds " ..
+    "for a principal the gate would otherwise refuse, and the condition is " ..
+    "clear on return) and pkm_kunit_copy_up_scope_is_exact",
     NO_SURFACE .. "; the caller-facing half — that raw setxattr can never install " ..
     "a file capability — is covered above")
 
-uncovered("nothing is installed when the provider had no attribute or a different one",
+copy_up("nothing is installed when the provider had no attribute or a different one",
     "facs.stratafs-copy-up.no-install-on-mismatch",
-    NO_SURFACE .. "; a provider with security.capability cannot be produced either, " ..
-    "since installing one from the guest is denied EPERM")
+    "pkm_kunit_copy_up_anonymous_object_must_be_bound and " ..
+    "pkm_kunit_copy_up_scope_is_exact")
 
-uncovered("two copy-up event emissions are best-effort and drop silently",
+kunit_stub("two copy-up event emissions are best-effort and drop silently",
     "facs.stratafs-copy-up.emission-best-effort",
-    NO_SURFACE .. "; the two drop conditions are an allocation failure and an " ..
+    "pkm_kunit_stratafs_audit_emission_is_best_effort, for the over-long " ..
+    "operation string and path; the allocation-failure condition has no witness",
+    NO_SURFACE .. "; the drop conditions are an allocation failure and an " ..
     "operation string StrataFS itself chooses, neither of which a caller can " ..
-    "influence")
+    "influence", "pkm_kunit_misc")
