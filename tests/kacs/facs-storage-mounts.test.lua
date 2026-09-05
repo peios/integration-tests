@@ -19,6 +19,7 @@ local kacs = require("helpers.kacs")
 local access = require("helpers.access")
 local token = require("helpers.token")
 local stratafs = require("helpers.stratafs")
+local fx = require("helpers.fixtures")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -120,6 +121,38 @@ test("everything else, tmpfs included, defaults to deny-missing",
         t:assert_eq(policy_of("/"), kacs.MOUNT_POLICY.DENY_MISSING,
             "and so does the root filesystem")
         t:assert_eq(policy_of("/tmp"), kacs.MOUNT_POLICY.DENY_MISSING, "and /tmp")
+    end)
+
+test("an NTFS volume is deny-missing too, and an inode with no descriptor there is refused as missing",
+    { spec = "PKM *facs.storage.default-deny-missing", tags = { "known-bug" } }, function(t)
+        -- ntfs3 is a block-device filesystem with no magic of its own in
+        -- the classifier, so it lands with everything else. Its
+        -- descriptors are `system.ntfs_security`, and on a volume made
+        -- by mkntfs the root has none ntfs3 can read (its descriptor is
+        -- an inline attribute, security id 0), so deny-missing's answer
+        -- for the root is the same as for a descriptor-less tmpfs file:
+        -- EACCES.
+        --
+        -- known-bug PEI-715: ntfs3 reports that inode as ENOENT rather
+        -- than ENODATA and KACS hands the errno up as the verdict, so
+        -- today every path on the volume is ENOENT.
+        if not fx.present(vm, fx.NTFS_IMAGE) then
+            t:skip("the profile was built without mkntfs, so there is no NTFS image")
+        end
+        assert(fx.load_module(vm, "ntfs3"))
+        local dev, loopfd, e = fx.loop_attach(vm, fx.NTFS_IMAGE)
+        assert(dev, "loop: " .. tostring(loopfd) .. ": " .. sys.errname(e or 0))
+        local at = "/cls-ntfs3"
+        local ok, stage, errno = kacs.new_mount(vm, "ntfs3", at, nil, { source = dev })
+        t:assert(ok, "mount ntfs3: " .. tostring(stage) .. " " .. sys.errname(errno or 0))
+        t:assert_eq(policy_of(at), kacs.MOUNT_POLICY.DENY_MISSING,
+            "ntfs3 classifies deny-missing")
+        local st, se = sys.stat(vm, at)
+        t:assert(not st, "the descriptor-less root is not reachable")
+        t:assert_eq(se, sys.E.ACCES, "and the refusal is deny-missing's EACCES, not the driver's errno: " ..
+            sys.errname(se or 0))
+        sys.umount(vm, at, 0)
+        fx.loop_detach(vm, loopfd)
     end)
 
 -- ---- the two kernel-internal mounts ---------------------------------------

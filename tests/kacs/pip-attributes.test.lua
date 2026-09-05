@@ -156,10 +156,11 @@ test("setpgid() needs PROCESS_SET_INFORMATION",
       covered_by = "kunit:pkm_kunit_process",
       skip = "sys_setpgid() checks PF_FORKNOEXEC before the LSM hook, so " ..
              "the hook is unreachable for any target that has exec'd — " ..
-             "and every process a test can name here has (the agent's " ..
-             "workers are exec'd children, and a worker cannot fork, " ..
-             "PEI-688); a non-parent caller can only name itself, which " ..
-             "is the self-target exemption; runs under " ..
+             "and every process a test can name here has: the agent's " ..
+             "workers are exec'd children, and so is every child a worker " ..
+             "spawns, since worker:run_async forks *and* execs; a " ..
+             "non-parent caller can only name itself, which is the " ..
+             "self-target exemption; runs under " ..
              "pkm_kunit_process_setinfo_denied_by_process_sd" },
     function(t) end)
 
@@ -395,10 +396,51 @@ test("system-wide profiling needs the operator-class SeSystemProfilePrivilege",
     end)
 
 test("cgroup perf mode stays under Linux's native model",
-    { spec = "PKM *pip.perf.cgroup-native",
-      skip = "no coverage anywhere: PERF_FLAG_PID_CGROUP needs a cgroup " ..
-             "directory descriptor and no cgroup filesystem is mounted in " ..
-             "a kernel-only guest; pkm_kunit_process's perf cases drive " ..
-             "pkm_kacs_perf_event_open with a task, so none of them " ..
-             "exercises the cgroup branch either" },
-    function(t) end)
+    { spec = "PKM *pip.perf.cgroup-native" }, function(t)
+        -- PERF_FLAG_PID_CGROUP names a cgroup directory descriptor where
+        -- a pid would go. There is no target task to resolve, so neither
+        -- KACS process check runs; and there is no SeSystemProfilePrivilege
+        -- gate either — what admits or refuses the caller is Linux's own
+        -- perf_event_paranoid / CAP_PERFMON model, which this file has
+        -- relaxed to -1 so KACS's answers can be seen elsewhere.
+        assert(kacs.new_mount(vm, "cgroup2", "/cg", kacs.MOUNT_POLICY.SYNTHESIZE_EPHEMERAL))
+        local cg = assert(sys.open(vm, "/cg", sys.O.RDONLY | sys.O.DIRECTORY))
+        local CG = pip.PERF_FLAG_PID_CGROUP
+
+        local seen = desired(function()
+            local r = pip.perf(vm, cg, 0, CG)
+            t:assert(r.ret >= 0, "cgroup mode opens for the agent: " .. sys.errname(r.errno))
+            if r.ret >= 0 then sys.close(vm, r.ret) end
+        end)
+        t:assert(next(seen) == nil, "and no process check ran — there is no target task")
+
+        -- A principal with no privileges at all: KACS refuses it
+        -- system-wide profiling, yet cgroup mode is open to it, because
+        -- Linux's model (paranoid -1) is what decides.
+        token.as_principal(t, vm, {}, function(w)
+            t:assert_eq(pip.perf(w, -1, 0).errno, sys.E.PERM,
+                "pid == -1 is KACS's gate and refuses the unprivileged caller")
+            local r = pip.perf(w, cg, 0, CG)
+            t:assert(r.ret >= 0, "cgroup mode is not behind that gate: " .. sys.errname(r.errno))
+            if r.ret >= 0 then sys.close(w, r.ret) end
+        end)
+
+        -- And Linux's own gate is what closes it: at paranoid 2 the same
+        -- caller, lacking CAP_PERFMON, is refused by the core — EACCES,
+        -- Linux's word for it — with KACS still asking nothing.
+        vm:write_file("/proc/sys/kernel/perf_event_paranoid", "2")
+        local ok, err = pcall(function()
+            token.as_principal(t, vm, {}, function(w)
+                local seen2 = desired(function()
+                    local r = pip.perf(w, cg, 0, CG)
+                    t:assert(r.ret < 0, "refused")
+                    t:assert_eq(r.errno, sys.E.ACCES, "by Linux, with EACCES: " .. sys.errname(r.errno or 0))
+                    if r.ret >= 0 then sys.close(w, r.ret) end
+                end)
+                t:assert(next(seen2) == nil, "and still no process check")
+            end)
+        end)
+        vm:write_file("/proc/sys/kernel/perf_event_paranoid", "-1")
+        sys.close(vm, cg)
+        if not ok then error(err, 0) end
+    end)

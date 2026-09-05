@@ -13,6 +13,7 @@ local kacs = require("helpers.kacs")
 local token = require("helpers.token")
 local access = require("helpers.access")
 local facs = require("helpers.facs")
+local fx = require("helpers.fixtures")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -850,11 +851,45 @@ test("native creation makes regular files and directories, and nothing else",
     end)
 
 test("NTFS is excluded from native creation",
-    { spec = "PKM *facs.open.ntfs-excluded",
-      skip = "no coverage anywhere: the kernel-only profile carries no NTFS driver " ..
-             "and no NTFS image, and no KUnit case exercises the ntfs branch of " ..
-             "pkm_kacs_build_created_file_sd_for_subject" },
-    function(t) end)
+    { spec = "PKM *facs.open.ntfs-excluded" }, function(t)
+        -- An NTFS volume from the profile's fixtures, loop-mounted with
+        -- the ntfs3 driver under a synthesising policy so the mount is
+        -- managed (an unmanaged one is refused native creation for that
+        -- reason first). The exclusion is the ntfs branch of building
+        -- the created file's descriptor, and it answers EOPNOTSUPP —
+        -- before anything about the volume's own descriptors is
+        -- consulted, which is why this is reachable while PEI-715
+        -- (the volume's paths are ENOENT through the Linux API) is not
+        -- fixed; facs-storage-mounts carries that case.
+        if not fx.present(vm, fx.NTFS_IMAGE) then
+            t:skip("the profile was built without mkntfs, so there is no NTFS image")
+        end
+        local ok, e = fx.load_module(vm, "ntfs3")
+        assert(ok, "loading ntfs3: " .. sys.errname(e or 0))
+        local dev, loopfd, e2 = fx.loop_attach(vm, fx.NTFS_IMAGE)
+        assert(dev, "loop: " .. tostring(loopfd) .. ": " .. sys.errname(e2 or 0))
+        local NTFS = "/ntfs"
+        local okm, stage, e3 = kacs.new_mount(vm, "ntfs3", NTFS,
+            kacs.MOUNT_POLICY.SYNTHESIZE_EPHEMERAL, { source = dev })
+        assert(okm, "mounting ntfs3: " .. tostring(stage) .. ": " .. sys.errname(e3 or 0))
+
+        local fd, status = facs.open(vm, NTFS .. "/native",
+            { access = R.READ_DATA | R.WRITE_DATA, disposition = D.CREATE })
+        t:assert(not fd, "native creation on NTFS is refused")
+        if fd then sys.close(vm, fd) end
+        t:assert_eq(status, sys.E.OPNOTSUPP,
+            "with EOPNOTSUPP, the exclusion's answer: " .. sys.errname(status or 0))
+        -- Not for want of a right: the same request one directory up,
+        -- on the managed tmpfs, is what the exclusion is measured
+        -- against.
+        local ok2, s2 = facs.open(vm, at("not-ntfs"),
+            { access = R.READ_DATA | R.WRITE_DATA, disposition = D.CREATE })
+        t:assert(ok2, "the same creation elsewhere succeeds: " .. sys.errname(s2 or 0))
+        if ok2 then sys.close(vm, ok2) end
+
+        sys.umount(vm, NTFS, 0)
+        fx.loop_detach(vm, loopfd)
+    end)
 
 test("KACS_STATUS_SUPERSEDED is reported only when something was replaced",
     { spec = "PKM *facs.open.status-superseded-only-if-replaced" }, function(t)
