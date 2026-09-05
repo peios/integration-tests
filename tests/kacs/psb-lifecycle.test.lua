@@ -1,12 +1,14 @@
 -- PKM §3.3.4 — what the PSB does across fork, exec and CLONE_THREAD,
 -- and how it feeds AccessCheck.
 --
--- Only the fork half is reachable from here. The exec half needs a
--- process that survives its exec and can be questioned afterwards, and
--- the kernel-only profile carries exactly one binary — the agent
--- itself, which cannot be re-exec'd without losing the connection that
--- would ask the question. CLONE_THREAD is not in the agent's protocol
--- at all. Those cases name the KUnit case that drives them instead.
+-- The fork half is reachable: a worker is a process whose token a test
+-- controls, and `worker:run_async` forks and execs a child from it. The
+-- exec half is not. Witnessing it needs a process that survives its own
+-- exec and can still be questioned, and the kernel-only profile carries
+-- exactly one binary — the agent itself, which a worker-spawned child
+-- runs with no connection back to the host. CLONE_THREAD is not in the
+-- agent's protocol at all. Those cases name the KUnit case that drives
+-- them instead.
 --
 -- The last case commits `pie` on the agent, which every worker created
 -- afterwards inherits. It is deliberately the final case in the file.
@@ -15,10 +17,13 @@ local sys = require("helpers.sys")
 local kacs = require("helpers.kacs")
 local kmes = require("helpers.kmes")
 local psb = require("helpers.psb")
+local token = require("helpers.token")
+local access = require("helpers.access")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
 local ENOEXEC = 8
+local AGENT = "/sbin/provium-agent"
 local ELF_DIR = "/mnt/psb-life-elf"
 assert(kacs.new_mount(vm, "tmpfs", ELF_DIR, kacs.MOUNT_POLICY.SYNTHESIZE_EPHEMERAL))
 assert(psb.write_elf(vm, ELF_DIR .. "/et-exec", psb.ET_EXEC).ret == 0)
@@ -50,14 +55,58 @@ test("the child's process GUID is kernel-generated, not copied from the parent",
 -- ---- exec, threads and AccessCheck: deferred to the KUnit suite ------
 
 test("the child's descriptor owner is the forking thread's primary token, not its impersonation token",
-    { spec = "PKM *psb.fork.sd-owner-primary-token",
-      covered_by = "kunit:pkm_kunit_process",
-      skip = "the impersonating half needs a process that impersonates " ..
-             "and then forks; the agent cannot install a token on itself " ..
-             "and a worker has no way to fork with the impersonation " ..
-             "still in place; runs under " ..
-             "pkm_kunit_process_state_fork_under_impersonation_uses_primary_sd" },
-    function(t) end)
+    { spec = "PKM *psb.fork.sd-owner-primary-token" }, function(t)
+        -- A minted principal reaches the agent image only if its
+        -- descriptor lets it, and SeChangeNotifyPrivilege carries it
+        -- past traverse checking on the way.
+        assert(kacs.set_sd(vm, AGENT, kacs.grant(kacs.ALL_RIGHTS)).ret == 0,
+            "the agent image is reachable by a minted principal")
+        local port = 7900
+
+        --- Spawn from `worker` and read the child's process descriptor.
+        --- Returns the parsed descriptor and the process, which the
+        --- caller reaps — a `kill` is relayed through the worker, so it
+        --- has to happen with the worker's credentials in a state that
+        --- allows it.
+        local function child_sd(worker)
+            port = port + 1
+            local proc = worker:run_async(AGENT, { "--port", tostring(port) })
+            local pidfd = assert(psb.pidfd(vm, proc:pid()), "pidfd_open on the child")
+            local bytes = assert(psb.get_sd(vm, pidfd, kacs.SI.OWNER | kacs.SI.DACL),
+                "the child's process descriptor")
+            sys.close(vm, pidfd)
+            return access.parse_sd(bytes), proc
+        end
+
+        -- SeTcbPrivilege is what lets the principal open the
+        -- LogonSession the second identity lives in; SeCreateTokenPrivilege
+        -- and SeImpersonatePrivilege let it mint that identity and wear
+        -- it; SeChangeNotifyPrivilege is for the walk to the image.
+        local privs = token.bit(token.PRIV.TCB) | token.bit(token.PRIV.CREATE_TOKEN)
+            | token.bit(token.PRIV.IMPERSONATE) | token.bit(token.PRIV.CHANGE_NOTIFY)
+        token.as_principal(t, vm, { privs_present = privs, privs_enabled = privs }, function(w)
+            -- Not impersonating: the owner is the principal's own SID.
+            local plain, p1 = child_sd(w)
+            p1:kill(); p1:wait("5s")
+            t:assert_eq(plain.owner, token.SID.TEST_USER, "a plain fork's child is owned by the forker")
+            t:assert(plain.dacl and plain.dacl.count > 0, "with a DACL from the default template")
+
+            -- Impersonating another user at the moment of the fork.
+            local client = assert(token.mint(w, { user_sid = token.SID.TEST_USER_2, projected_uid = 1102 }))
+            local imp = assert(token.duplicate(w, client, { token_type = token.TYPE.IMPERSONATION,
+                impersonation_level = token.LEVEL.IMPERSONATION }))
+            t:assert_eq(token.impersonate(w, imp).ret, 0, "the forking thread impersonates TEST_USER_2")
+            t:assert_eq(assert(token.effective(vm, w)).user, token.SID.TEST_USER_2,
+                "and is running as it at the moment of the fork")
+            local under, p2 = child_sd(w)
+            token.revert(w)
+            p2:kill(); p2:wait("5s")
+            t:assert_eq(under.owner, token.SID.TEST_USER,
+                "the child is still owned by the forking thread's primary token")
+            t:assert_neq(under.owner, token.SID.TEST_USER_2, "not by the impersonation token")
+            t:assert(under.dacl and under.dacl.count > 0, "and the DACL still follows the default template")
+        end)
+    end)
 
 test("exec resets the PIP fields from the new binary's signature",
     { spec = "PKM *psb.exec.pip-reset-from-binary",
@@ -87,8 +136,13 @@ test("no_child_process persists across exec",
 
 test("the process GUID is not reset at exec: it identifies the process, not the binary",
     { spec = "PKM *psb.exec.guid-preserved",
-      skip = "no coverage anywhere: the guest cannot exec anything that " ..
-             "survives to stamp a second KMES event, and " ..
+      skip = "no coverage anywhere: process_guid is exposed nowhere but the " ..
+             "stamp on a KMES event a process emits itself — the KACS " ..
+             "syscall range (§3.A) carries no PSB query, so a pidfd cannot " ..
+             "be asked for one — and no process here can be questioned " ..
+             "either side of its own exec: a worker has already exec'd by " ..
+             "the time the harness can speak to it, and the child a worker " ..
+             "spawns is a fresh agent with no connection back. " ..
              "pkm_kunit_exec_commit_preserves_mitigations_and_no_child " ..
              "compares the process_sd and rate-bucket pointers across the " ..
              "exec commit without comparing process_guid — a " ..

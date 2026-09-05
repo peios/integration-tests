@@ -3,13 +3,29 @@
 -- unprivileged holder gets, and the pair's lifecycle.
 
 local sys = require("helpers.sys")
+local kacs = require("helpers.kacs")
 local token = require("helpers.token")
 local kmes = require("helpers.kmes")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
 local TCB = token.bit(token.PRIV.TCB)
+local BACKUP = token.bit(token.PRIV.BACKUP)
+local CN = token.bit(token.PRIV.CHANGE_NOTIFY)
 local ENABLED = token.GROUP.MANDATORY | token.GROUP.ENABLED_BY_DEFAULT | token.GROUP.ENABLED
+local AGENT = "/sbin/provium-agent"
+local next_port = 7200
+
+--- A long-lived exec'd child of `who`. The guest's only executable is
+--- the agent, which with `--port N` listens forever. Returns the
+--- process and a pidfd on it.
+local function child_of(who)
+    next_port = next_port + 1
+    local proc = who:run_async(AGENT, { "--port", tostring(next_port) })
+    return proc, assert(token.pidfd_open(vm, proc:pid()))
+end
+
+local function id_of(who, fd) return assert(token.statistics(who, fd)).token_id end
 
 --- An elevated token plus its filtered partner in a fresh session.
 --- Returns elevated_fd, filtered_fd, session_id.
@@ -201,7 +217,51 @@ test("the pair's own references do not keep the session alive",
     end)
 
 test("a forked child's deep copy preserves the parent's elevation type",
-    { spec = "PKM *token.link.fork-preserves-elevation-type",
-      covered_by = "kunit:pkm_kunit_token",
-      skip = "the guest has no binary to fork and observe; the deep copy's field matrix runs under " ..
-             "pkm_kunit_token_deep_copy_independent" }, function(t) end)
+    { spec = "PKM *token.link.fork-preserves-elevation-type" }, function(t)
+        -- A minted principal reaches the agent image only if its
+        -- descriptor lets it; SeChangeNotifyPrivilege carries it past
+        -- traverse checking on the way there.
+        assert(kacs.set_sd(vm, AGENT, kacs.grant(kacs.ALL_RIGHTS)).ret == 0,
+            "the agent image is reachable by a minted principal")
+
+        --- Install one member of a linked pair as a worker's primary
+        --- token, spawn from it, and inspect the child's copy.
+        local function spawn_under(role, expected)
+            local worker = vm:spawn_worker()
+            local ok, err = pcall(function()
+                local privs = TCB | BACKUP | CN
+                local e, l, sid = pair(worker, { privs_present = privs, privs_enabled = privs })
+                t:assert_eq(token.link(worker, e, e, l, sid).ret, 0, role .. ": the pair links")
+                t:assert_eq(token.install(worker, role == "elevated" and e or l).ret, 0,
+                    "and the " .. role .. " member is installed as the worker's primary")
+
+                local wpidfd = assert(token.pidfd_open(vm, worker:syscall(sys.NR.getpid).ret))
+                local parent = assert(token.open_process(vm, wpidfd))
+                t:assert_eq(token.query_u32(vm, parent, token.CLASS.ELEVATION_TYPE), expected,
+                    "the worker's primary reports the pair's role")
+                local partner = assert(token.get_linked(vm, parent),
+                    "and is the session's active member, so it has a partner")
+
+                local proc, pidfd = child_of(worker)
+                local child = assert(token.open_process(vm, pidfd))
+                t:assert_eq(token.query_u32(vm, child, token.CLASS.ELEVATION_TYPE), expected,
+                    "the child's deep copy reports the same elevation type")
+                t:assert_neq(id_of(vm, child), id_of(vm, parent), "on a token object of its own")
+                -- Sticky role, no partner: the copy was never the active
+                -- member of the pair, so querying its linked token errors.
+                local linked, errno = token.get_linked(vm, child)
+                t:assert(not linked, "which was never linked to anything: " .. sys.errname(errno or 0))
+                t:assert_eq(token.statistics(vm, child).auth_id, token.statistics(vm, parent).auth_id,
+                    "though it sits in the pair's LogonSession")
+
+                proc:kill(); proc:wait("5s")
+                sys.close(vm, child); sys.close(vm, pidfd)
+                sys.close(vm, partner); sys.close(vm, parent); sys.close(vm, wpidfd)
+            end)
+            worker:kill(); worker:join()
+            if not ok then error(err, 0) end
+        end
+
+        spawn_under("elevated", token.ELEVATION.FULL)
+        spawn_under("filtered", token.ELEVATION.LIMITED)
+    end)

@@ -19,6 +19,7 @@ local vm = provium:vm("v", "kernel-only"):boot()
 
 local R = kacs.RIGHT
 local B = facs.workspace(vm, "handle")
+local AGENT = "/sbin/provium-agent"
 
 test("the granted mask is set once and survives a rewrite of the DACL",
     { spec = "PKM *facs.handle.mask-immutable" }, function(t)
@@ -223,12 +224,44 @@ test("dup and fork produce the same open file description and the same rights",
     end)
 
 test("a descriptor without FD_CLOEXEC survives exec with its mask unchanged",
-    { spec = "PKM *facs.handle.exec-preserves-mask",
-      skip = "no coverage anywhere: the kernel-only guest has no second program to " ..
-             "exec (the sole binary is the provium agent, and exec'ing it ends the " ..
-             "connection the assertion would have to travel back over), and no KUnit " ..
-             "case covers exec's effect on a stamped file blob" },
-    function(t) end)
+    { spec = "PKM *facs.handle.exec-preserves-mask" }, function(t)
+        local p = facs.file(vm, B .. "/exec-mask", "0123456789abcdef")
+        local worker = vm:spawn_worker()
+        local ok, err = pcall(function()
+            -- Append-only, exactly as in the dup/fork case above:
+            -- FMODE_WRITE is set so ftruncate reaches KACS, and
+            -- FILE_WRITE_DATA — what ftruncate needs — is not granted.
+            local fd, e = facs.open(worker, p, { access = R.READ_DATA | R.APPEND_DATA })
+            t:assert(fd, "the worker opens it append-only: " .. sys.errname(e or 0))
+            t:assert_eq(facs.fcntl(worker, fd, facs.F.GETFD, 0).ret, 0,
+                "with no FD_CLOEXEC, so it crosses the exec")
+
+            -- run_async forks and execs a long-lived program from the
+            -- worker; the sole binary in the guest is the agent, which
+            -- with `--port N` listens forever.
+            local proc = worker:run_async(AGENT, { "--port", "7250" })
+            local pidfd = assert(token.pidfd_open(vm, proc:pid()))
+            local got = facs.pidfd_getfd(vm, pidfd, fd)
+            t:assert(got.ret >= 0, "and the descriptor is still there in the exec'd child: " ..
+                sys.errname(got.errno))
+
+            sys.lseek(vm, got.ret, 0, 0)
+            t:assert_eq(sys.read(vm, got.ret, 4), "0123", "the survivor reads, as the original may")
+            local trunc = sys.ftruncate(vm, got.ret, 0)
+            t:assert_eq(trunc.errno, sys.E.ACCES,
+                "and is refused exactly what the original is refused: " .. sys.errname(trunc.errno))
+            -- One open file description, not a re-open: the offset the
+            -- copy advanced is the offset the worker's descriptor sees.
+            t:assert_eq(sys.read(worker, fd, 4), "4567",
+                "the same open file description the worker opened before the exec")
+
+            sys.close(vm, got.ret); sys.close(vm, pidfd)
+            proc:kill(); proc:wait("5s")
+            sys.close(worker, fd)
+        end)
+        worker:kill(); worker:join()
+        if not ok then error(err, 0) end
+    end)
 
 test("SCM_RIGHTS transfers the descriptor as a capability, with no re-check",
     { spec = "PKM *facs.handle.scm-rights-capability" }, function(t)

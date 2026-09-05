@@ -524,8 +524,8 @@ uncovered("a context attaches to at most one task and a task carries at most one
 
 uncovered("a context is not inherited by fork, clone or execve",
     "facs.stratafs-copy-up.not-inherited",
-    NO_SURFACE .. "; and a minted principal cannot fork or exec in this harness " ..
-    "(PEI-688), so even an indirect witness is out of reach")
+    NO_SURFACE .. "; a minted principal can fork and exec here now, but with no way " ..
+    "to tell an armed phase from an unarmed one, neither side of the exec says anything")
 
 uncovered("a refcounted context can be transferred to a kernel worker",
     "facs.stratafs-copy-up.worker-transfer", NO_SURFACE)

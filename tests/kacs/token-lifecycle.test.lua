@@ -34,12 +34,41 @@ local function id_of(fd, who) return assert(token.statistics(who or vm, fd)).tok
 local CLASSES = { "USER", "GROUPS", "PRIVILEGES", "INTEGRITY_LEVEL", "OWNER", "PRIMARY_GROUP",
     "INTERACTIVITY_SCOPE", "SOURCE", "ORIGIN", "ELEVATION_TYPE", "MANDATORY_POLICY", "LOGON_SID",
     "DEFAULT_DACL", "IMPERSONATION_LEVEL", "TYPE" }
-local function same_content(a, b)
+--- The classes on which `a` and `b` disagree, skipping any named in
+--- `skip`. A case that expects one field to differ names it there and
+--- asserts on it separately.
+local function same_content(a, b, skip)
     local diff = {}
     for _, c in ipairs(CLASSES) do
-        if token.query(vm, a, token.CLASS[c]) ~= token.query(vm, b, token.CLASS[c]) then diff[#diff + 1] = c end
+        if not (skip and skip[c])
+            and token.query(vm, a, token.CLASS[c]) ~= token.query(vm, b, token.CLASS[c]) then
+            diff[#diff + 1] = c
+        end
     end
     return diff
+end
+
+--- Start a syscall on a *second* thread of `worker`: a nanosleep long
+--- enough that the thread is still blocked in the kernel while the case
+--- looks at it. `worker:syscall` runs on one thread; `syscall_async`
+--- adds one for the duration of the call.
+local function sleeping_thread(worker, seconds)
+    return worker:syscall_async(sys.NR.nanosleep, {
+        args = { 0, 0 }, bufs = { string.pack("<i8i8", seconds, 0) }, ptrs = { 0 },
+    })
+end
+
+--- The tid of `pid`'s other thread, once the kernel has published it
+--- under /proc/<pid>/task. Returns nil if none appears.
+local function sibling_tid(pid)
+    for _ = 1, 200 do
+        for _, e in ipairs(vm:listdir("/proc/" .. pid .. "/task")) do
+            local tid = tonumber(e.name)
+            if tid and tid ~= pid then return tid end
+        end
+        sys.nanosleep(vm, 0, 5 * 1000 * 1000)
+    end
+    return nil
 end
 
 -- Fork ----------------------------------------------------------------------------
@@ -62,8 +91,10 @@ test("a forked child receives an independent deep copy of the primary token",
 
 test("a child forked by an impersonating parent starts on the primary token",
     { spec = "PKM *token.fork.impersonation-not-inherited", covered_by = "kunit:pkm_kunit_process",
-      skip = "a worker cannot spawn a child (worker:run_async is refused for process-isolated workers) and the " ..
-             "agent cannot impersonate; runs under pkm_kunit_clone_process_impersonation_uses_primary_copy" },
+      skip = "a worker can spawn now, but every spawn is a fork *and* an exec, and exec reverts " ..
+             "impersonation on its own account (token.exec.reverts-impersonation below), so the fork " ..
+             "half cannot be isolated from the guest; runs under " ..
+             "pkm_kunit_clone_process_impersonation_uses_primary_copy" },
     function(t) end)
 
 test("after a fork, mutations to either token are invisible to the other",
@@ -106,9 +137,40 @@ test("threads share one primary token, so an adjustment is visible to every thre
     end)
 
 test("a new thread cloned by an impersonating thread starts on the shared primary",
-    { spec = "PKM *token.thread.clone-starts-on-primary", covered_by = "kunit:pkm_kunit_process",
-      skip = "no guest path creates a thread from an impersonating thread under the harness; runs under " ..
-             "pkm_kunit_clone_thread_impersonation_starts_on_primary" }, function(t) end)
+    { spec = "PKM *token.thread.clone-starts-on-primary" }, function(t)
+        local worker = vm:spawn_worker()
+        local ok, err = pcall(function()
+            local pid = worker:syscall(sys.NR.getpid).ret
+            local pidfd = assert(token.pidfd_open(vm, pid))
+            local primary = primary_of(pidfd)
+            -- The worker's only thread puts on an impersonation token.
+            local client = assert(token.mint(worker, { user_sid = token.SID.TEST_USER_2, projected_uid = 1102 }))
+            local imp = assert(token.duplicate(worker, client, { token_type = token.TYPE.IMPERSONATION,
+                impersonation_level = token.LEVEL.IMPERSONATION }))
+            t:assert_eq(token.impersonate(worker, imp).ret, 0, "the worker's thread impersonates")
+            local before = assert(token.effective(vm, worker))
+            t:assert_eq(before.user, token.SID.TEST_USER_2, "and is running as TEST_USER_2")
+            t:assert_eq(before.type, token.TYPE.IMPERSONATION, "on an impersonation token")
+
+            -- ... and then clones one, while still wearing it.
+            local sleeping = sleeping_thread(worker, 3)
+            local tid = sibling_tid(pid)
+            t:assert(tid, "a second thread of the same thread group appears")
+            local fd = assert(token.open_thread(vm, pidfd, tid, R.QUERY))
+            t:assert_eq(token.query(vm, fd, token.CLASS.USER), token.SID.LOCAL_SYSTEM,
+                "the new thread's effective identity is the shared primary, not the cloner's impersonation token")
+            t:assert_eq(token.query_u32(vm, fd, token.CLASS.TYPE), token.TYPE.PRIMARY, "a primary token")
+            t:assert_eq(id_of(fd), id_of(primary), "and the very object the process's primary is")
+            t:assert_eq(assert(token.effective(vm, worker)).user, token.SID.TEST_USER_2,
+                "while the cloning thread goes on impersonating")
+            sys.close(vm, fd)
+            t:assert_eq(sleeping:await().ret, 0, "the new thread was blocked in the kernel throughout")
+            token.revert(worker)
+            sys.close(vm, primary); sys.close(vm, pidfd)
+        end)
+        worker:kill(); worker:join()
+        if not ok then error(err, 0) end
+    end)
 
 -- Exec ----------------------------------------------------------------------------------
 
@@ -128,31 +190,171 @@ test("the primary token survives execve unchanged",
     end)
 
 test("a new program always starts with the primary token as its effective identity",
-    { spec = "PKM *token.exec.reverts-impersonation",
-      skip = "no coverage anywhere: exec from an impersonating thread needs a worker that can spawn " ..
-             "(worker:run_async is refused for process-isolated workers), and no KUnit case drives exec " ..
-             "under impersonation" }, function(t) end)
+    { spec = "PKM *token.exec.reverts-impersonation" }, function(t)
+        local worker = vm:spawn_worker()
+        local ok, err = pcall(function()
+            local pid = worker:syscall(sys.NR.getpid).ret
+            local pidfd = assert(token.pidfd_open(vm, pid))
+            local parent = primary_of(pidfd)
+            local client = assert(token.mint(worker, { user_sid = token.SID.TEST_USER_2, projected_uid = 1102 }))
+            local imp = assert(token.duplicate(worker, client, { token_type = token.TYPE.IMPERSONATION,
+                impersonation_level = token.LEVEL.IMPERSONATION }))
+            t:assert_eq(token.impersonate(worker, imp).ret, 0, "the spawning thread impersonates TEST_USER_2")
+            t:assert_eq(assert(token.effective(vm, worker)).user, token.SID.TEST_USER_2,
+                "and is running as it at the moment of the fork")
+
+            -- run_async forks and execs from that very thread.
+            local proc, cpidfd = child_of(worker)
+            local effective = assert(token.open_thread(vm, cpidfd, proc:pid(), R.QUERY))
+            t:assert_eq(token.query(vm, effective, token.CLASS.USER), token.SID.LOCAL_SYSTEM,
+                "the new program runs as the primary token's user, not the impersonated one")
+            t:assert_eq(token.query_u32(vm, effective, token.CLASS.TYPE), token.TYPE.PRIMARY,
+                "on a primary token")
+            local child = primary_of(cpidfd)
+            t:assert_eq(id_of(effective), id_of(child), "which is its own primary token object")
+            t:assert_eq(#same_content(child, parent, { PRIVILEGES = true }), 0,
+                "the parent's primary, copied: " .. table.concat(same_content(child, parent, { PRIVILEGES = true }), ","))
+            -- The revert is the child's; the caller keeps what it wore.
+            t:assert_eq(assert(token.effective(vm, worker)).user, token.SID.TEST_USER_2,
+                "and the spawning thread's own impersonation is untouched")
+            token.revert(worker)
+            proc:kill(); proc:wait("5s")
+            sys.close(vm, effective); sys.close(vm, child); sys.close(vm, cpidfd)
+            sys.close(vm, parent); sys.close(vm, pidfd)
+        end)
+        worker:kill(); worker:join()
+        if not ok then error(err, 0) end
+    end)
 
 -- NEW_PROCESS_MIN --------------------------------------------------------------------------
+--
+-- NEW_PROCESS_MIN needs a principal that execs, and something to exec.
+-- The images are the agent as it ships — whose descriptor carries no
+-- SACL, so it is unlabelled — and copies of it on a synthesising tmpfs
+-- whose SACLs carry a mandatory label ACE. Every image's DACL grants
+-- every right to everyone and the principal holds
+-- SeChangeNotifyPrivilege (traverse checking is what would otherwise
+-- stop it at `/`), so the label is the only thing left deciding
+-- anything.
 
--- NEW_PROCESS_MIN needs a principal that execs. The guest's only
--- executable is the agent, and a worker — the only process whose token
--- a test controls — cannot spawn a child under the current harness, so
--- the exec-time relabel runs under KUnit.
-local function npm_stub(name, spec, case)
-    test(name, { spec = spec, covered_by = "kunit:pkm_kunit_process",
-        skip = "a worker cannot exec (worker:run_async is refused for process-isolated workers); runs under " .. case },
-        function(t) end)
+local NPM_AT = "/mnt/pit-npm"
+local NPM = token.MANDATORY.NO_WRITE_UP | token.MANDATORY.NEW_PROCESS_MIN
+assert(kacs.set_sd(vm, AGENT, kacs.grant(kacs.ALL_RIGHTS)).ret == 0,
+    "the shipped agent is reachable by a minted user")
+assert(kacs.new_mount(vm, "tmpfs", NPM_AT, kacs.MOUNT_POLICY.SYNTHESIZE_EPHEMERAL))
+local AGENT_IMAGE = vm:read_file(AGENT)
+
+--- A copy of the agent at `name`, executable by everyone, whose SACL
+--- carries a mandatory label at `level` — or no SACL at all when
+--- `level` is nil, which is what §3.2.3 means by unlabelled.
+local function image(name, level)
+    local p = NPM_AT .. "/" .. name
+    vm:write_file(p, AGENT_IMAGE)
+    assert(sys.chmod(vm, p, tonumber("755", 8)).ret == 0, "chmod " .. p)
+    local sd = access.sd({
+        owner = token.SID.LOCAL_SYSTEM, group = token.SID.LOCAL_SYSTEM,
+        dacl = access.acl({ access.ace(access.ACE.ALLOWED, kacs.ALL_RIGHTS, token.SID.EVERYONE) }),
+        sacl = level and access.acl({ access.label_ace(level, access.LABEL.NO_WRITE_UP) }) or nil,
+    })
+    assert(kacs.set_sd(vm, p, sd, kacs.SI.DACL | (level and kacs.SI.SACL or 0)).ret == 0,
+        "descriptor on " .. p)
+    return p
 end
 
-npm_stub("NEW_PROCESS_MIN replaces the primary token at exec when the image carries a lower label",
-    "PKM *token.new-process-min", "pkm_kunit_exec_new_process_min_lowers_to_file_label")
-npm_stub("an unlabelled image leaves the token unchanged",
-    "PKM *token.new-process-min.unlabelled-unchanged", "pkm_kunit_exec_new_process_min_unlabeled_inherits_parent")
-npm_stub("a lower label yields a DuplicateToken-shaped copy at the file's level",
-    "PKM *token.new-process-min.lowers-to-file-label", "pkm_kunit_exec_new_process_min_lowers_to_file_label")
-npm_stub("a label at or above the token's level leaves the token unchanged",
-    "PKM *token.new-process-min.higher-label-unchanged", "pkm_kunit_exec_new_process_min_equal_label_noops")
+local UNLABELLED = image("unlabelled", nil)
+local LOW_IMAGE = image("low", token.INTEGRITY.LOW)
+local MEDIUM_IMAGE = image("medium", token.INTEGRITY.MEDIUM)
+local HIGH_IMAGE = image("high", token.INTEGRITY.HIGH)
+
+--- Mint a principal from `spec`, have it exec `binary`, and run
+--- `fn(parent, child)` on handles to the principal's primary token and
+--- to the primary token of the program it started.
+local function exec_as(t, spec, binary, fn)
+    spec.privs_present, spec.privs_enabled = CN, CN
+    token.as_principal(t, vm, spec, function(w)
+        local wpidfd = assert(token.pidfd_open(vm, w:syscall(sys.NR.getpid).ret))
+        local parent = primary_of(wpidfd)
+        local proc, pidfd = child_of(w, binary)
+        local child = primary_of(pidfd)
+        local ok, err = pcall(fn, parent, child)
+        proc:kill(); proc:wait("5s")
+        sys.close(vm, child); sys.close(vm, pidfd)
+        sys.close(vm, parent); sys.close(vm, wpidfd)
+        if not ok then error(err, 0) end
+    end)
+end
+
+test("NEW_PROCESS_MIN replaces the primary token at exec when the image carries a lower label",
+    { spec = "PKM *token.new-process-min" }, function(t)
+        exec_as(t, { mandatory_policy = NPM }, LOW_IMAGE, function(parent, child)
+            t:assert_eq(token.integrity(vm, parent), token.INTEGRITY.MEDIUM, "the principal is Medium")
+            t:assert_eq(token.integrity(vm, child), token.INTEGRITY.LOW,
+                "and the Low-labelled image it execs runs at the image's level")
+            t:assert_neq(id_of(child), id_of(parent), "on a replacement token")
+            t:assert_eq(token.query_u32(vm, child, token.CLASS.MANDATORY_POLICY), NPM,
+                "which carries the flag on, so the mechanism applies to the whole subtree")
+        end)
+        -- The same principal and the same image, without the flag: the
+        -- label is not consulted at all.
+        exec_as(t, { mandatory_policy = token.MANDATORY.NO_WRITE_UP }, LOW_IMAGE, function(parent, child)
+            t:assert_eq(token.integrity(vm, child), token.INTEGRITY.MEDIUM,
+                "without NEW_PROCESS_MIN the same image leaves the token where it was")
+        end)
+    end)
+
+test("an unlabelled image leaves the token unchanged",
+    { spec = "PKM *token.new-process-min.unlabelled-unchanged" }, function(t)
+        -- Two shapes of unlabelled: no SACL at all, and a descriptor
+        -- authored by a case that names a DACL and no label ACE.
+        for _, binary in ipairs({ AGENT, UNLABELLED }) do
+            exec_as(t, { mandatory_policy = NPM }, binary, function(parent, child)
+                t:assert_eq(token.integrity(vm, child), token.integrity(vm, parent),
+                    binary .. " is unlabelled, so the token survives exec unchanged")
+            end)
+        end
+        -- Deliberately not the access-check rule, under which an
+        -- unlabelled object counts as Medium (§3.8.3) — that rule would
+        -- demote every process on an unlabelled image, this one first.
+        exec_as(t, { mandatory_policy = NPM, integrity_level = token.INTEGRITY.HIGH }, AGENT,
+            function(parent, child)
+                t:assert_eq(token.integrity(vm, parent), token.INTEGRITY.HIGH, "a High principal")
+                t:assert_eq(token.integrity(vm, child), token.INTEGRITY.HIGH,
+                    "stays High across an unlabelled image rather than being taken for Medium")
+            end)
+    end)
+
+test("a lower label yields a DuplicateToken-shaped copy at the file's level",
+    { spec = "PKM *token.new-process-min.lowers-to-file-label" }, function(t)
+        exec_as(t, { mandatory_policy = NPM }, LOW_IMAGE, function(parent, child)
+            local ps, cs = token.statistics(vm, parent), token.statistics(vm, child)
+            t:assert_eq(token.integrity(vm, child), token.INTEGRITY.LOW, "integrity_level is the file's label")
+            t:assert_neq(cs.token_id, ps.token_id, "a new token id")
+            t:assert_eq(cs.modified_id, cs.token_id, "modified_id initialised to it")
+            t:assert_eq(token.query_u32(vm, child, token.CLASS.ELEVATION_TYPE), token.ELEVATION.DEFAULT,
+                "elevation_type reset to Default")
+            local diff = same_content(parent, child, { INTEGRITY_LEVEL = true, PRIVILEGES = true })
+            t:assert_eq(#diff, 0, "every other field copied from the source: " .. table.concat(diff, ","))
+            local pp, cp = token.privileges(vm, parent), token.privileges(vm, child)
+            t:assert_eq(cp.present, pp.present, "the privilege set with them")
+            t:assert_eq(cp.enabled, pp.enabled, "enabled as it was")
+            t:assert_eq(cp.default, pp.default, "and defaulting as it did")
+            t:assert_eq(cs.auth_id, ps.auth_id, "in the source's LogonSession")
+        end)
+    end)
+
+test("a label at or above the token's level leaves the token unchanged",
+    { spec = "PKM *token.new-process-min.higher-label-unchanged" }, function(t)
+        exec_as(t, { mandatory_policy = NPM }, HIGH_IMAGE, function(parent, child)
+            t:assert_eq(token.integrity(vm, child), token.INTEGRITY.MEDIUM,
+                "a High-labelled image does not raise a Medium token: the mechanism only lowers")
+        end)
+        exec_as(t, { mandatory_policy = NPM }, MEDIUM_IMAGE, function(parent, child)
+            t:assert_eq(token.integrity(vm, child), token.INTEGRITY.MEDIUM,
+                "and a label equal to the token's is a no-op")
+            local diff = same_content(parent, child, { PRIVILEGES = true })
+            t:assert_eq(#diff, 0, "the token crosses the exec as it was: " .. table.concat(diff, ","))
+        end)
+    end)
 
 -- Self-installation ------------------------------------------------------------------------
 
@@ -286,9 +488,48 @@ test("without SeTcbPrivilege the installed token has to share the caller's user 
     end)
 
 test("sibling threads converge through queued credential work with no completion barrier",
-    { spec = "PKM *token.install.siblings-converge-asynchronously",
-      skip = "no coverage anywhere: a worker is single-threaded and the agent cannot install; the transition " ..
-             "window is a scheduling property with no KUnit case" }, function(t) end)
+    { spec = "PKM *token.install.siblings-converge-asynchronously" }, function(t)
+        local worker = vm:spawn_worker()
+        local ok, err = pcall(function()
+            local pid = worker:syscall(sys.NR.getpid).ret
+            local pidfd = assert(token.pidfd_open(vm, pid))
+            -- A sibling that is blocked in the kernel for the whole
+            -- transition, so nothing it does can be mistaken for a
+            -- credential switch it performed itself.
+            local sleeping = sleeping_thread(worker, 3)
+            local sibling = sibling_tid(pid)
+            t:assert(sibling, "the worker has a second thread")
+            local function sibling_user()
+                local fd, e = token.open_thread(vm, pidfd, sibling, R.QUERY)
+                assert(fd, "open_thread on the sibling: " .. sys.errname(e or 0))
+                local u = token.query(vm, fd, token.CLASS.USER)
+                sys.close(vm, fd)
+                return u
+            end
+            t:assert_eq(sibling_user(), token.SID.LOCAL_SYSTEM, "which starts on the shared SYSTEM primary")
+
+            local new = assert(token.mint(worker, {}))
+            t:assert_eq(token.install(worker, new).ret, 0, "the main thread installs a TEST_USER primary")
+            local eff = assert(token.open_self(worker, R.QUERY))
+            t:assert_eq(token.query(worker, eff, token.CLASS.USER), token.SID.TEST_USER,
+                "the installing thread is on it immediately")
+
+            -- No barrier is exposed, so the sibling is polled: the claim
+            -- is that its own queued credential work converges, not when.
+            local polls, converged = 0, false
+            for i = 1, 300 do
+                polls = i
+                if sibling_user() == token.SID.TEST_USER then converged = true; break end
+                sys.nanosleep(vm, 0, 10 * 1000 * 1000)
+            end
+            t:assert(converged, "the sibling converges on the new primary without one")
+            t:log("the sibling was observed on the new primary after " .. polls .. " poll(s)")
+            t:assert_eq(sleeping:await().ret, 0, "having stayed blocked in the kernel across the switch")
+            sys.close(vm, pidfd)
+        end)
+        worker:kill(); worker:join()
+        if not ok then error(err, 0) end
+    end)
 
 test("the process descriptor is regenerated when the installed token's user SID differs, else preserved",
     { spec = "PKM *token.install.process-sd-regenerated-on-sid-change" }, function(t)
