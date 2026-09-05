@@ -30,6 +30,19 @@ if [ -d "$root" ] && [ "$new" = "$(cat "$stamp" 2>/dev/null)" ]; then
     exit 0
 fi
 
+# Several provium processes may run at once (agents, a developer's shell
+# and CI on one host), and every one of them runs this script. Only one
+# may recompose: take the lock, then look at the stamp again — the
+# winner has usually finished by the time the others get here. Without
+# this, the losers would rm -rf the root the winner just composed, and a
+# VM launching in that window fails to find its kernel.
+mkdir -p "$out"
+exec 9>"$out/.build-lock"
+flock 9
+if [ -d "$root" ] && [ "$new" = "$(cat "$stamp" 2>/dev/null)" ]; then
+    exit 0
+fi
+
 # Remove the stamp first: a compose interrupted halfway must not leave a
 # stamp claiming the tree beside it is current.
 rm -f "$stamp"
