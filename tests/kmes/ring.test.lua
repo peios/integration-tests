@@ -208,3 +208,13 @@ test("a consumer dying uncleanly costs the others nothing",
         kmes.detach(survivor)
         t:assert_eq(#events, 1, "reaches the survivor as if nothing happened")
     end)
+
+test("a corrupt size field at the tail resynchronises in one step",
+    { spec = "PKM *ring.tail-resync-guard",
+      covered_by = "kunit:pkm_kunit_kmes",
+      skip = "consumers cannot write the data region, so the corruption " ..
+             "must be planted from the kernel side; runs under " ..
+             "pkm_kunit_kmes_tail_resync_discards_window_on_corrupt_size " ..
+             "(the guard's misfire on a healthy ring is PEI-659, " ..
+             "adversarial.test.lua)" }, function(t)
+    end)

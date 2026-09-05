@@ -236,32 +236,28 @@ kunit_stub("identity stamps are null without task context",
     "pkm_kunit_kmes_identity_stamps_match_kacs_state",
     "interrupt-context emission cannot be provoked from a guest")
 
-test("pre-initialisation kernel emission is a silent no-op",
-    { spec = "PKM *kernel-emit.pre-init-silent",
-      covered_by = "unreachable",
-      skip = "the window closes before PID 1 starts and the KUnit suite " ..
-             "also runs after initialisation — NOTE: no coverage anywhere" },
-    function(t)
-    end)
+kunit_stub("pre-initialisation kernel emission is a silent no-op",
+    "PKM *kernel-emit.pre-init-silent",
+    "pkm_kunit_kmes_pre_init_kernel_emit_is_silent, which reopens the " ..
+    "window by clearing the ready flag",
+    "the window closes before PID 1 starts")
 
-test("a ring/CPU identity mismatch discards the event",
-    { spec = "PKM *kernel-emit.cpu-mismatch-discard",
-      covered_by = "unreachable",
-      skip = "the mismatch is a defensive branch no correct caller can " ..
-             "produce — NOTE: no KUnit case covers it either" }, function(t)
-    end)
+kunit_stub("a ring/CPU identity mismatch discards the event",
+    "PKM *kernel-emit.cpu-mismatch-discard",
+    "pkm_kunit_kmes_cpu_mismatch_discards_on_every_path, which skews " ..
+    "every ring's recorded cpu_id",
+    "the mismatch is a defensive branch no correct caller can produce")
 
-test("the wake is skipped before any consumer attaches",
-    { spec = "PKM *ring.wake-skipped-before-attach",
-      covered_by = "unreachable",
-      skip = "the private counter that still advances is not visible " ..
-             "until a consumer attaches, at which point the window is " ..
-             "over — NOTE: no KUnit case covers it either" }, function(t)
-    end)
+kunit_stub("the wake is skipped before any consumer attaches",
+    "PKM *ring.wake-skipped-before-attach",
+    "pkm_kunit_kmes_wake_before_attach_advances_private_counter_only, " ..
+    "against rings a capacity swap has just minted",
+    "the private counter is not visible until a consumer attaches, at " ..
+    "which point the window is over")
 
-test("enumeration skips holes in a sparse possible-CPU mask",
-    { spec = "PKM *attach.enumeration-skips-holes",
-      skip = "needs a guest whose possible-CPU mask has holes; QEMU's " ..
-             "-smp cannot produce one here, so every mask this profile " ..
-             "sees is dense" }, function(t)
-    end)
+kunit_stub("enumeration skips holes in a sparse possible-CPU mask",
+    "PKM *attach.enumeration-skips-holes",
+    "pkm_kunit_kmes_attach_hole_is_einval_and_enumeration_continues, " ..
+    "which empties slot 0 of the ring array",
+    "x86 builds a dense logical possible-CPU mask from the MADT, so no " ..
+    "QEMU -smp topology produces a hole")

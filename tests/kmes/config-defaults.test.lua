@@ -129,8 +129,9 @@ test("the boot-time capacity is compiled in, not configured",
 
 test("emit syscalls fail closed before the subsystems exist",
     { spec = "PKM *syscalls.pre-init-fail-closed",
-      covered_by = "unreachable",
+      covered_by = "kunit:pkm_kunit_kmes",
       skip = "not reachable from a booted guest: the agent is PID 1 and " ..
-             "starts after PKM initialises, so no syscall can be issued " ..
-             "in the pre-init window this names" }, function(t)
+             "starts after PKM initialises; runs under " ..
+             "pkm_kunit_kmes_pre_init_syscalls_fail_closed, which clears " ..
+             "the ready flag around each entry point" }, function(t)
     end)
