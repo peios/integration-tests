@@ -1373,6 +1373,23 @@ end
 M.WATCH_NAME = {}
 for k, v in pairs(M.WATCH) do M.WATCH_NAME[v] = k end
 
+--- The token's LCS credential extension (PKM §3.2.2, §3.A): version 1,
+--- reserved, scope GUID count, private layer count, the GUIDs, the
+--- layer name lengths, the names. Pass as `lcs_credentials` in a
+--- `token.mint` / `token.build_spec` spec to mint a principal that can
+--- route to a private hive or resolve a private layer.
+function M.lcs_credentials(scope_guids, private_layers, opts)
+    opts = opts or {}
+    scope_guids = scope_guids or {}
+    private_layers = private_layers or {}
+    local out = { string.pack("<I4I4I4I4", opts.version or 1, opts.reserved or 0,
+        #scope_guids, #private_layers) }
+    for _, g in ipairs(scope_guids) do out[#out + 1] = g end
+    for _, n in ipairs(private_layers) do out[#out + 1] = string.pack("<I4", #n) end
+    for _, n in ipairs(private_layers) do out[#out + 1] = n end
+    return table.concat(out)
+end
+
 --- Create a layer live, as §5.3.3 says to: the metadata key and its
 --- three values inside one transaction. Returns the layer key fd (or
 --- nil, errno).
