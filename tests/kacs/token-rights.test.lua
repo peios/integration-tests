@@ -319,3 +319,106 @@ test("the standard rights on a token's own descriptor are re-evaluated live on e
             sys.close(vm, fd)
         end)
     end)
+
+-- Socket-borne handles --------------------------------------------------------------
+
+local unixsock = require("helpers.unixsock")
+local SOL_SOCKET, SCM_RIGHTS = 1, 1
+
+-- A directory the sockets can be bound in: the rootfs is deny-missing,
+-- so give it and its root a descriptor everyone can create under.
+local SOCKS = "/pit-rights-socks"
+sys.mkdir_p(vm, SOCKS)
+kacs.set_sd(vm, SOCKS, kacs.grant(kacs.ALL_RIGHTS))
+kacs.set_sd(vm, "/", kacs.grant(kacs.ALL_RIGHTS))
+
+--- What a handle can do, by trying: QUERY, DUPLICATE, IMPERSONATE, ADJUST_PRIVS.
+local function rights_of(who, fd)
+    local out = {}
+    out.query = token.query(who, fd, token.CLASS.USER) ~= nil
+    -- A downward duplicate, so the level ratchet cannot be what refuses.
+    local d, de = token.duplicate(who, fd, { access = R.QUERY, token_type = token.TYPE.IMPERSONATION,
+        impersonation_level = token.LEVEL.IDENTIFICATION })
+    out.duplicate = d ~= nil or de ~= sys.E.ACCES
+    if d then sys.close(who, d) end
+    out.adjust = token.disable_priv(who, fd, token.PRIV.LOCK_MEMORY).errno ~= sys.E.ACCES
+    return out
+end
+
+test("a peer token carries the fixed rights TOKEN_QUERY | TOKEN_IMPERSONATE | TOKEN_DUPLICATE",
+    { spec = "PKM *token.rights.peer-token-fixed-rights" }, function(t)
+        local worker = vm:spawn_worker()
+        local ok, err = pcall(function()
+            local srv, acc, cli = assert(unixsock.connected(worker, SOCKS .. "/peer.sock"))
+            local peer, e = unixsock.peer_token(worker, acc)
+            t:assert(peer, "the server reads the client's peer token: " .. unixsock.errname(e or 0))
+            local can = rights_of(worker, peer)
+            t:assert(can.query, "TOKEN_QUERY")
+            t:assert(can.duplicate, "TOKEN_DUPLICATE")
+            t:assert(not can.adjust, "no TOKEN_ADJUST_PRIVILEGES")
+            t:assert_eq(token.impersonate(worker, peer).ret, 0, "TOKEN_IMPERSONATE: the server can wear it")
+            token.revert(worker)
+            sys.close(worker, srv); sys.close(worker, acc); sys.close(worker, cli)
+        end)
+        worker:kill(); worker:join()
+        if not ok then error(err, 0) end
+    end)
+
+test("a token delivered in KACS_SCM_TOKEN carries the same three rights",
+    { spec = "PKM *token.rights.scm-token-fixed-rights" }, function(t)
+        local worker = vm:spawn_worker()
+        local ok, err = pcall(function()
+            local srv, acc, cli = assert(unixsock.connected(worker, SOCKS .. "/scm.sock"))
+            local prim = assert(token.mint(worker, {}))
+            local imp = assert(token.duplicate(worker, prim, { token_type = token.TYPE.IMPERSONATION,
+                impersonation_level = token.LEVEL.IMPERSONATION }))
+            local s = unixsock.sendmsg(worker, cli, "hello", { token_fd = imp })
+            t:assert_eq(s.ret, 5, "send with a token attached: " .. unixsock.errname(s.errno or 0))
+            local r = unixsock.recvmsg(worker, acc, 64)
+            t:assert_eq(#r.tokens, 1, "one token cmsg arrives")
+            local got = r.tokens[1]
+            t:assert_eq(token.query(worker, got, token.CLASS.USER), token.SID.TEST_USER, "it is the sent identity")
+            local can = rights_of(worker, got)
+            t:assert(can.query and can.duplicate and not can.adjust, "QUERY and DUPLICATE, no adjust")
+            t:assert_eq(token.impersonate(worker, got).ret, 0, "TOKEN_IMPERSONATE")
+            token.revert(worker)
+            sys.close(worker, srv); sys.close(worker, acc); sys.close(worker, cli)
+        end)
+        worker:kill(); worker:join()
+        if not ok then error(err, 0) end
+    end)
+
+test("a token fd passed over SCM_RIGHTS keeps the mask cached at its open, whoever receives it",
+    { spec = "PKM *token.rights.passed-fd-keeps-cached-mask" }, function(t)
+        local path = SOCKS .. "/rights.sock"
+        local a = vm:spawn_worker()  -- SYSTEM: opens the token and sends it
+        local ok, err = pcall(function()
+            local srv = assert(unixsock.socket(a, unixsock.AF_UNIX, unixsock.SOCK.STREAM))
+            assert(unixsock.bind(a, srv, path).ret == 0); assert(unixsock.listen(a, srv).ret == 0)
+            token.as_principal(t, vm, { user_sid = token.SID.TEST_USER_2, projected_uid = 1102 }, function(b)
+                local cli = assert(unixsock.socket(b, unixsock.AF_UNIX, unixsock.SOCK.STREAM))
+                assert(unixsock.connect(b, cli, path).ret == 0, "connect")
+                local acc = assert(unixsock.accept(a, srv))
+                -- A's own token, opened QUERY-only. Its descriptor grants B nothing.
+                local qfd = assert(token.open_self(a, R.QUERY))
+                local control = string.pack("<I8I4I4i4", 16 + 4, SOL_SOCKET, SCM_RIGHTS, qfd) .. "\0\0\0\0"
+                local s = unixsock.sendmsg(a, acc, "x", { raw_control = control })
+                t:assert_eq(s.ret, 1, "A passes the fd: " .. unixsock.errname(s.errno or 0))
+                local r = unixsock.recvmsg(b, cli, 8, { cmsg = unixsock.cmsg_space(4) })
+                local rights_cmsg
+                for _, c in ipairs(r.cmsgs) do if c.level == SOL_SOCKET and c.type == SCM_RIGHTS then rights_cmsg = c end end
+                t:assert(rights_cmsg, "B receives an SCM_RIGHTS cmsg")
+                local recv_fd = string.unpack("<i4", rights_cmsg.data)
+                t:assert_eq(token.sid_string(assert(token.query(b, recv_fd, token.CLASS.USER))), "S-1-5-18",
+                    "B, whom the descriptor grants nothing, queries SYSTEM's token through the cached TOKEN_QUERY")
+                local d, de = token.duplicate(b, recv_fd, { access = R.QUERY })
+                t:assert(not d and de == sys.E.ACCES, "but not beyond the mask cached at A's open: no TOKEN_DUPLICATE")
+                local fresh, fe = token.open_self(b, R.QUERY)
+                t:assert(fresh, "B's own token opens on its own descriptor: " .. sys.errname(fe or 0))
+                sys.close(a, acc)
+            end)
+            sys.close(a, srv)
+        end)
+        a:kill(); a:join()
+        if not ok then error(err, 0) end
+    end)
