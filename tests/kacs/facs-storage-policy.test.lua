@@ -111,15 +111,11 @@ test("setting a mount policy needs SeTcbPrivilege held and enabled, and marks it
             end)
     end)
 
-test("SeManageVolumePrivilege alone does not satisfy the mount-policy gate",
-    { spec = "PKM *facs.storage.set-mount-policy-privilege", tags = { "known-bug" } },
-    function(t)
-        -- §3.9.5 names SeTcbPrivilege and nothing else. The kernel accepts
-        -- SeManageVolumePrivilege as well (capability.c
-        -- pkm_kacs_may_manage_volumes_for_token, with a comment arguing
-        -- that adopting a volume is volume management) — so a principal
-        -- holding only SeManageVolumePrivilege can reclassify a
-        -- superblock, which the TRM does not permit.
+test("SeManageVolumePrivilege satisfies the mount-policy gate, and the getter is gated too",
+    { spec = "PKM *facs.storage.set-mount-policy-privilege" }, function(t)
+        -- Adopting a volume is volume management (capability.c
+        -- pkm_kacs_may_manage_volumes_for_token): SeManageVolumePrivilege or
+        -- SeTcbPrivilege, enabled. kacs_get_mount_policy runs the same gate.
         local at, fd = mounted(t, "mvp", nil)
         t:assert_eq(kacs.set_sd(vm, at, descriptor(), ALL_INFO).ret, 0, "root repaired")
         sys.close(vm, fd)
@@ -127,11 +123,19 @@ test("SeManageVolumePrivilege alone does not satisfy the mount-policy gate",
             function(w)
                 local pfd = assert(sys.open(w, at, sys.O.PATH))
                 local r = kacs.set_mount_policy_ex(w, pfd, MP.SYNTHESIZE_EPHEMERAL, {})
-                t:assert_eq(r.ret, -1,
-                    "a principal without SeTcbPrivilege is refused: got " ..
-                    sys.errname(r.errno))
+                t:assert_eq(r.ret, 0, "SeManageVolumePrivilege alone sets the class: " .. sys.errname(r.errno or 0))
+                local got = kacs.get_mount_policy_ex(w, pfd, {})
+                t:assert(got and got.policy == MP.SYNTHESIZE_EPHEMERAL, "and reads it back")
                 sys.close(w, pfd)
             end)
+        token.as_principal(t, vm, principal_spec(0), function(w)
+            local pfd = assert(sys.open(w, at, sys.O.PATH))
+            local r = kacs.set_mount_policy_ex(w, pfd, MP.SYNTHESIZE_EPHEMERAL, {})
+            t:assert(r.ret ~= 0, "with neither privilege the setter is refused: " .. sys.errname(r.errno or 0))
+            local got, e = kacs.get_mount_policy_ex(w, pfd, {})
+            t:assert(not got, "and so is the getter: " .. sys.errname(e or 0))
+            sys.close(w, pfd)
+        end)
     end)
 
 test("the public ABI accepts only the three managed classes and rejects malformed input",

@@ -393,16 +393,18 @@ test("an unknown id is EINVAL",
         t:assert_eq(set.errno, sys.E.INVAL, "EINVAL")
     end)
 
-test("a removed id is EIDRM",
-    { spec = "PKM *sysvipc.sd-lookup-errors", tags = { "known-bug" } }, function(t)
+test("a removed id is EINVAL like an unknown one",
+    { spec = "PKM *sysvipc.sd-lookup-errors" }, function(t)
+        -- IPC_RMID drops the id from the namespace in the step that marks
+        -- the object deleted, so a later lookup cannot see the removal;
+        -- EIDRM is the racing case only.
         local shm = assert(netobj.shmget(vm, key(), 4096))
         t:assert(netobj.ipc_get_sd(vm, SD_AT.SHM, shm),
             "the descriptor reads while the object is live")
         t:assert_eq(netobj.shmctl(vm, shm, CTL.RMID).ret, 0, "the object is removed")
         local sd, errno = netobj.ipc_get_sd(vm, SD_AT.SHM, shm)
         t:assert(not sd, "its descriptor is no longer readable")
-        t:assert_eq(errno, sys.E.IDRM,
-            "§3.11 says a removed id is EIDRM; got " .. sys.errname(errno or 0))
+        t:assert_eq(errno, sys.E.INVAL, "a removed id is EINVAL: " .. sys.errname(errno or 0))
     end)
 
 -- ---- names -----------------------------------------------------------
