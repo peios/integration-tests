@@ -1,0 +1,51 @@
+# The VM the prelude conformance testset boots.
+#
+# Layered over the repository's own peiso.toml, which says where packages
+# come from; between them they are one complete spec.
+#
+# The kernel-only edition plus an initramfs. That pairing is the point:
+# the composed root's job is to produce `boot/initramfs/`, the ordinary
+# initramfs source tree an installed Peios carries, and nothing else. The
+# main root is never booted — build.sh packs the initramfs and provium
+# launches the kernel out of the same tree — so every package here that
+# is not in the initramfs root would be weight the tests never touch.
+[baseline]
+edition = "kernel-only"
+# Nothing boots this root from a medium; provium launches the kernel
+# directly and this profile supplies its own initramfs. Without this the
+# root would carry live-boot, whose hook would then be in the initramfs
+# scanning block devices for a squashfs that does not exist.
+first_boot = "none"
+
+# --- the initramfs ---------------------------------------------------------
+#
+# Everything below lands in the `initramfs` root (prelude's default_root
+# puts it there without being told). Together they are the smallest tree
+# prelude can actually boot from:
+#
+#   prelude       the initramfs PID 1 under test, plus seed-sd. Its
+#                 `sh >= 1` dependency pulls dash into the same root, so
+#                 the hooks have the shell their shebang names.
+#   fsbase-irf    the reduced skeleton: /mnt, /run, the /proc, /sys, /dev
+#                 mountpoints prelude mounts onto, and the lib64 loader
+#                 view the dynamically-linked tools need.
+#   peiosutils    mount, mkdir, cp, chroot — what a hook invokes. In a
+#                 shipped image an ELF edge from the packaged hooks pulls
+#                 this in; here the hooks are staged by build.sh rather
+#                 than packaged, so nothing would infer the edge.
+#
+# Deliberately absent: kernel-modules-irf, kmod and coldplug-irf (this VM
+# reaches its root through no driver), and fsbase-stratafs-mount-hooks
+# (its two hooks assemble StrataFS views the test hooks do not use, and
+# every hook in the tree is one more thing between a test and the
+# behaviour it is asserting).
+[[package]]
+name = "prelude"
+
+[[package]]
+name = "fsbase-irf"
+root = "initramfs"
+
+[[package]]
+name = "peiosutils"
+root = "initramfs"

@@ -1,0 +1,54 @@
+# The prelude conformance VM: a real initramfs, booted by its real PID 1.
+#
+# Every other profile in this repository hands the guest to provium's
+# agent as PID 1. This one does the opposite, because prelude IS the
+# system under test: the kernel execs prelude, prelude runs the hooks and
+# performs the handoff, and the agent is what prelude hands off TO. So a
+# test asserts on prelude's own behaviour from the far side of the
+# handoff, and on its console output for everything either side of it.
+#
+# Relative paths — and the build command's working directory — are this
+# profile's own directory.
+build = "./build.sh {out}"
+
+# No `kernel`: provium finds it inside the composed root, so a kernel
+# version bump moves nothing here.
+root = "{out}/root"
+
+# The initramfs build.sh packed: the composed root's boot/initramfs tree,
+# plus the test hooks and the payload that becomes the real root. This is
+# a whole userspace, unlike the kernel-only profile's fixture archive —
+# prelude, dash and peiosutils are all in it.
+initrd = "{out}/initramfs.cpio.gz"
+
+# inject_agent = false: provium must NOT concatenate its agent overlay or
+# set rdinit=. Both would displace prelude — rdinit= makes the agent PID 1
+# instead of prelude, and the overlay's /sbin/provium-agent would then
+# chain to /init in a rootfs prelude is about to empty and chroot out of.
+# The agent reaches this guest the other way round: build.sh stages it as
+# the real root's init, so prelude execs it at the handoff.
+inject_agent = false
+
+# No `init=`. prelude's fallback chain (/bin/peinit2, /sbin/init,
+# /bin/init, /bin/sh) is what finds the agent, so the default boot
+# exercises the chain; a test that wants the cmdline path appends its own
+# init= with kernel_cmdline_append.
+#
+# panic=1 so a kernel that dies takes the VM down instead of hanging the
+# run. No `quiet` and no `peios.quiet=2`: prelude's log lines are the
+# primary oracle for everything that happens before the handoff, and the
+# blackout suppresses them.
+#
+# TERM=dumb turns prelude's SGR colour off. prelude has no inherited TERM
+# — it is PID 1 — so the command line is the only place to say so, and
+# without it every log line a test matches on arrives wrapped in escape
+# sequences.
+cmdline = "console=hvc0 panic=1 TERM=dumb"
+
+# A boot that reaches the agent does so in about two seconds. Many tests
+# here deliberately boot a configuration prelude must REFUSE — a missing
+# hook sequence, a hook that fails, no root mounted — and prelude halts
+# the machine rather than handing off, so no agent ever appears. That is
+# the asserted outcome, not a hang, and waiting the default 30 seconds
+# for each would dominate the suite's runtime.
+agent_boot_timeout = 8.0
