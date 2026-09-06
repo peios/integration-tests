@@ -63,4 +63,15 @@ inject_agent = false
 # the other profiles' guests. Generous rather than tight: unlike the
 # prelude suite, a test here that expects a boot to fail says so by
 # asserting on the console, not by letting the agent time out.
-agent_boot_timeout = 90.0
+#
+# 120 rather than 90: one boot takes about five seconds idle, and a
+# chapter's worth of files running together already stretches that far
+# enough that 90 was occasionally short.
+#
+# It does NOT fix a whole-testset run, and raising it further does not
+# either — 240 was tried and made the run slower without making it
+# greener (PEI-810). The timeout is a backstop rather than a wait, so a
+# boot that succeeds does not spend it, and the tests that expect a
+# failed boot pass their own short `agent_timeout` (helpers.peinit's
+# boot_to_recovery).
+agent_boot_timeout = 120.0
