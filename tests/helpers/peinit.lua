@@ -148,10 +148,19 @@ end
 --- opts:
 ---   name    VM name (default "v")
 ---   stage   a key of `M.marks` to wait for (default "phase2")
----   memory  VM memory (default "2G" — the initramfs alone is ~90 MiB,
----           and the squashfs page cache and the overlay's tmpfs upper
----           both live in RAM on top of it)
----   cpus    vCPU count (default 2)
+---   memory  VM memory (default "1G" — a booted guest uses about
+---           300 MiB, and the squashfs is read off the medium on demand
+---           rather than held in RAM)
+---   cpus    vCPU count (default 1, and this matters more than it looks)
+---
+--- One vCPU, not two, because provium admits a VM only while the total
+--- DECLARED vCPUs fit the host's cores. At two apiece only a handful of
+--- this testset's boots can run at once, so the files convoy and each
+--- one blows its per-file time budget on a busy host. The same files at
+--- one vCPU finish in a tenth of the time. peinit is not
+--- compute-bound — what a test here waits for is a boot, and a boot is
+--- waiting on I/O.
+---
 ---   files   a table for `M.stage` — root-relative paths to place in
 ---           the root before peinit runs
 ---   append  kernel command-line tokens, appended after the image's own
@@ -159,8 +168,8 @@ end
 function M.boot(opts)
     opts = opts or {}
     local vm_opts = {
-        memory = opts.memory or "2G",
-        cpus = opts.cpus or 2,
+        memory = opts.memory or "1G",
+        cpus = opts.cpus or 1,
     }
     local boot_opts = {}
     for k, v in pairs(opts.boot or {}) do boot_opts[k] = v end
@@ -200,8 +209,8 @@ end
 function M.boot_to_recovery(t, opts)
     opts = opts or {}
     local vm = provium:vm(opts.name or "rec", "peinit", {
-        memory = opts.memory or "2G",
-        cpus = opts.cpus or 2,
+        memory = opts.memory or "1G",
+        cpus = opts.cpus or 1,
     })
     local boot_opts = { agent_timeout = opts.agent_timeout or 12 }
     for k, v in pairs(opts.boot or {}) do boot_opts[k] = v end
