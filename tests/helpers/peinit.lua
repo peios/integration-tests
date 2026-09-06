@@ -75,6 +75,74 @@ function M.stage(files)
     return out
 end
 
+--- A registry seed file, for `peinit.boot({files = …})`.
+---
+--- The image ships `10-apply-seeds.sh` in the autorun queue, which runs
+--- `reg apply --dir /lcl/policy/autoapply.d --once-delete`. Autoruns are
+--- Phase 1 step 7, and both path provisioning (step 8) and the Phase 2
+--- read of the service graph come after — so a seed staged here is in
+--- the registry before peinit looks at either. It sorts before
+--- `10-provium-agent.sh`, so it has also applied before the agent this
+--- test is talking to exists.
+---
+---   files = peinit.seed("pt-x", {
+---       {path = [[Machine\System\Services\pt-x]], values = {
+---           {name = "ImagePath", type = "sz", data = "/bin/true"},
+---           {name = "Triggers", type = "multi", data = {"boot"}},
+---       }},
+---   })
+---
+--- Parent keys are not created implicitly: name every level, as the
+--- image's own seeds do.
+---
+--- Returns a `files` table, so merge it rather than pass it whole when a
+--- test also stages other files.
+function M.seed(name, keys)
+    local json = { keys = keys }
+    return {
+        ["lcl/policy/autoapply.d/" .. name .. ".reg"] = M.encode_json(json),
+    }
+end
+
+--- Minimal JSON encoder — the guest's `reg apply` reads JSON and Lua has
+--- no encoder in its standard library. Handles what a seed file needs:
+--- strings, numbers, booleans, arrays and objects. An array is a table
+--- with a `[1]`, or the empty table, which encodes as `[]`.
+function M.encode_json(v)
+    local t = type(v)
+    if t == "nil" then return "null" end
+    if t == "boolean" or t == "number" then return tostring(v) end
+    if t == "string" then
+        return '"' .. v:gsub('[\\"]', '\\%0'):gsub("\n", "\\n"):gsub("\r", "\\r") .. '"'
+    end
+    if t ~= "table" then error("encode_json: cannot encode a " .. t) end
+    if v[1] ~= nil or next(v) == nil then
+        local parts = {}
+        for _, item in ipairs(v) do parts[#parts + 1] = M.encode_json(item) end
+        return "[" .. table.concat(parts, ",") .. "]"
+    end
+    -- Sorted keys, so a staged seed is byte-identical run to run and a
+    -- diff of two of them is about the content rather than about Lua's
+    -- table order.
+    local names = {}
+    for k in pairs(v) do names[#names + 1] = k end
+    table.sort(names)
+    local parts = {}
+    for _, k in ipairs(names) do
+        parts[#parts + 1] = M.encode_json(tostring(k)) .. ":" .. M.encode_json(v[k])
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+end
+
+--- Merge several `files` tables into one.
+function M.merge(...)
+    local out = {}
+    for _, set in ipairs({ ... }) do
+        for k, v in pairs(set) do out[k] = v end
+    end
+    return out
+end
+
 --- Boot a peinit VM and wait until it has reached `stage`.
 ---
 --- opts:
@@ -100,7 +168,12 @@ function M.boot(opts)
     if opts.append then boot_opts.kernel_cmdline_append = opts.append end
     local vm = provium:vm(opts.name or "v", "peinit", vm_opts)
     vm:boot(boot_opts)
-    local stage = opts.stage or "phase2"
+    -- `opts.stage or "phase2"` would defeat `stage = false`, since false
+    -- is falsy in Lua and `or` cannot tell it from an absent field. A
+    -- test that passes false wants no wait at all — usually because it
+    -- expects a boot that never reaches the stage.
+    local stage = opts.stage
+    if stage == nil then stage = "phase2" end
     if stage ~= false then
         local mark = M.marks[stage]
         assert(mark, "peinit.boot: no such stage `" .. tostring(stage) .. "`")
