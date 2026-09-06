@@ -1,0 +1,66 @@
+# The peinit conformance VM: a whole Peios system, booted the way a
+# machine boots one.
+#
+# The kernel execs prelude out of the real initramfs; prelude runs the
+# real hooks; live-boot's mount-root.sh finds the medium on the virtio
+# bus, loop-mounts the shipped squashfs, overlays a seeded tmpfs on it
+# and leaves the result at /mnt/rootfs; prelude chroots in and execs
+# /bin/peinit2. Everything before peinit is real, because peinit's own
+# contract (Peinit TRM §2.1) is about what it is handed, and a substitute
+# would only ever hand it what we already believe.
+#
+# Relative paths — and the build command's working directory — are this
+# profile's own directory.
+build = "./build.sh {out}"
+
+# No `kernel`: provium finds it inside the composed root, so a kernel
+# version bump moves nothing here.
+root = "{out}/image/root"
+
+# The real initramfs, packed by the real mkirf from the composed root's
+# boot/initramfs tree. Byte-for-byte what the medium's UKI carries; see
+# build.sh for why it is handed to QEMU directly instead.
+initrd = "{out}/initramfs.cpio.gz"
+
+# The medium. live-boot's hook scans /sys/block for a whole-disk device
+# whose ISO9660 holds /rootfs.squashfs, which is exactly what this is —
+# so the shipped hook runs unmodified, and what peinit is handed is the
+# overlay-over-squashfs root a live boot really produces, with the
+# descriptor live-boot really stamps.
+#
+# Read-only: a guest write would modify the image, and every later boot
+# in the run would read the modified one.
+disks = [{ path = "{out}/medium.iso", id = "medium", readonly = true }]
+
+# The command line live-boot ships in the image
+# (usr/share/live-boot/cmdline), so this profile cannot drift from what
+# the medium expects. It carries `init=/bin/peinit2`, which is the whole
+# handoff target, plus loglevel and a panic policy. The inline `cmdline`
+# below is appended after it, and the kernel takes the last occurrence of
+# a repeated parameter, so what is set there wins.
+cmdline_file = "{out}/image/root/usr/share/live-boot/cmdline"
+
+# panic=1 overrides live-boot's panic=-1: a shipped image should reboot
+# and retry, a test VM should die so the failure is reported instead of
+# looping until the run times out.
+#
+# TERM=dumb turns the SGR colour off in prelude's and peinit's console
+# output. Neither inherits a TERM — one is PID 1 and the other is exec'd
+# by it — so the command line is the only place to say so, and without it
+# every line a test matches on arrives wrapped in escape sequences.
+cmdline = "console=hvc0 panic=1 TERM=dumb"
+
+# inject_agent = false: provium must NOT concatenate its agent overlay or
+# set rdinit=. rdinit= would make the agent PID 1 in place of prelude,
+# and the overlay would put a /sbin/provium-agent in a rootfs prelude is
+# about to empty and chroot out of. The agent reaches this guest the
+# other way round: build.sh injects it into the image, and peinit starts
+# it from /lcl/policy/autorun.d at phase 1.5.
+inject_agent = false
+
+# A full boot — prelude, the hook graph, a squashfs mount, peinit's two
+# phases and the service graph — takes appreciably longer than either of
+# the other profiles' guests. Generous rather than tight: unlike the
+# prelude suite, a test here that expects a boot to fail says so by
+# asserting on the console, not by letting the agent time out.
+agent_boot_timeout = 90.0

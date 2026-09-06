@@ -1,0 +1,30 @@
+# The VM the peinit conformance testset boots.
+#
+# Layered over the repository's own peiso.toml, which says where packages
+# come from; between them they are one complete spec.
+#
+# The whole Experimental edition, not a reduced one. peinit is a service
+# manager, and what it manages is the service graph an image actually
+# ships — authd, eventd, loregd, netd, resolvd, timed, trustd and the
+# relationships between them. A cut-down edition would be a different
+# graph, and a suite that tested peinit against it would be describing a
+# system nobody boots. Experimental is also the only full edition there
+# is, so choosing it costs nothing that a leaner one would have saved.
+#
+# No `first_boot`: the default is "live", and this profile wants the live
+# flavour specifically. `peiso iso` then adds live-boot, whose
+# `mount-root.sh` is what assembles the root peinit is handed — an
+# overlay of the shipped squashfs under a seeded tmpfs. That hook, and
+# the root descriptor it stamps, are part of what peinit is being tested
+# against: the descriptor is one of three copies that must agree (the
+# others are peinit's own PHASE1_SEED_SDDL and peios-install's
+# ROOT_SDDL), and they have drifted before.
+[baseline]
+edition = "Experimental"
+
+# Cheaper squashfs compression, as dist/release's dev layer uses. The
+# medium is built by a test profile's `build`, read once per boot off a
+# virtio disk, and thrown away — its size buys nothing here, and the
+# release setting costs minutes on every rebuild.
+[squashfs]
+level = 3

@@ -45,10 +45,16 @@ inject_agent = false
 # sequences.
 cmdline = "console=hvc0 panic=1 TERM=dumb"
 
+# Raised from 8 s when the peinit profile joined the repository. That
+# profile boots a whole image in a 2 GiB VM, so a full-suite run now
+# reaches a higher peak load than this one was tuned against, and three
+# prelude cases were failing on the timeout rather than on anything
+# prelude did. Twelve is still far below the VMM default of thirty.
+#
 # A boot that reaches the agent does so in about two seconds. Many tests
 # here deliberately boot a configuration prelude must REFUSE — a missing
 # hook sequence, a hook that fails, no root mounted — and prelude halts
 # the machine rather than handing off, so no agent ever appears. That is
 # the asserted outcome, not a hang, and waiting the default 30 seconds
 # for each would dominate the suite's runtime.
-agent_boot_timeout = 8.0
+agent_boot_timeout = 12.0
