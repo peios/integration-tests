@@ -182,6 +182,40 @@ function M.boot(opts)
     return vm
 end
 
+--- Boot a peinit VM that is expected NOT to reach an agent, and wait on
+--- the console until `mark` appears.
+---
+--- Recovery mode runs no Phase 2 service, so the autorun that starts the
+--- agent never runs and `vm:boot` fails once the agent timeout lapses.
+--- That is the asserted outcome rather than a hang, so the timeout is
+--- pulled right down: at the profile's 90 seconds a handful of these
+--- would dominate the suite.
+---
+--- Returns the guest console text, taken from the error `vm:boot`
+--- raises — which carries the tail of the console, and is the only
+--- record such a boot leaves. The VM itself is not usable afterwards:
+--- provium has given up on it, so `vm:console()` reads nothing and
+--- cannot be written to. A test that wants to *drive* the recovery
+--- shell has no route to it from here.
+function M.boot_to_recovery(t, opts)
+    opts = opts or {}
+    local vm = provium:vm(opts.name or "rec", "peinit", {
+        memory = opts.memory or "2G",
+        cpus = opts.cpus or 2,
+    })
+    local boot_opts = { agent_timeout = opts.agent_timeout or 12 }
+    for k, v in pairs(opts.boot or {}) do boot_opts[k] = v end
+    if opts.files then boot_opts.files = M.stage(opts.files) end
+    if opts.append then boot_opts.kernel_cmdline_append = opts.append end
+
+    local ok, err = pcall(function() vm:boot(boot_opts) end)
+    if ok then
+        t:assert(false, "expected a boot that never reaches an agent, but one came up")
+        return ""
+    end
+    return tostring(err)
+end
+
 --- Every line of the console log, with the CR/LF a serial console
 --- produces stripped.
 ---
