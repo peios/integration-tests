@@ -91,6 +91,33 @@ A citation is a **pointer, not a copy**. `test-suite` transcribed 3,443
 statements into a matrix and the copies rotted when the documents changed;
 nothing here restates what a document says.
 
+### When the component has no book
+
+Some components have no document a citation can point at. Everything
+published about prelude, the initramfs PID 1, lives in *topics* — task
+docs — and Trail rejects an anchor outside a book, deliberately: a
+citation is addressed through its book, so an anchor anywhere else could
+never be cited.
+
+Where that is the case, the suite cites an **inventory extracted from the
+code**: a numbered list of the component's observable behaviours, each
+with its evidence in the source and a note saying whether any published
+page states it. Tests cite `prelude <claim-name>`, and the names are
+shaped like anchors so that the day the component gains a book, adopting
+them is a rename.
+
+Read a failure the way you would read a TRM's: the inventory is
+descriptive, so a red light says behaviour changed and the honest
+resolution is sometimes to update the inventory. But it carries one
+warning a TRM does not. An inventory is derived from the implementation,
+so it agrees with the implementation by construction — it can tell you
+that behaviour *changed*, never that the behaviour was *right*. Its own
+notes are what carry that: a claim marked as stated by no published page
+is a claim nobody has ever reviewed.
+
+This is a stopgap rather than a pattern to spread. A component worth a
+conformance suite is usually worth a book.
+
 ## Deliberately unsettled
 
 Recorded so they are decided rather than defaulted into:
