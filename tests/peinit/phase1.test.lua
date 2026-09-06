@@ -13,7 +13,7 @@ local peinit = require("helpers.peinit")
 local vm = peinit.boot()
 
 test("the root writability probe leaves nothing behind",
-    { spec = "PEINIT *phase1.root-writability-is-probed" },
+    { spec = "peinit *phase1.root-writability-is-probed" },
     function(t)
         -- peinit probes rather than remounting: it creates /.peinit/,
         -- writes a uniquely named file, and removes it. The directory
@@ -30,8 +30,8 @@ test("the root writability probe leaves nothing behind",
 test("peinit mounts the four filesystems it owns and re-mounts none of the three it inherits",
     {
         spec = {
-            "PEINIT *phase1.mounts-only-what-is-absent",
-            "PEINIT *phase1.an-already-mounted-kernel-filesystem-is-success",
+            "peinit *phase1.mounts-only-what-is-absent",
+            "peinit *phase1.an-already-mounted-kernel-filesystem-is-success",
         },
     },
     function(t)
@@ -68,8 +68,8 @@ test("peinit mounts the four filesystems it owns and re-mounts none of the three
 test("the fresh filesystems carry the seed descriptor, and the inherited ones do not",
     {
         spec = {
-            "PEINIT *phase1.fresh-mounts-are-seeded",
-            "PEINIT *phase1.the-initramfs-filesystems-are-not-stamped",
+            "peinit *phase1.fresh-mounts-are-seeded",
+            "peinit *phase1.the-initramfs-filesystems-are-not-stamped",
         },
     },
     function(t)
@@ -88,7 +88,7 @@ test("the fresh filesystems carry the seed descriptor, and the inherited ones do
     end)
 
 test("the Everyone ACE on a seeded mount is inheritable by containers only",
-    { spec = "PEINIT *phase1.seed-everyone-ace-is-container-inherit-only" },
+    { spec = "peinit *phase1.seed-everyone-ace-is-container-inherit-only" },
     function(t)
         -- The one place this descriptor differs from the root
         -- filesystem's, and the reason is exact: container inheritance
@@ -113,8 +113,8 @@ test("the Everyone ACE on a seeded mount is inheritable by containers only",
 test("the device nodes in the policy list are stamped, and the console is not",
     {
         spec = {
-            "PEINIT *phase1.device-nodes-get-explicit-descriptors",
-            "PEINIT *phase1.console-is-not-in-the-device-node-list",
+            "peinit *phase1.device-nodes-get-explicit-descriptors",
+            "peinit *phase1.console-is-not-in-the-device-node-list",
         },
     },
     function(t)
@@ -145,8 +145,8 @@ test("the device nodes in the policy list are stamped, and the console is not",
 test("a machine ID is generated when the image ships none, in the documented format",
     {
         spec = {
-            "PEINIT *phase1.the-machine-id-is-ensured",
-            "PEINIT *phase1.machine-id-format",
+            "peinit *phase1.the-machine-id-is-ensured",
+            "peinit *phase1.machine-id-format",
         },
     },
     function(t)
@@ -162,7 +162,7 @@ test("a machine ID is generated when the image ships none, in the documented for
     end)
 
 test("a valid machine ID staged into the root is left exactly as it is",
-    { spec = "PEINIT *phase1.a-valid-machine-id-is-left-alone" },
+    { spec = "peinit *phase1.a-valid-machine-id-is-left-alone" },
     function(t)
         local staged = "0123456789abcdef0123456789abcdef\n"
         local other = peinit.boot({
@@ -176,7 +176,7 @@ test("a valid machine ID staged into the root is left exactly as it is",
     end)
 
 test("a malformed machine ID is replaced rather than kept or fatal",
-    { spec = "PEINIT *phase1.a-malformed-machine-id-is-replaced" },
+    { spec = "peinit *phase1.a-malformed-machine-id-is-replaced" },
     function(t)
         -- Right length, wrong alphabet. The format rules reject it, and
         -- the response is to replace it and boot on.
@@ -193,9 +193,9 @@ test("a malformed machine ID is replaced rather than kept or fatal",
 test("registryd is started, is serving, and is kept as a runtime service",
     {
         spec = {
-            "PEINIT *phase1.registryd-is-the-only-compiled-in-definition",
-            "PEINIT *phase1.registryd-readiness-means-serving",
-            "PEINIT *phase1.registryd-is-retained-as-a-runtime-instance",
+            "peinit *phase1.registryd-is-the-only-compiled-in-definition",
+            "peinit *phase1.registryd-readiness-means-serving",
+            "peinit *phase1.registryd-is-retained-as-a-runtime-instance",
         },
     },
     function(t)
@@ -223,10 +223,10 @@ test("registryd is started, is serving, and is kept as a runtime service",
 test("every autorun script runs, in sorted order, as SYSTEM with a fixed environment",
     {
         spec = {
-            "PEINIT *phase1.autorun-scripts-run-between-registryd-and-provisioning",
-            "PEINIT *phase1.autorun-runs-every-entry-in-sorted-order",
-            "PEINIT *phase1.an-autorun-scripts-environment",
-            "PEINIT *phase1.autorun-scripts-run-as-system",
+            "peinit *phase1.autorun-scripts-run-between-registryd-and-provisioning",
+            "peinit *phase1.autorun-runs-every-entry-in-sorted-order",
+            "peinit *phase1.an-autorun-scripts-environment",
+            "peinit *phase1.autorun-scripts-run-as-system",
         },
     },
     function(t)
@@ -262,7 +262,7 @@ echo "pt|NAME|cwd=$(pwd)|path=$PATH|user=$(token user 2>/dev/null || echo unknow
     end)
 
 test("an autorun script that fails is a warning, not a boot failure",
-    { spec = "PEINIT *phase1.autorun-is-fail-open" },
+    { spec = "peinit *phase1.autorun-is-fail-open" },
     function(t)
         local other = peinit.boot({
             name = "autorun-fail",
@@ -285,8 +285,8 @@ test("an autorun script that fails is a warning, not a boot failure",
 test("the control and jobs sockets exist before Phase 2, stamped as §10 requires",
     {
         spec = {
-            "PEINIT *phase1.the-control-socket-is-created",
-            "PEINIT *phase1.the-jobs-socket-is-created",
+            "peinit *phase1.the-control-socket-is-created",
+            "peinit *phase1.the-jobs-socket-is-created",
         },
     },
     function(t)
@@ -306,7 +306,7 @@ test("the control and jobs sockets exist before Phase 2, stamped as §10 require
     end)
 
 test("loopback is up before Phase 2, because services that bind 127.0.0.1 need it",
-    { spec = "PEINIT *phase1.loopback-is-brought-up" },
+    { spec = "peinit *phase1.loopback-is-brought-up" },
     function(t)
         local flags = vm:read_file("/sys/class/net/lo/flags"):gsub("%s+$", "")
         -- sysfs prints these with an 0x prefix, which tonumber understands

@@ -9,7 +9,7 @@ local peinit = require("helpers.peinit")
 
 local vm = peinit.boot()
 
-test("peinit assembles no root of its own", { spec = "PEINIT *handoff.peinit-performs-no-root-assembly" },
+test("peinit assembles no root of its own", { spec = "peinit *handoff.peinit-performs-no-root-assembly" },
     function(t)
         -- Nothing peinit does mounts the root: by the time it exists the
         -- root is already `/`. The evidence is the console — every mount
@@ -26,8 +26,8 @@ test("peinit assembles no root of its own", { spec = "PEINIT *handoff.peinit-per
 test("control arrives by chroot and exec, and the initramfs rootfs stays behind",
     {
         spec = {
-            "PEINIT *handoff.control-arrives-by-chroot-and-exec",
-            "PEINIT *handoff.peinit-never-pivots",
+            "peinit *handoff.control-arrives-by-chroot-and-exec",
+            "peinit *handoff.peinit-never-pivots",
         },
     },
     function(t)
@@ -52,7 +52,7 @@ test("control arrives by chroot and exec, and the initramfs rootfs stays behind"
     end)
 
 test("peinit is reached at /bin/peinit2, the path the boot image names in init=",
-    { spec = "PEINIT *handoff.peinit-is-reached-through-bin-peinit2" },
+    { spec = "peinit *handoff.peinit-is-reached-through-bin-peinit2" },
     function(t)
         local cmdline = vm:read_file("/proc/cmdline")
         t:assert(cmdline:find("init=/bin/peinit2", 1, true),
@@ -66,7 +66,7 @@ test("peinit is reached at /bin/peinit2, the path the boot image names in init="
     end)
 
 test("the StrataFS /bin and /sbin views exist before peinit runs",
-    { spec = "PEINIT *handoff.the-stratafs-views-exist-at-handoff" },
+    { spec = "peinit *handoff.the-stratafs-views-exist-at-handoff" },
     function(t)
         -- peinit reaches every binary it execs through these, so they
         -- have to be assembled by the initramfs rather than by peinit.
@@ -96,8 +96,8 @@ test("the StrataFS /bin and /sbin views exist before peinit runs",
 test("the root is delivered read-write, which is registryd's requirement",
     {
         spec = {
-            "PEINIT *handoff.the-root-is-mounted-read-write",
-            "PEINIT *handoff.the-read-write-requirement-is-registryds",
+            "peinit *handoff.the-root-is-mounted-read-write",
+            "peinit *handoff.the-read-write-requirement-is-registryds",
         },
     },
     function(t)
@@ -117,7 +117,7 @@ test("the root is delivered read-write, which is registryd's requirement",
     end)
 
 test("proc, sys and dev were moved into the root rather than mounted by peinit",
-    { spec = "PEINIT *handoff.proc-sys-dev-are-moved-into-the-root" },
+    { spec = "peinit *handoff.proc-sys-dev-are-moved-into-the-root" },
     function(t)
         local log = vm:console():read_log()
         for _, fs in ipairs({ "/proc", "/sys", "/dev" }) do
@@ -138,7 +138,7 @@ test("proc, sys and dev were moved into the root rather than mounted by peinit",
     end)
 
 test("peinit passes none of its own startup environment on to a service",
-    { spec = "PEINIT *handoff.peinit-passes-none-of-its-environment-on" },
+    { spec = "peinit *handoff.peinit-passes-none-of-its-environment-on" },
     function(t)
         -- peinit's own environment at handoff holds TERM and nothing
         -- else. registryd is the first thing it starts, and its
