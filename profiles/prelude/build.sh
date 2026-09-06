@@ -150,6 +150,11 @@ cp fixtures/* "$irf/fixtures/"
 #   proc sys dev  the mountpoints prelude mount-moves the kernel virtual
 #                 filesystems onto. A root without them fails the handoff,
 #                 which is itself a thing worth being able to test.
+#   bin/seed-sd   the seeding helper, so it survives the pivot and a test
+#                 can drive it as an ordinary program. It ships beside
+#                 prelude in the same package and is already in the
+#                 initramfs — but prelude empties that root before the
+#                 handoff, so a copy has to be on this side of it.
 #   tmp run       the agent mounts a tmpfs on /tmp when it comes up as a
 #                 standalone PID 1; /run is where a hook leaves anything
 #                 it wants to survive the pivot.
@@ -170,6 +175,16 @@ cp "$agent_tmp/sbin/provium-agent" "$payload/bin/peinit2"
 # is executable" flag, not an advisory permission — and it has to survive
 # the cpio, the copy the hook makes, and the SD the hook seeds.
 chmod 0755 "$payload/bin/peinit2"
+
+# seed-sd, from the composed initramfs rather than from a build of its
+# own: what the tests drive is then the binary the prelude package ships,
+# the same one prelude itself execs against /dev.
+[ -x "$irf/usr/bin/seed-sd" ] || {
+    warn "the composed initramfs has no usr/bin/seed-sd"
+    exit 1
+}
+cp "$irf/usr/bin/seed-sd" "$payload/bin/seed-sd"
+chmod 0755 "$payload/bin/seed-sd"
 
 # --- pack -------------------------------------------------------------------
 # mkirf resolves the hook DAG and writes the sequence files; this is the

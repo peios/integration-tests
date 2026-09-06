@@ -42,4 +42,15 @@ seed-sd /mnt/rootfs
 # agent what prelude left behind.
 cp -a /fixtures/rootfs/. /mnt/rootfs/
 
+# And seed it again. `cp -a` preserves extended attributes, and the
+# security descriptor is one — so copying the payload in carries the
+# descriptor of the directory it came from over the top of the one
+# seeded above, leaving the new root with whatever /fixtures/rootfs
+# happened to inherit inside the initramfs rather than the template.
+#
+# Seeding twice rather than once after the copy, because the copy itself
+# needs a stamped destination: an unseeded tmpfs denies everything, so
+# there would be nothing to copy into.
+seed-sd /mnt/rootfs
+
 pt_mark mount-root outcome=satisfied
