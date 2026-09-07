@@ -134,6 +134,42 @@ function M.encode_json(v)
     return "{" .. table.concat(parts, ",") .. "}"
 end
 
+--- Stage one of the suite's own guest tools, as a `files` entry.
+---
+--- The image ships what a Peios ships, and some of what a test needs to
+--- do has no tool there: nothing in it can write a Unix datagram with
+--- ancillary data, for instance, so the whole notification protocol and
+--- the fd store were unreachable until this existed. These tools are
+--- small C programs in `tests/tools/`, compiled statically on the host
+--- (the guest has no compiler) and staged into the boot that needs them.
+---
+---   local peinit = require("helpers.peinit")
+---   local vm = peinit.boot({ files = peinit.tool("pt-notify") })
+---   -- and then, in a service definition:
+---   { name = "ImagePath", type = "sz", data = "/usr/bin/pt-notify" }
+---
+--- Merge it with `M.merge` when the test also stages seeds or scripts.
+--- The build is cached and keyed on the source's mtime, so the first
+--- caller in a run pays a sub-second compile and the rest pay nothing.
+---
+--- Staged rather than injected into the image: the tool is apparatus,
+--- and a test that does not ask for it should not be booting a guest
+--- that carries it.
+function M.tool(name)
+    local pipe = assert(io.popen("sh tests/tools/build.sh '" .. name .. "'", "r"))
+    local path = pipe:read("*l")
+    local ok = pipe:close()
+    assert(ok and path and path ~= "",
+        "peinit.tool: could not build `" .. name .. "` (see stderr)")
+
+    local file = assert(io.open(path, "rb"),
+        "peinit.tool: built `" .. name .. "` but could not read " .. path)
+    local bytes = file:read("*a")
+    file:close()
+
+    return { ["usr/bin/" .. name] = { bytes, exec = true } }
+end
+
 --- Merge several `files` tables into one.
 function M.merge(...)
     local out = {}
