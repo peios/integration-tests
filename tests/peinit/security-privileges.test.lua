@@ -10,6 +10,7 @@
 -- peinit's privileges it has ever had to spend.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local vm = peinit.boot()
 

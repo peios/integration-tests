@@ -10,6 +10,7 @@
 -- prelude chroots — so peinit reads a counter this test chose.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 local vm = peinit.boot()
 

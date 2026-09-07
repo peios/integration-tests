@@ -10,6 +10,7 @@
 -- artefact on disk.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 -- Nothing here changes the boot, so one VM serves every test. Nothing is
 -- staged either, which matters: the profile's staging hook perturbs the

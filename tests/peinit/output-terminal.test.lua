@@ -18,6 +18,7 @@
 -- start paths §11.6 covers just as squarely and which work.
 
 local peinit = require("helpers.peinit")
+peinit.claim(4) -- three boots at file scope, and the boot-plan test adds one
 
 -- One gigabyte rather than the helper's two. Chapter 11 boots more
 -- machines than any other chapter here — a claim about output usually

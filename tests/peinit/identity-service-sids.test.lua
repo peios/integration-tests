@@ -9,6 +9,7 @@
 -- is what makes them a check rather than a snapshot.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 local vm = peinit.boot({ name = "identity-service-sids" })
 

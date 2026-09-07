@@ -16,6 +16,7 @@
 -- that the recorded cause says where it failed.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local FILES = {
     ["pt/pre1.sh"] = [[

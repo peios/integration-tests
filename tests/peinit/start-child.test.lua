@@ -14,6 +14,7 @@
 -- service on the machine with a `TTYPath`.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local SERVICES = {
     { path = [[Machine\System]] },

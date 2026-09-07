@@ -21,6 +21,7 @@
 -- two hops downstream of it.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 -- One gigabyte rather than the helper's two. Chapter 11 boots more
 -- machines than any other chapter here — a claim about output usually

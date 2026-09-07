@@ -19,6 +19,7 @@
 -- cannot remove.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local FILES = {
     -- Ignores SIGTERM, so `svctl stop` has to escalate. The `sleep`

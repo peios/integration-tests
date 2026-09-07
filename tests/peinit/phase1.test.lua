@@ -9,6 +9,7 @@
 -- that ran before there was anything to ask.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 local vm = peinit.boot()
 

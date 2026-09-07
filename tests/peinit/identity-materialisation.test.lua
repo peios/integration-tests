@@ -11,6 +11,7 @@
 -- read afterwards, which is the only record such a process leaves.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local vm = peinit.boot({
     name = "identity-materialisation",

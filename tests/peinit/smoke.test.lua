@@ -9,6 +9,7 @@
 -- one.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 -- The agent answers from the autorun queue, between phase 1 and phase 2,
 -- so a boot that has reached the agent is not yet a boot that has

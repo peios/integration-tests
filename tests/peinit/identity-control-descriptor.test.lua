@@ -11,6 +11,7 @@
 -- shutdown, is noted where it arises.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 -- Nothing here varies the boot, so the stock image is what is wanted:
 -- staging files perturbs the root's descriptor (see

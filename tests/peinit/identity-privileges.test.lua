@@ -11,6 +11,7 @@
 -- privilege its source never granted, and still not have it.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local function resident(name, identity, required)
     local values = {

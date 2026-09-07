@@ -12,6 +12,7 @@
 -- from peinit having started.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 local vm = peinit.boot()
 

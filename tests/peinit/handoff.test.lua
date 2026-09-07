@@ -6,6 +6,7 @@
 -- live-boot really produced this state.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local vm = peinit.boot()
 

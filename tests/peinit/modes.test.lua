@@ -8,6 +8,7 @@
 -- last occurrence of a repeated parameter, so an appended token wins.
 
 local peinit = require("helpers.peinit")
+peinit.claim(3) -- the quiet test boots a loud and a quiet VM beside the file's own
 
 local vm = peinit.boot()
 

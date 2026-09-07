@@ -13,6 +13,7 @@
 -- because the tests share a machine.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 -- A self-relative security descriptor, hex-encoded for `reg set`.
 --

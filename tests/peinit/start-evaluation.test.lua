@@ -16,6 +16,7 @@
 -- which is what makes the missing `checks/` directory mean something.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local SERVICES = {
     { path = [[Machine\System]] },

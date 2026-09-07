@@ -10,6 +10,7 @@
 -- staged anything (PEI-800). These tests are what would have caught it.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2) -- the first test compares two boots side by side
 
 test("staging a file does not disturb the root's own descriptor", {}, function(t)
     -- The trap: `cp -a src/. dst/` copies the SOURCE DIRECTORY's

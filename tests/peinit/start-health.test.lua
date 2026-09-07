@@ -13,6 +13,7 @@
 -- is evidence about validation rather than about a running service.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local FILES = {
     -- Records where and as whom peinit ran it. `$PPID` rather than

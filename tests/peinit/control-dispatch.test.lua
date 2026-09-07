@@ -9,6 +9,7 @@
 -- left for a suite that can log a second principal on.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 local function resident(name)
     return {
@@ -269,6 +270,10 @@ test("the shutdown gate refuses the lifecycle commands and keeps the query ones"
                 break
             end
             missed = run.stdout
+            -- A lost race leaves a machine that is shutting down anyway.
+            -- Release it before the next attempt, so the retries never
+            -- hold more of the file's claim than one gate VM at a time.
+            other:shutdown()
         end
 
         t:assert(probe,

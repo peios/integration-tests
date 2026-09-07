@@ -14,6 +14,7 @@
 -- severity peinit gives its own messages.
 
 local peinit = require("helpers.peinit")
+peinit.claim(7) -- six boots at file scope, and the banner test adds one
 
 -- One gigabyte rather than the helper's two. Chapter 11 boots more
 -- machines than any other chapter here — a claim about output usually

@@ -23,6 +23,7 @@
 -- state is exactly what the next test is relying on.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 local function definitions()
     return {

@@ -19,6 +19,7 @@
 -- which is the failure it exists to detect.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 --- A boot-triggered Oneshot running `image` as `identity`.
 ---

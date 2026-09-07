@@ -7,6 +7,7 @@
 -- the test by creating something for it to refuse.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local vm = peinit.boot()
 

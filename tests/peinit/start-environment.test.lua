@@ -14,6 +14,7 @@
 -- nothing, so its environment is exactly what it was handed.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 local FILES = {
     -- Reads the *initial* environment out of /proc rather than running

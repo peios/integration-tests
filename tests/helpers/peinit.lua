@@ -143,6 +143,31 @@ function M.merge(...)
     return out
 end
 
+--- Declare the file's peak: how many of this suite's VMs it has alive
+--- at once, file-scope and test-scope together.
+---
+--- provium reserves a claim whole, up front, and every boot in the file
+--- then draws from it, so a claimed file never queues mid-file. Without
+--- one each boot reserves on its own, and a file that holds its
+--- file-scope VM while it waits for a test-scope one is one of the
+--- files that deadlocked a whole run once enough of them were dispatched
+--- together (PEI-810). Count the peak carefully: a boot past the claim
+--- fails at once rather than waiting.
+---
+--- opts:
+---   memory_mib  per-VM memory the file boots with, in MiB (default
+---               1024, matching `M.boot`'s "1G")
+---   cpus        per-VM vCPUs (default 1, matching `M.boot`)
+function M.claim(vms, opts)
+    opts = opts or {}
+    -- provium charges each boot its memory plus 100 MiB of VMM overhead.
+    local per_vm_mib = (opts.memory_mib or 1024) + 100
+    provium:claim({
+        memory = vms * per_vm_mib * 1024 * 1024,
+        cpus = vms * (opts.cpus or 1),
+    })
+end
+
 --- Boot a peinit VM and wait until it has reached `stage`.
 ---
 --- opts:

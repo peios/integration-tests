@@ -10,6 +10,7 @@
 -- own claim, and the first test below is about exactly it.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local function resident(name, argument)
     return {

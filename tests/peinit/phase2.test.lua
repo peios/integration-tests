@@ -8,6 +8,7 @@
 -- wrote.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 local vm = peinit.boot()
 
@@ -62,13 +63,13 @@ test("only a boot-triggered service is a root; a triggerless one is loaded and l
                 oneshot("pt-idle"),
             }),
         })
-        local log = other:console():read_log()
-
-        t:assert(log:find("peinit: service pt%-root started"),
-            "the boot-triggered service started")
-        t:assert(log:find("peinit: service pt%-pulled started"),
-            "and pulled in its untriggered Requires target")
-        t:assert(not log:find("peinit: service pt%-idle started"),
+        -- "phase2 boot complete" is printed when the plan has been
+        -- dispatched; each "service X started" is printed when that
+        -- service's job event arrives, which is after it. So a started
+        -- line is waited for, not read off the log at the mark.
+        other:console():expect("peinit: service pt-root started", peinit.STAGE_TIMEOUT)
+        other:console():expect("peinit: service pt-pulled started", peinit.STAGE_TIMEOUT)
+        t:assert(not other:console():read_log():find("peinit: service pt%-idle started"),
             "while the service nothing triggered or required stayed demand-only")
 
         -- Demand-only is not the same as absent: it is in the model and
@@ -76,8 +77,7 @@ test("only a boot-triggered service is a root; a triggerless one is loaded and l
         -- oracle rather than svctl's own output, because what is being
         -- asserted is that peinit started it, not how status renders.
         other:run("svctl start pt-idle"):assert_ok()
-        t:assert(other:console():read_log():find("peinit: service pt%-idle started"),
-            "and starting it by hand works")
+        other:console():expect("peinit: service pt-idle started", peinit.STAGE_TIMEOUT)
     end)
 
 test("a disabled service is loaded into the model but excluded from the boot graph",
@@ -103,38 +103,50 @@ test("a disabled service is loaded into the model but excluded from the boot gra
     end)
 
 test("an undecodable definition fails only itself, and the boot proceeds",
-    { spec = "peinit *phase2.an-undecodable-definition-fails-only-that-service" },
+    {
+        spec = "peinit *phase2.an-undecodable-definition-fails-only-that-service",
+        -- PEI-812: the planner blocks the undecodable service with
+        -- ValidationError, but the service table has no entry for it,
+        -- so applying the block fails with UnknownService and the
+        -- whole boot goes to recovery.
+        tags = { "known-bug" },
+    },
     function(t)
         -- This used to take the machine to the recovery console; the
         -- failure-summary table said so long after the code stopped
         -- doing it (PEI-798). An unclosed quote in a command is one of
-        -- the decode failures the manual lists.
+        -- the decode failures the manual lists — in a *command* field.
+        -- ImagePath is a path and is not command-parsed at all: a quote
+        -- in it is taken literally, the exec fails with ENOENT at
+        -- launch, and the service goes to Backoff. That is a different
+        -- failure from the one this test is about, and an earlier
+        -- version of this test asserted on it by mistake.
         local other = peinit.boot({
             name = "undecodable",
             files = peinit.seed("pt-bad", {
                 { path = [[Machine\System]] },
                 { path = [[Machine\System\Services]] },
-                {
-                    path = [[Machine\System\Services\pt-broken]],
-                    values = {
-                        { name = "ImagePath", type = "sz", data = '/bin/echo "unclosed' },
-                        { name = "Triggers", type = "multi", data = { "boot" } },
-                    },
-                },
+                oneshot("pt-broken", {
+                    { name = "Triggers", type = "multi", data = { "boot" } },
+                    { name = "ExecStartPre", type = "multi", data = { '/bin/true "unclosed' } },
+                }),
                 oneshot("pt-fine", {
                     { name = "Triggers", type = "multi", data = { "boot" } },
                 }),
             }),
         })
-        local log = other:console():read_log()
-        t:assert(log:find("peinit: phase2 boot complete", 1, true),
-            "the boot reached the end of Phase 2 rather than recovery")
-        t:assert(log:find("peinit: service pt%-fine started"),
-            "and the sibling definition started normally")
+        -- boot() waited for "phase2 boot complete", so the boot did not
+        -- go to recovery. The sibling's started line arrives after that
+        -- mark, so it is waited for rather than read off the log.
+        other:console():expect("peinit: service pt-fine started", peinit.STAGE_TIMEOUT)
 
-        local status = other:run("svctl status pt-broken").stdout
-        t:assert(status:find("[Ff]ail") or status:find("ValidationError"),
+        -- A decode failure is applied when the plan is built, so by the
+        -- time the boot is complete the state is settled: no waiting.
+        local status = other:run("svctl --json status pt-broken").stdout
+        t:assert(status:find('"state":"failed"', 1, true),
             "the broken one is Failed: " .. status)
+        t:assert(status:find('"cause":"validation_error"', 1, true),
+            "with cause ValidationError: " .. status)
     end)
 
 test("a missing Requires target blocks its dependent, and the block propagates",
@@ -180,8 +192,9 @@ test("a missing Wants target is ignored rather than blocking",
                 }),
             }),
         })
-        t:assert(other:console():read_log():find("peinit: service pt%-wanter started"),
-            "a Wants target that does not exist did not stop the service that wanted it")
+        -- Waited for, not read at the mark: the started line follows
+        -- "phase2 boot complete".
+        other:console():expect("peinit: service pt-wanter started", peinit.STAGE_TIMEOUT)
     end)
 
 test("MaxParallelStarts bounds how many services start at once",

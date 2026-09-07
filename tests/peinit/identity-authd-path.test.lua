@@ -10,6 +10,7 @@
 -- visibly different tokens, and the difference is the route.
 
 local peinit = require("helpers.peinit")
+peinit.claim(1)
 
 local function resident(name, identity)
     return { path = [[Machine\System\Services\]] .. name, values = {

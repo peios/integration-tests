@@ -17,6 +17,7 @@
 -- numbering is what lets a test say which end of the buffer was lost.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 -- One gigabyte rather than the helper's two. Chapter 11 boots more
 -- machines than any other chapter here — a claim about output usually

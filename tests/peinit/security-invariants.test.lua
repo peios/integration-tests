@@ -12,6 +12,7 @@
 -- does not exist.
 
 local peinit = require("helpers.peinit")
+peinit.claim(2)
 
 -- `O:BG G:BG D:(A;;0x0000000F;;;BG)` as the self-relative bytes a
 -- descriptor is stored as (MS-DTYP 2.4.6): a 20-byte header carrying the
