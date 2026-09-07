@@ -202,9 +202,13 @@ test("MaxParallelStarts bounds how many services start at once",
     function(t)
         -- Ten is the default and an absent key uses it, which is what
         -- every other test in this file has been running under.
+        -- `exit_code`, not `code`: a run result has no `code` field, so
+        -- the missing-field read this used to do was nil and the
+        -- assertion held whatever the guest answered.
         local absent = vm:run([[reg get 'Machine\System\Boot' MaxParallelStarts]])
-        t:assert(absent.code ~= 0,
-            "the image ships no MaxParallelStarts, so the boots above used the default")
+        t:assert(absent.exit_code ~= 0,
+            "the image ships no MaxParallelStarts, so the boots above used the default: "
+            .. absent.stdout)
 
         -- Set it to one and the starts serialise. The evidence is
         -- ordering: with a limit of one, no service can report started
