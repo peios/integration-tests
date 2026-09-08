@@ -522,6 +522,31 @@ test("an illegal dependency name is a decode error, and a merely absent one is n
             "a dependency on a service that exists is accepted")
     end)
 
+test("a list dependency may carry a level, and OnFailure may not",
+    {
+        spec = {
+            "peinit *fmt.a-list-dependency-may-carry-a-level",
+            "peinit *fmt.onfailure-takes-no-level",
+        },
+    },
+    function(t)
+        -- The colon is not among the illegal characters in the four list
+        -- fields, because the name and the level are validated
+        -- separately. Rejecting `netd:routed` here was a bug once, and
+        -- the parser's own unit tests record it as such.
+        expect_all(t, "accepted", {
+            { "Requires with a level", one("Requires", "multi", { "pt-ok:routed" }) },
+            { "Wants with a level", one("Wants", "multi", { "pt-ok:routed" }) },
+            { "BindsTo with a level", one("BindsTo", "multi", { "pt-ok:routed" }) },
+        })
+
+        -- OnFailure names a handler to run, not a state to wait for, so
+        -- it takes a bare service name and the colon is illegal in it
+        -- like any other character outside the set.
+        t:assert_eq(probe(one("OnFailure", "sz", "pt-ok:routed")), "decode",
+            "a level on OnFailure is a decode error")
+    end)
+
 test("a trigger is one of the listed forms, and the arity of each is enforced",
     {
         spec = {
