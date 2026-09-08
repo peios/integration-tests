@@ -285,7 +285,7 @@ test("a level on a Provides entry is rejected rather than ignored",
 test("the derived edge is an ordinary Requires everywhere the graph is built",
     {
         spec = "peinit *derived.the-derived-edge-behaves-exactly-like-a-declared-requires",
-        -- PEI-TBD: run_phase2_boot_with_retained (peinit/src/boot/
+        -- PEI-829: run_phase2_boot_with_retained (peinit/src/boot/
         -- phase2/coordinator.rs:104) builds the boot plan from the raw
         -- registry definitions, and only afterwards builds the service
         -- table from role-synthesised ones. The derived edge therefore

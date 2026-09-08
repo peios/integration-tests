@@ -152,6 +152,18 @@ end
 --- The build is cached and keyed on the source's mtime, so the first
 --- caller in a run pays a sub-second compile and the rest pay nothing.
 ---
+--- One trap, for `pt-notify` specifically. peinit authenticates a
+--- notification by matching the sender's pid against a service's
+--- current main job, and immediately after exec it has not yet
+--- processed the launch that would record one — so the FIRST datagram a
+--- service sends is routinely refused as an unauthenticated sender and
+--- silently lost. Start every script with a `sleep 1` step:
+---
+---   { "sleep", "1", "send", "READY=1", "sleep", "300" }
+---
+--- Without it a Readiness=Notify service never reaches Active, and what
+--- the test sees is a readiness timeout with nothing to explain it.
+---
 --- Staged rather than injected into the image: the tool is apparatus,
 --- and a test that does not ask for it should not be booting a guest
 --- that carries it.

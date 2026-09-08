@@ -349,7 +349,7 @@ test("a numeric component takes a wildcard, a list, a range or a step",
 test("a range is accepted in the hour, minute and second fields",
     {
         spec = "peinit *cal.numeric-components-and-the-weekday-take-wildcards-lists-ranges-and-steps",
-        -- PEI-TBD: parse_time refuses any time component containing a
+        -- PEI-831: parse_time refuses any time component containing a
         -- '.', which is what `..` is made of, so no range can be
         -- written anywhere in the time. `8..17` is §9.1's own example.
         tags = { "known-bug" },
@@ -498,7 +498,7 @@ test("a timezone suffix names an IANA zone",
             "peinit *cal.a-timezone-is-an-iana-name-and-its-absence-means-system-local",
             "peinit *cal.shortcut-names-are-case-insensitive-and-take-a-trailing-timezone",
         },
-        -- PEI-TBD: the image ships no /usr/share/zoneinfo, so jiff has
+        -- PEI-832: the image ships no /usr/share/zoneinfo, so jiff has
         -- no database to resolve against and every timezone suffix --
         -- including the bare `UTC` the TRM names -- is a parse error.
         tags = { "known-bug" },

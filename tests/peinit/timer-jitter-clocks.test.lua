@@ -261,7 +261,7 @@ test("TimerJitter delays each firing by a fresh amount and skips none of them",
             "peinit *jitter.the-delay-is-recomputed-on-every-firing",
             "peinit *jitter.a-timer-never-fires-early",
         },
-        -- PEI-TBD: TimerJitter drops firings instead of delaying
+        -- PEI-831: TimerJitter drops firings instead of delaying
         -- them. Measured against an otherwise identical schedule, only
         -- about one occurrence in (TimerJitter + 1) produces a run at
         -- all, and every run that does happen lands on the un-jittered

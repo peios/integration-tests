@@ -259,7 +259,7 @@ test("a role carrying a level resolves to the provider with the level intact",
 test("a role carrying a level is not resolved on the boot path",
     {
         spec = "peinit *ready.a-role-carrying-a-level-is-rewritten-to-the-provider-with-that-level",
-        -- PEI-TBD: run_phase2_boot_with_retained builds the boot plan
+        -- PEI-829: run_phase2_boot_with_retained builds the boot plan
         -- from the raw registry definitions and only afterwards builds
         -- the service table from role-synthesised ones, so a declared
         -- role reference is resolved on every path except the boot one.
@@ -346,7 +346,7 @@ test("the publisher going away does not open a hard gate",
 test("a start held on a level survives its publisher going away",
     {
         spec = "peinit *ready.a-held-start-does-not-time-out",
-        -- PEI-TBD: the condition is still unmet — netd has stopped and
+        -- PEI-830: the condition is still unmet — netd has stopped and
         -- has certainly not published the level — so the start should
         -- still be pending. Instead the operation disappears from
         -- `svctl status` the moment the publisher leaves a
@@ -371,7 +371,7 @@ test("a start held on a level survives its publisher going away",
 test("a soft level waiter proceeds once the publisher is no longer running",
     {
         spec = "peinit *ready.a-publisher-leaving-a-satisfying-state-releases-wants-waiters",
-        -- PEI-TBD: the release does not reliably reach a `Wants` level
+        -- PEI-830: the release does not reliably reach a `Wants` level
         -- waiter that came from the boot graph. On a machine where the
         -- boot context is the only context, stopping the publisher
         -- releases nothing, and no later event ever does: a subsequent
