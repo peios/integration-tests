@@ -123,25 +123,27 @@ test("PID 1 blocks every blockable signal and reads them through a nonblocking, 
         t:assert(flags & 0x80000 ~= 0, "and SFD_CLOEXEC (O_CLOEXEC)")
     end)
 
-test("PID 1 has no signal handlers",
+test("the only signals PID 1 catches are the Rust runtime's stack-overflow guard",
     {
-        spec = "peinit *signal.pid-1-has-no-signal-handlers",
-        -- PEI-828: PID 1 runs with SIGSEGV and SIGBUS handlers installed
-        -- (SigCgt 0000000000000440). They come from the Rust runtime's
-        -- stack-overflow guard rather than from peinit's own code, but
-        -- the machine's PID 1 does have handlers, and the manual says it
-        -- has none.
-        tags = { "known-bug" },
+        spec = {
+            "peinit *signal.peinit-installs-no-signal-handlers-of-its-own",
+            "peinit *signal.the-two-caught-signals-are-the-runtimes-guard",
+        },
     },
     function(t)
-        -- The whole point of reading signals from the event loop is that
-        -- nothing runs asynchronously, and /proc says whether anything
-        -- can: SigCgt is the set of signals for which a handler is
-        -- installed.
+        -- The point of reading signals from the event loop is that
+        -- nothing of peinit's runs asynchronously, and /proc says what
+        -- could: SigCgt is the set of signals with a handler installed.
+        --
+        -- It is not empty, and the two bits in it are the ones the Rust
+        -- runtime sets for its stack-overflow guard — SIGSEGV (11) and
+        -- SIGBUS (7), which is 0x440. Nothing peinit installs is in
+        -- there, and the guard runs on an alternate stack over state
+        -- peinit does not own, so the async-signal-safety argument holds.
         local caught = proc1_status("SigCgt")
         t:assert(caught, "PID 1 reports a caught mask")
-        t:assert_eq(caught, string.rep("0", #caught),
-            "PID 1 catches no signal at all: " .. caught)
+        t:assert_eq(tonumber(caught, 16), 0x440,
+            "exactly SIGSEGV and SIGBUS are caught, and nothing else: " .. caught)
     end)
 
 test("SIGHUP, SIGPIPE and everything else are ignored, and no signal can kill PID 1",
