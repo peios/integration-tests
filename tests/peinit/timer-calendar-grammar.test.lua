@@ -469,6 +469,7 @@ test("an expression that can never match parses, and the search gives up on it",
     {
         spec = {
             "peinit *cal.an-unsatisfiable-expression-is-not-a-parse-error",
+            "peinit *cal.an-unsatisfiable-expression-is-walked-for-ten-years",
             "peinit *evalt.the-next-occurrence-search-gives-up-after-ten-years",
         },
     },
