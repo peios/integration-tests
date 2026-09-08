@@ -228,15 +228,35 @@ test("BindsToRecovery restarts a service with no policy and no budget",
             "and the cause names the recovery rather than a restart policy")
     end)
 
-test("a transition to Failed produces a console record naming the service and the cause",
-    { spec = "peinit *cause.every-transition-produces-a-record" },
+test("a transition into a bad state is written to the console with its cause",
+    { spec = "peinit *cause.a-transition-into-a-bad-state-is-written-to-the-console" },
     function(t)
-        -- Two of the four things §6.3 asks a record to cover -- what
-        -- failed, and why -- are on the console line peinit writes when
-        -- a service enters Failed. The other two are asserted nowhere
-        -- here because peinit emits them nowhere: see the report.
         settle("pt-cs-always", "failed", "pt-cs-always to have failed")
         local log = vm:console():read_log()
         t:assert(log:find("peinit: service pt-cs-always failed: RestartBudgetExhausted", 1, true),
             "the record names the service that failed and the cause it failed with")
+    end)
+
+test("a transition emits no event of its own",
+    { spec = "peinit *cause.there-is-no-per-transition-event" },
+    function(t)
+        -- §6.3 used to promise a record per transition. There is none:
+        -- a transition is visible through the job and operation events
+        -- that carried it, and the ring has no `service.*` type at all.
+        -- pt-cs-always has by now been through Starting, Backoff and
+        -- Failed several times over, so if any transition emitted an
+        -- event, this window would hold one.
+        settle("pt-cs-always", "failed", "pt-cs-always to have failed")
+        local snapshot = vm:run("revstrm --snapshot --type 'service.*'",
+            { timeout = 60 })
+        snapshot:assert_ok()
+        t:assert(not snapshot.stdout:match("service%.%w+"),
+            "no service.* event was ever emitted: " .. snapshot.stdout:sub(1, 400))
+
+        -- And the events that do carry the transition are there, so the
+        -- absence above is an absence rather than an empty ring.
+        local jobs = vm:run("revstrm --snapshot --type 'job.*'", { timeout = 60 })
+        jobs:assert_ok()
+        t:assert(jobs.stdout:match("job%.%w+"),
+            "while the job events that carried those transitions are present")
     end)
