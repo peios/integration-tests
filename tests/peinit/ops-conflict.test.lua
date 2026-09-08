@@ -334,6 +334,32 @@ test("a reload is refused while a start, a stop or a restart is active",
             "a reload while a restart is active: " .. against_restart.raw)
     end)
 
+test("a start while a reload is active is answered with the status, not refused",
+    { spec = "peinit *conflict.a-start-while-reloading-is-answered-with-the-status" },
+    function(t)
+        -- The other half of the sentence above, and it behaves the other
+        -- way. A reloading service is already where a start would take
+        -- it, so the admission matrix answers ALREADY with the current
+        -- status and the request never reaches conflict resolution —
+        -- which is why there is no error and no operation.
+        --
+        -- pt-rel2's ExecReload sleeps twenty seconds, so the reload is
+        -- still running when the start arrives.
+        send(shared, "reload pt-rel2", true)
+        wait_until(function()
+            return send(shared, "status pt-rel2").state == "reloading" or nil
+        end, { timeout = 60, interval = 0.3, desc = "pt-rel2 to be reloading" })
+
+        local start = send(shared, "start pt-rel2")
+        t:assert(not start.code,
+            "the start was not refused: " .. start.raw)
+        t:assert(not start.operation,
+            "and created no operation, so it never reached conflict resolution: "
+            .. start.raw)
+        t:assert_eq(start.state, "reloading",
+            "it was answered with the service's current state instead")
+    end)
+
 test("a start operation is created for each unsatisfied dependency",
     {
         spec = {
