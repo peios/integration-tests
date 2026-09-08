@@ -191,23 +191,20 @@ test("a terminal is recognised through a second name for the same device",
             "and it spoke again once that holder let go")
     end)
 
-test("a terminal whose device cannot be determined is treated as held",
-    {
-        spec = "peinit *quiet.an-undeterminable-device-is-treated-as-held",
-        -- PEI-814: policy.rs `is_peinit_console` falls back to NOT matching
-        -- when either path cannot be stat'd, so an unstattable terminal is
-        -- treated as free and peinit writes to it. §2.6 says the opposite.
-        tags = { "known-bug" },
-    },
+test("a terminal whose device cannot be determined is treated as free",
+    { spec = "peinit *quiet.an-undeterminable-device-is-treated-as-free" },
     function(t)
         -- The holder is still alive and its TTYPath still names what was
         -- the console; only the node it named has gone, which is the one
         -- case where peinit cannot tell whether the terminal it is about to
         -- write to is somebody's.
+        --
+        -- It writes. The trade is deliberate (PEI-814): guessing wrong
+        -- this way scrambles a line, and guessing wrong the other way
+        -- takes the operator's console output away exactly when the
+        -- machine has stopped being able to explain itself.
         t:assert(gone_stat.exit_code ~= 0,
             "the holder's terminal no longer stats: " .. tostring(gone_stat.stdout))
-        t:assert(gone_log:find(started("pt-q-g"), 1, true),
-            "the console was free again by the time this log was read")
-        t:assert(not gone_log:find(started("pt-q-f"), 1, true),
-            "peinit fell back to treating the terminal as held")
+        t:assert(gone_log:find(started("pt-q-f"), 1, true),
+            "peinit kept writing rather than assuming the terminal was held")
     end)

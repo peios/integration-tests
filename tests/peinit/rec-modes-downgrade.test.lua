@@ -169,13 +169,18 @@ test("the downgrade reason is recorded at boot level, on the console and as an e
             "and another named the conflicting pair: " .. events.stdout)
     end)
 
-test("a service that forced Safe mode is not marked Failed for it",
-    { spec = "peinit *mode.a-service-that-forced-safe-mode-is-not-marked-failed" },
+test("a service excluded from the rebuilt graph is not marked Failed for forcing Safe mode",
+    { spec = "peinit *mode.a-service-excluded-from-the-rebuild-is-not-marked-failed" },
     function(t)
-        -- The rebuild discards the Full-mode graph, so the services that
-        -- caused the downgrade are never entered into the blocked set.
-        -- `status` keeps meaning "this service is broken", and neither of
-        -- these is: Safe mode was simply never going to start them.
+        -- The rebuild discards the Full-mode graph, so a service that
+        -- caused the downgrade and is then left out of the rebuild is
+        -- never entered into the blocked set. `status` keeps meaning
+        -- "this service is broken", and neither of these is: Safe mode
+        -- was simply never going to start them.
+        --
+        -- Both of these are non-Critical, so the rebuild excludes them.
+        -- A service that survives into it gets no such protection — that
+        -- is the test below.
         for _, service in ipairs({ "pt-dg-norm", "pt-dg-other" }) do
             t:assert_eq(state_of(service), "inactive",
                 service .. " forced the downgrade and was left unstarted, not Failed")

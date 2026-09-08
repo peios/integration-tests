@@ -64,7 +64,26 @@ local vm = peinit.boot({
     ),
 })
 
-local log = vm:console():read_log()
+--- Wait until the console carries `needle`, and return the log.
+---
+--- A snapshot taken at the boot mark is a stopwatch for the same reason
+--- `settled_state` below is: `phase2 boot complete` is printed when the
+--- plan has been *dispatched*, and every `service X started` line
+--- arrives after it. On a host busy with other VMs the gap is wide
+--- enough to read an empty answer as a service that never started.
+---
+--- Polled rather than `console():expect`, because expect consumes the
+--- stream cursor and the negative assertions below need the whole log.
+local function log_once(needle)
+    return wait_until(function()
+        local text = vm:console():read_log()
+        return text:find(needle, 1, true) and text or nil
+    end, {
+        timeout = peinit.STAGE_TIMEOUT,
+        interval = 0.3,
+        desc = "the console to carry `" .. needle .. "`",
+    })
+end
 
 local function state_of(service)
     local status = vm:run("svctl --json status " .. service)
@@ -93,9 +112,12 @@ end
 test("Safe mode starts a Critical service, and leaves a service that is neither behind",
     { spec = "peinit *mode.safe-starts-critical-services" },
     function(t)
+        -- Waiting for the Critical service's line is also the
+        -- synchronisation point for the negative assertion under it:
+        -- once the boot set has started, anything absent is absent
+        -- because it was never in the set.
+        local log = log_once("peinit: service pt-safe-crit started")
         t:assert(log:find("Safe", 1, true), "this boot is a Safe one")
-        t:assert(log:find("peinit: service pt-safe-crit started", 1, true),
-            "the Critical service was in the Safe mode boot set")
         t:assert(not log:find("peinit: service pt-safe-plain started", 1, true),
             "and the one that is neither Critical nor SafeMode was not")
         t:assert_eq(state_of("pt-safe-plain"), "inactive",
