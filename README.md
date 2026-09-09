@@ -9,16 +9,19 @@ install. That is the whole point of the repo: the tree has good unit
 coverage and a large kernel conformance suite, and neither of them can tell
 you whether a booted system logs a user on.
 
-> **Status: greenfield.** The shape is being designed before the volume
-> arrives. `../test-suite` (2,175 kernel cases) is expected to migrate here
-> once that shape holds — but not before.
+> **Status: the migration is done.** The retired `test-suite` (2,175
+> kernel cases and a hand-copied statement matrix) has been replaced by the
+> testsets here, which cite the TRMs instead of transcribing them. There is
+> no lockfile: every testset composes its image from the same package
+> repository the release media are built from, so the kernel under test is
+> the kernel that ships.
 
 ## Where this sits
 
 | Tier | Question it answers | Runner |
 |---|---|---|
 | Unit | does the code I wrote work | `cargo test` / `go test`, per repo |
-| Kernel conformance | does the kernel match PCSA/TRM | `test-suite/`, agent-only VM |
+| Kernel conformance | does the kernel match PCSA/TRM | this repo, `kernel-only` profile: agent-only VM |
 | **System conformance** | **does a booted Peios behave** | **this repo** |
 | Release gate | does *this medium* install and boot | this repo, against `dist/` |
 
