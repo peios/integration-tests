@@ -29,6 +29,32 @@ The two right-hand tiers are the same suite pointed at different artefacts.
 A release gate is not a separate set of tests; it is these tests run against
 the ISO instead of a development build.
 
+## What a run needs
+
+Nothing here is vendored; a run assembles its images from tools and
+packages it expects to find. Missing any of these, `provium` builds the
+image and then dies at the first boot with an exit code of 1 and no test
+counted.
+
+- **Provium, with its agent overlay.** The overlay is provium's build
+  artefact (`scripts/build-overlay.sh` in that repo, needing the musl
+  target, cpio and gzip); provium looks for it beside its binary or in a
+  source checkout's `dist/`. The `peinit` and `prelude` profiles resolve
+  it the same way, then fall back to a sibling checkout at
+  `../provium/dist/`; `PROVIUM_OVERLAY` overrides all of it.
+- **The package pool.** `peiso.toml` names one repository,
+  `file://../pkgs/_pkgsOut_/`, the sibling `pkgs` checkout's local output
+  with its dev signing key. Until `pkgs.peios.org` is live that is the
+  only source, and it exists only on a machine that has built the
+  packages.
+- **KVM, QEMU, iproute2, nftables, peiso** — provium's own pre-flight
+  lists them.
+
+The two sibling-checkout assumptions are the ones that stop a fresh
+clone from running today. Both are pointed at by a single setting each
+(`PROVIUM_OVERLAY`, the repository URL in `peiso.toml`), so they are
+configuration, not structure.
+
 ## Shape
 
 A **testset** is a directory holding a peiso spec and the tests that run

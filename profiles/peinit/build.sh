@@ -109,9 +109,19 @@ fi
 # Taken from the same overlay archive provium would inject into any other
 # profile, so the agent in this guest is always the one the host on the
 # other end of the vsock expects.
-overlay=${PROVIUM_OVERLAY:-../../../provium/dist/agent-overlay.cpio.gz}
+# Resolved the way provium itself resolves it: PROVIUM_OVERLAY, then the
+# overlay installed beside the provium binary, then a sibling checkout
+# of provium built from source.
+overlay=${PROVIUM_OVERLAY:-}
+if [ -z "$overlay" ] && command -v provium >/dev/null; then
+    overlay="$(dirname "$(command -v provium)")/../share/provium/agent-overlay.cpio.gz"
+fi
+if [ -z "$overlay" ] || [ ! -r "$overlay" ]; then
+    overlay=../../../provium/dist/agent-overlay.cpio.gz
+fi
 if [ ! -r "$overlay" ]; then
-    warn "no provium agent overlay at $overlay (set PROVIUM_OVERLAY)"
+    warn "no provium agent overlay: set PROVIUM_OVERLAY, install it beside provium" \
+         "(scripts/build-overlay.sh in the provium repo), or check out provium as a sibling"
     exit 1
 fi
 overlay=$(readlink -f "$overlay")
