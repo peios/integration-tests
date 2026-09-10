@@ -4,6 +4,7 @@
 # packages come from; between them they are one complete spec.
 [baseline]
 edition = "kernel-only"
+package = "dev.peios.testing.peios-kernel-only"
 # Nothing ever boots this root from a medium — provium launches the
 # kernel out of it directly and supplies its own initramfs — so it takes
 # no boot flavour. Without this it would carry live-boot, and a kernel
@@ -15,4 +16,4 @@ first_boot = "none"
 # build.sh copies just those two out of the composed root into the
 # fixture initramfs; the tree itself never boots.
 [[package]]
-name = "kernel-modules"
+name = "dev.peios.kernel-modules"
