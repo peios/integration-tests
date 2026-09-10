@@ -21,6 +21,7 @@
 # ROOT_SDDL), and they have drifted before.
 [baseline]
 edition = "Experimental"
+package = "dev.peios.peios-experimental"
 
 # Cheaper squashfs compression, as dist/release's dev layer uses. The
 # medium is built by a test profile's `build`, read once per boot off a
