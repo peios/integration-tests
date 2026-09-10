@@ -40,12 +40,12 @@ first_boot = "none"
 # every hook in the tree is one more thing between a test and the
 # behaviour it is asserting).
 [[package]]
-name = "prelude"
+name = "dev.peios.prelude"
 
 [[package]]
-name = "fsbase-irf"
+name = "dev.peios.fsbase-irf"
 root = "initramfs"
 
 [[package]]
-name = "peiosutils"
+name = "dev.peios.peiosutils"
 root = "initramfs"

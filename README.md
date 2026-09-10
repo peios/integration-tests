@@ -67,7 +67,7 @@ tests/
     logon.test.lua     the tests
 ```
 
-Each testset composes **only the packages it needs**. `peios-experimental`
+Each testset composes **only the packages it needs**. `dev.peios.peios-experimental`
 — the shipping edition — pulls in atriumd, netd, resolvd, eventd and
 eighteen firmware packages; booting all of that to exercise a logon path is
 slow and couples every test to every component. Instead testsets build on a
@@ -78,9 +78,9 @@ minimal `peios-testbase` edition and add what they are testing:
 edition = "TestBase"
 
 [[package]]
-name = "authd"
+name = "dev.peios.authd"
 [[package]]
-name = "lpsd"
+name = "dev.peios.authd-lpsd"
 
 [registry]
 add = ["authd-service", "lpsd-service", "lpsd-first-account"]
