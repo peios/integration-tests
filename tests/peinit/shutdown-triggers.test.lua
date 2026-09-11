@@ -53,6 +53,12 @@ local function trigger(vm, command)
     pcall(function() vm:run(command, { timeout = 30 }) end)
 end
 
+--- Wait `seconds` on the host, without asking the guest for anything.
+local function pause(seconds)
+    pcall(wait_until, function() return false end,
+        { timeout = seconds, interval = 0.25, desc = "a fixed pause" })
+end
+
 -- A service that ignores SIGTERM, so peinit has to wait out its
 -- StopTimeout. A loop of short sleeps rather than one long one: SIGTERM
 -- goes to the whole cgroup, and a single `sleep` child dies on the first
@@ -278,5 +284,136 @@ test("a Critical service out of restart budget reboots the machine without a gra
                 "the service started, was restarted once, and the budget was then spent")
             t:assert(not log:find("peinit: shutdown ", 1, true),
                 "and the machine rebooted without entering the graceful sequence")
+        end)
+    end)
+
+--- PID 1's descriptors, as `fd -> target` pairs from /proc/1/fd.
+local function pid1_fds(vm)
+    local out = {}
+    for fd, target in vm:run("ls -l /proc/1/fd").stdout:gmatch("(%d+) %-> ([^\r\n]+)") do
+        out[tonumber(fd)] = target
+    end
+    return out
+end
+
+--- The descriptors registered with PID 1's event loop, as a set, read from
+--- the `tfd:` lines of its epoll descriptor's fdinfo.
+local function pid1_registered(vm)
+    local epoll
+    for fd, target in pairs(pid1_fds(vm)) do
+        if target:find("[eventpoll]", 1, true) then epoll = fd end
+    end
+    assert(epoll, "PID 1 has an epoll descriptor")
+    local out = {}
+    for tfd in vm:run("cat /proc/1/fdinfo/" .. epoll).stdout:gmatch("tfd:%s*(%d+)") do
+        out[tonumber(tfd)] = true
+    end
+    return out
+end
+
+--- PID 1's CPU time so far, in clock ticks: utime plus stime.
+local function pid1_ticks(vm)
+    local stat = vm:run("cat /proc/1/stat").stdout
+    -- The fields after the parenthesised command; utime and stime are the
+    -- 12th and 13th of them.
+    local fields = {}
+    for field in stat:match("%) (.*)$"):gmatch("%S+") do fields[#fields + 1] = field end
+    return tonumber(fields[12]) + tonumber(fields[13])
+end
+
+test("the power button path survives a missing /dev/input, and the socket and signal paths remain",
+    { spec = "peinit *sdtrig.the-power-button-path-is-fail-soft" },
+    function(t)
+        -- An autorun runs before the runtime opens the input devices, so
+        -- one that moves /dev/input aside hands peinit a machine without
+        -- one. The move is undone by nothing: this boot has no input
+        -- devices as far as peinit is concerned.
+        with_vm({
+            name = "noinput",
+            append = "peios.quiet=0",
+            files = {
+                ["lcl/policy/autorun.d/90-pt-hide-input.sh"] = {
+                    "#!/bin/sh\nmv /dev/input /dev/pt-input-hidden && echo pt-input-hidden\n",
+                    exec = true,
+                },
+            },
+        }, function(vm)
+            t:assert(vm:console():read_log():find("pt-input-hidden", 1, true),
+                "/dev/input was out of the way before the runtime looked for it")
+            settle(vm)
+            for fd, target in pairs(pid1_fds(vm)) do
+                t:assert(not target:find("input", 1, true),
+                    "PID 1 holds no input device (fd " .. fd .. " is " .. target .. ")")
+            end
+            -- The boot went on without it, the control socket answers…
+            vm:run("svctl --json list"):assert_ok()
+            -- …and a signal still shuts the machine down.
+            trigger(vm, "kill -TERM 1")
+            vm:console():expect("peinit: shutdown Poweroff started", 30)
+            vm:console():expect("reboot: Power down", 60)
+        end)
+    end)
+
+test("an input device that cannot be opened or registered, or that fails later, costs only that device",
+    { spec = "peinit *sdtrig.the-power-button-path-is-fail-soft" },
+    function(t)
+        -- Two bad entries staged into /dev/input before the runtime opens
+        -- it: event90 is a dangling symlink, which cannot be opened;
+        -- event91 is an empty regular file, which opens but which epoll
+        -- refuses to register. Then, at runtime, the AT keyboard is
+        -- unbound from its driver: its evdev node goes away, and the
+        -- descriptor PID 1 registered for it starts failing reads —
+        -- EPOLLHUP, level-triggered, for as long as it stays registered.
+        with_vm({
+            name = "badinput",
+            append = "peios.quiet=0",
+            files = {
+                ["lcl/policy/autorun.d/90-pt-bad-input.sh"] = {
+                    "#!/bin/sh\nln -s /pt-nowhere /dev/input/event90\n"
+                        .. ": > /dev/input/event91\necho pt-bad-input\n",
+                    exec = true,
+                },
+            },
+        }, function(vm)
+            t:assert(vm:console():read_log():find("pt-bad-input", 1, true),
+                "the bad entries were in /dev/input before the runtime looked")
+            settle(vm)
+
+            local held, keyboard = {}, nil
+            local devices = vm:run("cat /proc/bus/input/devices").stdout
+            local node = devices:match('N: Name="AT Translated Set 2 keyboard".-H: Handlers=[^\n]-(event%d+)')
+            t:assert(node, "the guest has an AT keyboard: " .. devices)
+            for fd, target in pairs(pid1_fds(vm)) do
+                local name = target:match("^/dev/input/(event%d+)")
+                if name then held[name] = fd end
+                if name == node then keyboard = fd end
+            end
+            t:assert(not held.event90, "the device that could not be opened was passed over")
+            t:assert(not held.event91,
+                "the one that could not be registered was let go rather than kept")
+            t:assert(keyboard, "the keyboard's device is held: " .. node)
+            t:assert(pid1_registered(vm)[keyboard],
+                "and registered with PID 1's event loop (fd " .. keyboard .. ")")
+
+            -- The keyboard goes away under PID 1.
+            vm:run("echo -n serio0 > /sys/bus/serio/drivers/atkbd/unbind"):assert_ok()
+            wait_until(function() return not pid1_registered(vm)[keyboard] end,
+                { timeout = 15, interval = 0.25,
+                  desc = "the failing descriptor to be removed from the event loop" })
+            t:assert(true, "the descriptor that failed to read was removed from the event loop")
+
+            -- A level-triggered hangup left registered would have PID 1 at
+            -- a full CPU. Three seconds of it idle instead.
+            local before = pid1_ticks(vm)
+            pause(3)
+            local spent = pid1_ticks(vm) - before
+            t:assert(spent < 50,
+                "PID 1 used " .. spent .. " ticks in three seconds: it is not spinning")
+
+            -- The rest of the path is untouched: the power button still
+            -- powers the machine off.
+            vm:power_button()
+            vm:console():expect("peinit: shutdown Poweroff started", 30)
+            vm:console():expect("reboot: Power down", 60)
         end)
     end)

@@ -55,6 +55,11 @@ local function trigger(vm, command)
     pcall(function() vm:run(command, { timeout = 30 }) end)
 end
 
+--- The console from byte `from` on.
+local function since(vm, from)
+    return vm:console():read_log():sub(from + 1)
+end
+
 -- Ignores SIGTERM, so peinit has to wait out its StopTimeout. A loop of
 -- short sleeps rather than one long one: the signal goes to the whole
 -- cgroup, and a single `sleep` child dies on the first one and takes the
@@ -260,6 +265,189 @@ done
                 "and the shutdown carried on with the rest of the plan")
         end)
     end)
+
+test("a participant whose stop evidence is gone is killed at once, and only it loses its graceful period",
+    {
+        spec = {
+            "peinit *graceful.unsubstantiable-evidence-fails-closed",
+            "peinit *graceful.an-unsubstantiated-deadline-kills-without-a-graceful-period",
+            "peinit *graceful.failing-closed-costs-only-that-participant",
+            "peinit *graceful.the-retained-evidence-must-meet-five-conditions",
+        },
+    },
+    function(t)
+        -- The evidence for an already-Stopping participant under an
+        -- explicit stop is that stop operation's retained timing. It goes
+        -- missing, honestly, once the stop's own StopTimeout has expired:
+        -- peinit escalates to a cgroup kill and drops the timeout it no
+        -- longer needs, while the operation stays in flight waiting for
+        -- the service to go. So a service whose stop has escalated and
+        -- that has not yet gone is a Stopping service with an in-flight
+        -- stop and no retained timing — the missing-evidence case.
+        --
+        -- Not going is the failure-unkillable move: the main process is
+        -- moved out of the service's cgroup, where the cgroup kill cannot
+        -- reach it, and peinit, which tracks it by pidfd, keeps waiting.
+        -- The stop's StopTimeout is two seconds and the shutdown comes
+        -- six seconds after it. The console line the claim is about names
+        -- the missing evidence, which is itself the proof that the
+        -- escalation had happened by then.
+        --
+        -- pt-stubborn is the other participant, on its full twelve
+        -- seconds, and the claim is that it keeps them.
+        local ROOT = "/sys/fs/cgroup/peinit/pt-stuck"
+        with_vm({
+            name = "unsubstantiated",
+            append = "peios.quiet=0",
+            files = peinit.merge({
+                ["pt/stuck.sh"] = { "trap '' TERM\nwhile : ; do /bin/sleep 1 ; done\n", exec = true },
+            }, peinit.seed("pt-unsubstantiated", {
+                { path = [[Machine\System]] },
+                { path = [[Machine\System\Boot]], values = {
+                    { name = "PostKillTimeout", type = "dword", data = 60 },
+                } },
+                { path = [[Machine\System\Services]] },
+                { path = [[Machine\System\Services\pt-stuck]], values = {
+                    { name = "ImagePath", type = "sz", data = "/bin/sh" },
+                    { name = "Arguments", type = "multi", data = { "/pt/stuck.sh" } },
+                    { name = "Identity", type = "sz", data = "SYSTEM" },
+                    { name = "Readiness", type = "dword", data = 1 },
+                    { name = "RestartPolicy", type = "dword", data = 0 },
+                    { name = "StopTimeout", type = "dword", data = 2 },
+                    { name = "Triggers", type = "multi", data = { "boot" } },
+                } },
+                stubborn(12),
+            })),
+        }, function(vm)
+            settle(vm)
+            local main_pid = wait_until(function()
+                local ok, procs = pcall(function()
+                    return vm:read_file(ROOT .. "/main/cgroup.procs")
+                end)
+                return ok and procs:match("^(%d+)") or nil
+            end, { timeout = 60, interval = 0.5, desc = "pt-stuck to have a main process" })
+            vm:run("mkdir -p /sys/fs/cgroup/pt-escape"):assert_ok()
+            vm:run("echo " .. main_pid .. " > /sys/fs/cgroup/pt-escape/cgroup.procs"):assert_ok()
+
+            trigger(vm, "svctl stop pt-stuck --no-wait")
+            pause(6)
+            t:assert_eq(states(vm)["pt-stuck"], "stopping",
+                "three StopTimeouts later pt-stuck is still Stopping, its main process out of reach")
+
+            local before = #vm:console():read_log()
+            trigger(vm, "svctl shutdown poweroff")
+            vm:console():expect(
+                "peinit: shutdown cannot substantiate a stop timeout for pt-stuck "
+                .. "(no retained timeout for the in-flight stop operation); "
+                .. "killing it without a graceful period", 30)
+            vm:console():expect("peinit: shutdown killing pt-stuck", 10)
+            local early = vm:console():read_log():sub(before)
+            t:assert(early:find("peinit: shutdown stopping pt-stubborn", 1, true),
+                "the other participant was asked to stop as usual")
+            t:assert(not early:find("peinit: shutdown killing pt-stubborn", 1, true),
+                "and was not killed along with it")
+
+            -- Every other participant keeps its full StopTimeout.
+            pause(6)
+            t:assert(not vm:console():read_log():sub(before)
+                :find("peinit: shutdown killing pt-stubborn", 1, true),
+                "six seconds on, pt-stubborn was still inside its twelve")
+
+            -- And the shutdown runs to completion. The process that
+            -- escaped is let go, rather than making the test sit out the
+            -- post-kill deadline its abandonment would take.
+            vm:run("kill -9 " .. main_pid)
+            vm:console():expect("peinit: shutdown killing pt-stubborn", 30)
+            vm:console():expect("reboot: Power down", 90)
+            t:assert(true, "the shutdown finished")
+        end)
+    end)
+
+test("an operation that expires while Pending fails, and its service is not signalled before its wave",
+    { spec = "peinit *graceful.a-pending-operations-expiry-does-not-signal-the-service-early" },
+    function(t)
+        -- A shutdown creates no operations of its own (op.shutdown-is-
+        -- declared-but-not-produced) and refuses the commands that would,
+        -- so a Pending operation during one is one that was queued before
+        -- it began. The one that can be arranged is a start queued behind
+        -- an explicit stop: StartTimeout 3, measured from creation, while
+        -- the stop has sixty seconds to run.
+        --
+        -- pt-back is the service it is for. pt-stubborn requires it, which
+        -- keeps pt-back's wave back until pt-stubborn's twenty seconds are
+        -- up. pt-back ignores SIGTERM and notes each one it gets; it has
+        -- had one already, from the explicit stop. Between the queued
+        -- start's expiry and its own wave, nothing may reach it.
+        with_vm({
+            name = "pendingexpiry",
+            append = "peios.quiet=0",
+            files = peinit.seed("pt-pendingexpiry", {
+                { path = [[Machine\System]] },
+                { path = [[Machine\System\Services]] },
+                { path = [[Machine\System\Services\pt-back]], values = {
+                    { name = "ImagePath", type = "sz", data = "/bin/sh" },
+                    { name = "Arguments", type = "multi",
+                      data = { "-c", "trap 'echo term >> /run/pt-back-terms' TERM; "
+                          .. "while :; do sleep 1; done" } },
+                    { name = "Identity", type = "sz", data = "SYSTEM" },
+                    { name = "Readiness", type = "dword", data = 1 },
+                    { name = "StopTimeout", type = "dword", data = 60 },
+                    { name = "StartTimeout", type = "dword", data = 3 },
+                    { name = "RestartPolicy", type = "dword", data = 0 },
+                } },
+                stubborn(20, { { name = "Requires", type = "multi", data = { "pt-back" } } }),
+            }),
+        }, function(vm)
+            settle(vm)
+            wait_until(function() return states(vm)["pt-back"] == "active" end,
+                { timeout = 30, interval = 0.5, desc = "pt-back to be running" })
+            local pid = json.decode(vm:run("svctl --json status pt-back").stdout).current_job.pid
+
+            vm:run("svctl --json stop pt-back --no-wait"):assert_ok()
+            wait_until(function()
+                local ok, text = pcall(function() return vm:read_file("/run/pt-back-terms") end)
+                return ok and text:find("term", 1, true)
+            end, { timeout = 10, interval = 0.25, desc = "the explicit stop's SIGTERM" })
+
+            -- The start is queued behind the stop by a caller that waits.
+            vm:run("(svctl --json start pt-back > /run/pt-start-answer 2>&1; "
+                .. "echo rc=$? >> /run/pt-start-answer) > /dev/null 2>&1 &")
+            pause(1)
+            local from = #vm:console():read_log()
+            trigger(vm, "svctl shutdown poweroff")
+            vm:console():expect("peinit: shutdown stopping pt-stubborn", 30)
+
+            -- Past the start's lifetime, and well inside pt-stubborn's
+            -- twenty seconds.
+            pause(8)
+            local answer = vm:read_file("/run/pt-start-answer")
+            t:assert(answer:find('"code":"OPERATION_TIMEOUT"', 1, true)
+                and answer:find("rc=1", 1, true),
+                "the queued start expired during the shutdown and its waiter was failed "
+                .. "with it: " .. answer)
+
+            local during = since(vm, from)
+            t:assert(not during:find("pt-back", 1, true),
+                "the shutdown had not touched pt-back: its wave was not yet due")
+            t:assert(vm:run("kill -0 " .. pid):ok(), "pt-back's main process is still there")
+            local terms = 0
+            for _ in vm:read_file("/run/pt-back-terms"):gmatch("term") do terms = terms + 1 end
+            t:assert_eq(terms, 1,
+                "and has had only the one SIGTERM, from the explicit stop: the expiry sent nothing")
+
+            -- Its wave comes when pt-stubborn's does not stand in its way.
+            vm:console():expect("peinit: shutdown killing pt-stubborn", 30)
+            vm:console():expect("peinit: shutdown waiting for pt-back", 30)
+        end)
+    end)
+
+test("service-level stop evidence that is missing, stale, mismatched or backwards gets no graceful period",
+    {
+        spec = "peinit *graceful.the-retained-evidence-must-meet-five-conditions",
+        covered_by = "cargo:peinit2 supervisor::tests::shutdown::retained_evidence::retained_evidence_failing_any_condition_gets_no_graceful_period",
+        skip = "service-level evidence is recorded by the transition into Stopping with that transition's own cause and deadline, and cleared when the service leaves Stopping, so no guest can make it absent-but-Stopping, stale, mismatched or backwards — only the in-flight stop's evidence can go missing, which the test above provokes; runs under cargo test -p peinit2 --all-features --lib supervisor::tests::shutdown::retained_evidence::retained_evidence_failing_any_condition_gets_no_graceful_period",
+    },
+    function(t) end)
 
 test("an already-Stopping service joins the wave without a second SIGTERM, on the clock it was already on",
     {

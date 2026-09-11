@@ -330,6 +330,133 @@ test("a Starting service is cancelled and SIGKILLed rather than stopped",
         end)
     end)
 
+test("a Starting service whose job never started goes straight to Failed, without the post-kill check",
+    { spec = "peinit *graceful.an-unforked-starting-job-goes-straight-to-failed" },
+    function(t)
+        -- Holding a Starting service's job short of exec is the trick.
+        -- pt-unforked's WorkingDirectory is inside a FUSE mount whose
+        -- daemon never answers (tests/tools/pt-fusehang.c), so the forked
+        -- child blocks in chdir(2) before exec, and peinit — which marks
+        -- a job started only once exec is confirmed — holds the job as
+        -- never started: no pid, no start time. The child is moved out of
+        -- the service's cgroup, so the shutdown's cgroup kill does not
+        -- end it; otherwise its setup pipe would close and PEI-826 would
+        -- take PID 1 to recovery before anything could be read.
+        --
+        -- What "skips the check" means is visible only against the check.
+        -- pt-forked is a Starting service whose job did start (Readiness
+        -- notify, never ready), its main process moved out of reach the
+        -- same way. A keeper drops a fresh process into each service's
+        -- tree every second, so each root is populated when a post-kill
+        -- deadline would fire: pt-forked's is checked, and it is
+        -- Abandoned; pt-unforked's is not, and it stays Failed.
+        -- PostKillTimeout is five seconds; pt-stubborn holds the shutdown
+        -- open well past it.
+        local ROOTS = {
+            unforked = "/sys/fs/cgroup/peinit/pt-unforked",
+            forked = "/sys/fs/cgroup/peinit/pt-forked",
+        }
+        local function starting(name, extra)
+            local values = {
+                { name = "ImagePath", type = "sz", data = "/bin/sleep" },
+                { name = "Arguments", type = "multi", data = { "100000" } },
+                { name = "Identity", type = "sz", data = "SYSTEM" },
+                { name = "RestartPolicy", type = "dword", data = 0 },
+                { name = "StartTimeout", type = "dword", data = 600 },
+            }
+            for _, value in ipairs(extra) do values[#values + 1] = value end
+            return { path = [[Machine\System\Services\]] .. name, values = values }
+        end
+        with_vm({
+            name = "unforked",
+            append = "peios.quiet=0",
+            files = peinit.merge(peinit.tool("pt-fusehang"), {
+                ["pt/keeper.sh"] = { [[
+N=0
+while [ $N -lt 120 ] ; do
+  /bin/sleep 300 &
+  echo $! > $1/cgroup.procs
+  N=$((N+1))
+  /bin/sleep 1
+done
+]], exec = true },
+            }, peinit.seed("pt-unforked", {
+                { path = [[Machine\System]] },
+                { path = [[Machine\System\Boot]], values = {
+                    { name = "PostKillTimeout", type = "dword", data = 5 },
+                } },
+                { path = [[Machine\System\Services]] },
+                starting("pt-unforked", {
+                    { name = "Readiness", type = "dword", data = 1 },
+                    { name = "WorkingDirectory", type = "sz", data = "/mnt/pt-fuse" },
+                }),
+                starting("pt-forked", {
+                    { name = "Readiness", type = "dword", data = 0 },
+                }),
+                stubborn(40),
+            })),
+        }, function(vm)
+            settle(vm)
+            vm:run("mkdir -p /mnt/pt-fuse /sys/fs/cgroup/pt-escape"):assert_ok()
+            vm:run("/usr/bin/pt-fusehang /mnt/pt-fuse"):assert_ok()
+            trigger(vm, "svctl start pt-unforked --no-wait")
+            trigger(vm, "svctl start pt-forked --no-wait")
+
+            local child = wait_until(function()
+                local ok, procs = pcall(function()
+                    return vm:read_file(ROOTS.unforked .. "/main/cgroup.procs")
+                end)
+                return ok and procs:match("(%d+)") or nil
+            end, { timeout = 30, interval = 0.25, desc = "pt-unforked's child" })
+            wait_until(function()
+                return vm:run("cat /proc/" .. child .. "/wchan").stdout:find("fuse", 1, true)
+            end, { timeout = 15, interval = 0.25, desc = "the child to block in the FUSE mount" })
+            local raw = vm:run("svctl --json status pt-unforked").stdout
+            t:assert(raw:find('"state":"starting"', 1, true), "pt-unforked is Starting: " .. raw)
+            t:assert(raw:find('"pid":null', 1, true) and raw:find('"started_at":null', 1, true),
+                "with a job peinit has not seen start — no pid, no start time: " .. raw)
+            wait_until(function() return states(vm)["pt-forked"] == "starting" end,
+                { timeout = 30, interval = 0.25, desc = "pt-forked to be Starting" })
+            t:assert(json.decode(vm:run("svctl --json status pt-forked").stdout).current_job.pid,
+                "while pt-forked's job has started")
+
+            -- Both processes out of reach of the kill: pt-unforked's child
+            -- so it stays blocked, pt-forked's main process because a
+            -- main job that exits takes its post-kill deadline with it,
+            -- and the check this is a contrast with would never fire.
+            local forked_main = vm:read_file(ROOTS.forked .. "/main/cgroup.procs"):match("(%d+)")
+            t:assert(forked_main, "pt-forked has a main process")
+            for _, pid in ipairs({ child, forked_main }) do
+                vm:run("echo " .. pid .. " > /sys/fs/cgroup/pt-escape/cgroup.procs"):assert_ok()
+            end
+            for _, root in pairs(ROOTS) do
+                vm:run("mkdir -p " .. root .. "/pt-keep"):assert_ok()
+                vm:run("/pt/keeper.sh " .. root .. "/pt-keep > /dev/null 2>&1 &")
+            end
+
+            trigger(vm, "svctl shutdown poweroff")
+            vm:console():expect("peinit: shutdown killing pt-unforked", 30)
+            local straight = json.decode(vm:run("svctl --json status pt-unforked").stdout)
+            t:assert_eq(straight.state, "failed", "pt-unforked went to Failed at once")
+            t:assert_eq(straight.cause, "shutdown_wave", "with cause ShutdownWave")
+
+            -- Past the post-kill deadline pt-forked's kill armed.
+            vm:console():expect("peinit: shutdown abandoned pt-forked", 30)
+            pause(2)
+            t:assert_eq(json.decode(vm:run("svctl --json status pt-forked").stdout).state,
+                "abandoned", "the started job's service was checked, and abandoned")
+            local after = json.decode(vm:run("svctl --json status pt-unforked").stdout)
+            t:assert_eq(after.state, "failed",
+                "pt-unforked was not checked: still Failed, though its tree is populated")
+            t:assert(vm:read_file(ROOTS.unforked .. "/pt-keep/cgroup.procs"):match("%d"),
+                "and its tree is populated")
+            for _, warning in ipairs(after.warnings or {}) do
+                t:assert(warning.type ~= "service_tree",
+                    "no leaked tree is recorded against it: " .. tostring(warning.path))
+            end
+        end)
+    end)
+
 test("the global timeout kills whatever is left and the shutdown finishes anyway",
     {
         spec = {

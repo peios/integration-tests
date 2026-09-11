@@ -196,3 +196,40 @@ test("the global timeout sweep kills a live job too",
             t:assert(true, "the sweep killed the job and the shutdown finished")
         end)
     end)
+
+test("a job still queued for launch when the shutdown begins is cancelled, with cause shutdown",
+    { spec = "peinit *graceful.a-queued-job-is-cancelled-with-the-same-cause" },
+    function(t)
+        -- A submitted job is queued only until the end of the turn that
+        -- accepted it, so the shutdown has to be read in that same turn,
+        -- after the submit. pt-jobrace (tests/tools/pt-jobrace.c) arranges
+        -- exactly that on a one-CPU machine: running SCHED_FIFO, it sends
+        -- the submit and then the shutdown before PID 1 can run at all,
+        -- and PID 1 meets both in one turn, in that order. The submit's
+        -- own answer is written at the end of that turn, so it already
+        -- shows what the shutdown made of the job.
+        with_vm({
+            name = "jobqueued",
+            append = "peios.quiet=0",
+            files = peinit.merge(peinit.tool("pt-jobrace"), holding_seed()),
+        }, function(vm)
+            settle(vm)
+            local r = vm:run("/usr/bin/pt-jobrace /bin/true", { timeout = 30 })
+            local job = r.stdout:match("jobs (%b{})")
+            t:assert(job, "the submit was answered: " .. r.stdout)
+            t:assert(r.stdout:find('control {"status":"ok"}', 1, true),
+                "and so was the shutdown: " .. r.stdout)
+            t:assert(job:find('"status":"ok"', 1, true), "the submit was accepted: " .. job)
+
+            local id = job:match('"id":"([^"]+)"')
+            vm:console():expect("peinit: shutdown stopping pt-stubborn", 30)
+            local view = vm:run("svctl --json job status " .. id).stdout
+            t:assert_eq(view:match('"cause":"([^"]+)"'), "shutdown",
+                "the job carries the shutdown's cause: " .. view)
+            t:assert(view:find('"pid":null', 1, true) and view:find('"started_at":null', 1, true),
+                "and it never ran — no process, no start: it was cancelled in the queue, "
+                .. "not launched and then stopped: " .. view)
+            t:assert_eq(view:match('"state":"([^"]+)"'), "failed",
+                "it is over: " .. view)
+        end)
+    end)

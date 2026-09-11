@@ -256,3 +256,19 @@ test("an exited child carries its exact exit code and a signalled one carries it
         t:assert(killed:match('"exit_code":null'),
             "and no exit code, because it never exited: " .. killed)
     end)
+
+test("a failure anywhere in the signalfd setup fails closed, with no handler to fall back to",
+    {
+        spec = "peinit *signal.a-signalfd-setup-failure-fails-closed",
+        covered_by = "cargo:peinit2 boundary::linux_signal::registered::tests::every_signalfd_setup_failure_fails_closed",
+        skip = "the signalfd is set up once, inside PID 1, before its event loop exists, and no guest can make PID 1's own rt_sigprocmask, signalfd4 or epoll_ctl fail at that one step; runs under cargo test -p peinit2 --all-features --lib boundary::linux_signal::registered::tests::every_signalfd_setup_failure_fails_closed",
+    },
+    function(t) end)
+
+test("a stopped or continued wait status fails closed rather than being read as an exit",
+    {
+        spec = "peinit *signal.a-stopped-or-continued-status-fails-closed",
+        covered_by = "cargo:peinit2 boundary::linux_child::tests::wait_status_rejects_stopped_and_continued_statuses",
+        skip = "PID 1 reaps with waitpid(-1, WNOHANG) alone — neither WUNTRACED nor WCONTINUED — and traces no child, so the kernel never reports a stopped or continued status to it and no guest can put one on this path; runs under cargo test -p peinit2 --all-features --lib boundary::linux_child::tests::wait_status_rejects_stopped_and_continued_statuses",
+    },
+    function(t) end)
