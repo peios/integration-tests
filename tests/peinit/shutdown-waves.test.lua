@@ -374,3 +374,61 @@ test("the global timeout kills whatever is left and the shutdown finishes anyway
             t:assert(true, "the shutdown ran to its final action despite the survivor")
         end)
     end)
+
+--- Every operation event in the ring, as `{type = kind, fields = {…}}`.
+local function operation_events(vm)
+    local r = vm:run("revstrm --snapshot --pretty --type 'operation.*'", { timeout = 30 })
+    local out, current = {}, nil
+    for line in r.stdout:gmatch("[^\r\n]+") do
+        local kind = line:match("^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+(operation%.[%w_]+)%s*$")
+        if kind then
+            current = { type = kind, fields = {} }
+            out[#out + 1] = current
+        elseif current then
+            local name, value = line:match("^%s+([%w_]+)%s%s+(.-)%s*$")
+            if name then current.fields[name] = (value:gsub('^"', ""):gsub('"$', "")) end
+        end
+    end
+    return out
+end
+
+test("the shutdown stops services directly, creating no operations for the stops",
+    -- §8.2's claim that Shutdown is an operation source declared and never
+    -- produced. The evidence is a shutdown in progress, so it lives here.
+    { spec = "peinit *op.shutdown-is-declared-but-not-produced" },
+    function(t)
+        with_vm({
+            name = "shutdown-noops",
+            append = "peios.quiet=0",
+            files = peinit.seed("pt-noops", {
+                { path = [[Machine\System]] },
+                { path = [[Machine\System\Services]] },
+                stubborn(30),
+            }),
+        }, function(vm)
+            settle(vm)
+            trigger(vm, "svctl shutdown poweroff")
+            vm:console():expect("peinit: shutdown stopping pt-stubborn", 30)
+
+            -- pt-stubborn is in its wave, holding the shutdown open for
+            -- thirty seconds, and nothing stands behind that stop.
+            local status = vm:run("svctl --json status pt-stubborn").stdout
+            t:assert(status:find('"state":"stopping"', 1, true),
+                "the shutdown is stopping pt-stubborn: " .. status)
+            t:assert(status:find('"current_operation":null', 1, true),
+                "with no operation behind the stop: " .. status)
+
+            local seen = {}
+            for _, event in ipairs(operation_events(vm)) do
+                seen[#seen + 1] = event.type .. " " .. tostring(event.fields.type) .. " "
+                    .. tostring(event.fields.service) .. " " .. tostring(event.fields.source)
+                t:assert(event.fields.source ~= "shutdown",
+                    "no operation has Shutdown as its source: " .. seen[#seen])
+                t:assert(not (event.fields.service == "pt-stubborn" and event.fields.type == "stop"),
+                    "and none was created to stop pt-stubborn: " .. seen[#seen])
+            end
+            -- The ring does hold operations — the boot's starts — so an
+            -- empty result is not what the assertions above passed on.
+            t:assert(#seen > 0, "the ring holds this boot's operations to look through")
+        end)
+    end)
