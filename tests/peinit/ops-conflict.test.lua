@@ -26,7 +26,10 @@
 -- failing and peinit entering Recovery — which takes the control socket
 -- with it and leaves the VM useless for anything after — and two are
 -- answered INTERNAL_ERROR. Each is isolated so that the row it names is
--- the only thing its failure can be about.
+-- the only thing its failure can be about. One more boots its own VM for
+-- the same reason: `Start (Running) | Stop` holds, except when the stop
+-- lands before the start's process has exec'd, where it too ends PID 1
+-- (PEI-1091).
 --
 -- One divergence is deliberately NOT encoded here. §8.3 says a new
 -- Start while a Reload is active is rejected; the code's admission
@@ -297,6 +300,75 @@ test("a stop supersedes a running start, and the start records that it was super
             "and the start was aborted, not left running: " .. aborted.raw)
         t:assert_eq(aborted.error, "superseded_by_later_operation",
             "recorded as superseded by what came later: " .. aborted.raw)
+    end)
+
+test("a stop sent before a start's process has exec'd supersedes it, rather than ending PID 1",
+    {
+        spec = {
+            "peinit *conflict.stop-wins-over-start",
+            "peinit *conflict.the-cross-type-resolutions",
+        },
+        -- PEI-1091: the stop is admitted against the running start, and
+        -- then `begin_control_operation` looks for the start's process
+        -- before anything else (execution/control/dispatch.rs). A job
+        -- that has not exec'd has none, so `process_target` answers
+        -- JobNotRunning, and the runtime loop treats that as fatal: PID 1
+        -- enters Recovery. The window is normally milliseconds wide;
+        -- `svctl start` then `svctl stop` hit it twice in twenty tries on
+        -- an unloaded host.
+        tags = { "known-bug" },
+    },
+    function(t)
+        -- The row above, with the start's job held short of exec rather
+        -- than merely never ready. pt-cx-preexec's WorkingDirectory is
+        -- inside a FUSE mount whose daemon never answers
+        -- (tests/tools/pt-fusehang.c), so its forked child blocks in
+        -- chdir(2) and the job stays unexec'd, with no pid, for as long as
+        -- the test needs.
+        local vm = peinit.boot({
+            name = "opscx-preexec",
+            files = peinit.merge(peinit.tool("pt-fusehang"), peinit.seed("pt-cx-preexec", {
+                { path = [[Machine\System]] },
+                { path = [[Machine\System\Services]] },
+                { path = [[Machine\System\Services\pt-cx-preexec]], values = {
+                    { name = "ImagePath", type = "sz", data = "/bin/sleep" },
+                    { name = "Arguments", type = "multi", data = { "100000" } },
+                    { name = "Identity", type = "sz", data = "SYSTEM" },
+                    { name = "Readiness", type = "dword", data = 1 },
+                    { name = "RestartPolicy", type = "dword", data = 0 },
+                    { name = "StartTimeout", type = "dword", data = 600 },
+                    { name = "WorkingDirectory", type = "sz", data = "/mnt/pt-fuse" },
+                } },
+            })),
+        })
+        vm:run("mkdir -p /mnt/pt-fuse"):assert_ok()
+        vm:run("/usr/bin/pt-fusehang /mnt/pt-fuse"):assert_ok()
+
+        local start = send(vm, "start pt-cx-preexec", true)
+        t:assert(start.operation, "a start is running: " .. start.raw)
+        local child = wait_until(function()
+            local ok, procs = pcall(function()
+                return vm:read_file("/sys/fs/cgroup/peinit/pt-cx-preexec/main/cgroup.procs")
+            end)
+            return ok and procs:match("(%d+)") or nil
+        end, { timeout = 30, interval = 0.25, desc = "pt-cx-preexec's forked child" })
+        wait_until(function()
+            return vm:run("cat /proc/" .. child .. "/wchan").stdout:find("fuse", 1, true)
+        end, { timeout = 15, interval = 0.25, desc = "the child to block in the FUSE mount" })
+        local held = vm:run("svctl --json status pt-cx-preexec").stdout
+        t:assert(held:find('"state":"starting"', 1, true) and held:find('"pid":null', 1, true),
+            "the service is Starting on a job that has not exec'd: " .. held)
+
+        local stop = send(vm, "stop pt-cx-preexec", true)
+        t:assert(stop.operation and stop.operation ~= start.operation,
+            "the stop was created as an operation of its own: " .. stop.raw)
+        vm:run("sleep 2")
+        t:assert(supervising(vm),
+            "and peinit is still supervising: " .. tostring(recovery_line(vm)))
+
+        local aborted = settle(vm, start.operation)
+        t:assert_eq(aborted.state, "aborted",
+            "and the start was aborted rather than left to finish: " .. aborted.raw)
     end)
 
 test("a start requested while a stop is draining is queued behind it",
