@@ -450,6 +450,57 @@ test("a reload prunes the fd store of a service that no longer exists",
         t:assert(pruned, "the reload that forgot the service closed its stored descriptor")
     end)
 
+test("a calendar timer a reload arms is armed from now, with no catch-up",
+    { spec = "peinit *control.reload-config.calendar-timers-are-re-armed-without-catch-up" },
+    function(t)
+        -- The claim needs a timer that *would* catch up if the reload did
+        -- what a boot does. §9.3 supplies one: a persistent trigger with
+        -- no history catches up exactly once at boot
+        -- (`persist.a-trigger-with-no-history-catches-up-once`). So two
+        -- timers identical in every value, neither with history — one
+        -- present at boot, one added after it and armed by a reload. The
+        -- first is the control and must fire; the second must not.
+        --
+        -- Yearly, so that nothing fires legitimately in the few seconds
+        -- the test watches: the next real occurrence is next January.
+        local SCHEDULE = "timer:*-01-01 00:00:00"
+        local function ticker(name)
+            return { path = SERVICES .. [[\]] .. name, values = {
+                { name = "ImagePath", type = "sz", data = "/bin/sh" },
+                { name = "Arguments", type = "multi", data = {
+                    "-c", "echo " .. name .. " >> /run/pt-ticks" } },
+                { name = "Type", type = "dword", data = 1 },
+                { name = "Identity", type = "sz", data = "SYSTEM" },
+                { name = "Readiness", type = "dword", data = 1 },
+                { name = "Triggers", type = "multi", data = { SCHEDULE } },
+            } }
+        end
+        local function ticks(vm, name)
+            local text = vm:run("cat /run/pt-ticks 2>/dev/null").stdout or ""
+            return select(2, text:gsub(name, ""))
+        end
+
+        local vm = boot("reload-timers", { keys = { ticker("pt-cal-boot") } })
+        wait_until(function() return ticks(vm, "pt%-cal%-boot") >= 1 or nil end,
+            { timeout = 30, interval = 0.5, desc = "the boot-time catch-up" })
+        t:assert_eq(ticks(vm, "pt%-cal%-boot"), 1,
+            "a persistent timer with no history catches up once at boot")
+
+        apply(vm, { ticker("pt-cal-reload") }, "timers")
+        vm:run("svctl --json reload-config"):assert_ok()
+        t:assert(not vm:run("svctl --json status pt-cal-reload").stdout
+                :find("UNKNOWN_SERVICE", 1, true),
+            "the reload took the second timer")
+
+        -- Long enough for a catch-up to have happened: the boot one above
+        -- landed within a second or two of the plan dispatching.
+        vm:run("sleep 6")
+        t:assert_eq(ticks(vm, "pt%-cal%-reload"), 0,
+            "the same timer armed by a reload waits for its next occurrence instead")
+        t:assert_eq(ticks(vm, "pt%-cal%-boot"), 1,
+            "and re-arming the first one did not catch it up a second time")
+    end)
+
 test("a reload refreshes the socket limits, the global environment and the control descriptor",
     { spec = "peinit *control.reload-config.refreshes-more-than-definitions" },
     function(t)
