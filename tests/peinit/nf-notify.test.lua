@@ -604,3 +604,38 @@ test("MAINPID= and BUSERROR= are accepted as lines and do nothing",
         t:assert_eq(#mine, 1,
             "only the STATUS= was acted on: " .. table.concat(mine, ", "))
     end)
+
+test("MAINPID= names nothing peinit will supervise",
+    -- §3.1's claim, tested here because the evidence is a datagram and
+    -- this file is where the machinery for sending one lives.
+    { spec = "peinit *svc.there-is-no-mainpid" },
+    function(t)
+        -- A decoy: a live process the service does not own, whose pid the
+        -- service then offers peinit as its main process. Supervision
+        -- follows the child peinit forked, through the pidfd it took at
+        -- fork, and nothing in a datagram can point it anywhere else.
+        local decoy = tonumber(vm:run("sleep 300 >/dev/null 2>&1 & echo $!").stdout:match("%d+"))
+        t:assert(decoy, "a decoy process to name")
+
+        launch("pt-nf-mainpid", { "send", "MAINPID=" .. decoy })
+        local pid = main_pid("pt-nf-mainpid")
+        t:assert(pid ~= decoy, "the main job is not the process MAINPID= named")
+        t:assert_eq(tostring(vm:read_file("/proc/" .. pid .. "/comm")):gsub("%s+$", ""), "pt-notify",
+            "it is still the child peinit forked")
+
+        -- And the decoy's fate is nothing to the service, while the real
+        -- child's is everything.
+        vm:run("kill " .. decoy)
+        vm:run("sleep 1")
+        local after = status("pt-nf-mainpid")
+        t:assert_eq(after and after.state, "active",
+            "killing the named process leaves the service running")
+        t:assert_eq(after.current_job.pid, pid, "on the same main job")
+
+        vm:run("kill -KILL " .. pid)
+        local ended = wait_until(function()
+            local s = status("pt-nf-mainpid")
+            if s and s.state ~= "active" then return s end
+        end, { timeout = 30, desc = "the service to notice its own child's death" })
+        t:assert(ended, "killing the forked child is what ends the service")
+    end)
