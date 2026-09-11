@@ -55,10 +55,22 @@ hook_log_init pt-stage
 # which is what made it look like a race in prelude (PEI-800).
 #
 # So: merge child by child, and never touch a directory that already
-# exists. `cp -a` on each leaf still preserves the execute bit, which
-# under KACS is the intrinsic "this is executable" flag rather than an
-# advisory permission — an autorun script copied without it is one peinit
-# refuses to spawn.
+# exists.
+#
+# Each leaf is copied with `--preserve=exec,timestamps` rather than `-a`,
+# for the same reason one level down. `-a` is `--preserve=all`, and on
+# Peios "all" includes the security descriptor, so every staged file came
+# out wearing whatever its initramfs copy had instead of inheriting from
+# the directory it landed in. And since the productionised peiosutils it
+# is worse than wrong: `cp` now reads the source's descriptor through
+# `kacs_get_sd`, that read is refused with EACCES on a staged file, and
+# the hook's `set -e` turns one refused read into a failed boot.
+#
+# What a leaf does need carried is `exec`: under KACS the execute bit is
+# the intrinsic "this is executable" flag rather than an advisory
+# permission, and an autorun script copied without it is one peinit
+# refuses to spawn. `-R` keeps symlinks as symlinks, which is what `-a`'s
+# `-d` did.
 merge() {
     # $1 source directory, $2 destination directory (must exist).
     #
@@ -75,7 +87,7 @@ merge() {
         if [ -d "$entry" ] && [ -d "$2/$name" ]; then
             merge "$entry" "$2/$name"
         else
-            cp -a "$entry" "$2/$name"
+            cp -R --preserve=exec,timestamps "$entry" "$2/$name"
         fi
     done
 }
