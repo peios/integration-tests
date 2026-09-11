@@ -292,7 +292,14 @@ test("a Critical service in a cycle takes the machine to Safe mode rather than a
     end)
 
 test("Safe mode still blocks a hard dependency that is missing or disabled",
-    { spec = "peinit *validate.a-missing-or-disabled-target-blocks-in-safe-mode-too" },
+    {
+        spec = {
+            "peinit *validate.a-missing-or-disabled-target-blocks-in-safe-mode-too",
+            -- The excluded case sits in the same boot, so this one test
+            -- holds both sides of "only that case drops".
+            "peinit *validate.safe-mode-drops-a-hard-edge-only-on-a-service-it-excluded",
+        },
+    },
     function(t)
         -- Safe mode drops a hard edge on a service it *excluded* — that
         -- is §2.6's own rule, and modes.test.lua covers it. This is the
@@ -313,11 +320,21 @@ test("Safe mode still blocks a hard dependency that is missing or disabled",
                 oneshot("pt-v-safedisabled", { BOOT, SAFE, requires("pt-v-off") }),
                 oneshot("pt-v-off", { BOOT, SAFE,
                     { name = "Disabled", type = "dword", data = 1 } }),
+                -- The one case that does drop: a hard edge onto a service
+                -- Safe mode excluded, because it carries no SafeMode.
+                oneshot("pt-v-safeexcl", { BOOT, SAFE, requires("pt-v-excluded") }),
+                oneshot("pt-v-excluded", { BOOT }),
                 -- A control: eligible, nothing unavailable.
                 oneshot("pt-v-safefine", { BOOT, SAFE }),
             }),
         })
         wait_for_line(other, "peinit: service pt-v-safefine started")
+        wait_for_line(other, "peinit: service pt-v-safeexcl started")
+        t:assert(not other:console():read_log():find("peinit: service pt%-v%-excluded started"),
+            "the service Safe mode excluded did not start")
+        t:assert_eq(json.decode(other:run("svctl --json status pt-v-safeexcl").stdout).cause,
+            "clean_exit",
+            "and its dependent ran anyway, the hard edge onto it dropped")
         local log = other:console():read_log()
         t:assert(not log:find("peinit: service pt%-v%-safemissing started"),
             "a missing hard dependency blocks in Safe mode")
