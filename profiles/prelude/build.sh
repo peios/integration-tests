@@ -113,7 +113,9 @@ fi
 fingerprint() {
     cat ../../peiso.toml peiso.toml build.sh
     cat hooks/* fixtures/*
-    ls -lL ../../../pkgs/_pkgsOut_/ 2>/dev/null || true
+    ls -lL ../../../pkgs/_peipkgRepo_/repo.json \
+        ../../../pkgs/_peipkgRepo_/index/active.json \
+        ../../../pkgs/_peipkgRepo_/index/active.json.sig 2>/dev/null || true
     ls -lL "$mkirf" "$overlay" 2>/dev/null || true
     if [ -n "$peiso_src" ]; then
         find "$peiso_src" -name '*.go' -o -name 'go.*' | sort | xargs ls -lL

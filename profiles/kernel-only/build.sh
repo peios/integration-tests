@@ -85,7 +85,9 @@ fi
 # run would defeat the point.
 fingerprint() {
     cat ../../peiso.toml peiso.toml build.sh
-    ls -lL ../../../pkgs/_pkgsOut_/ 2>/dev/null || true
+    ls -lL ../../../pkgs/_peipkgRepo_/repo.json \
+        ../../../pkgs/_peipkgRepo_/index/active.json \
+        ../../../pkgs/_peipkgRepo_/index/active.json.sig 2>/dev/null || true
     if [ -n "$tcb_key" ]; then ls -lL "$tcb_key" 2>/dev/null || true; fi
     if [ -n "$peiso_src" ]; then
         find "$peiso_src" -name '*.go' -o -name 'go.*' | sort | xargs ls -lL

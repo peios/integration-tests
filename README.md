@@ -42,11 +42,11 @@ counted.
   source checkout's `dist/`. The `peinit` and `prelude` profiles resolve
   it the same way, then fall back to a sibling checkout at
   `../provium/dist/`; `PROVIUM_OVERLAY` overrides all of it.
-- **The package pool.** `peiso.toml` names one repository,
-  `file://../pkgs/_pkgsOut_/`, the sibling `pkgs` checkout's local output
-  with its dev signing key. Until `pkgs.peios.org` is live that is the
-  only source, and it exists only on a machine that has built the
-  packages.
+- **The package repository.** `peiso.toml` names
+  `file://../pkgs/_peipkgRepo_`, the sibling `pkgs` checkout's signed static
+  repository, with an explicit repository trust anchor and its package-signing
+  key. Until `pkgs.peios.org` is live that local repository is the only source,
+  and it exists only on a machine that has published the packages.
 - **KVM, QEMU, iproute2, nftables, peiso** — provium's own pre-flight
   lists them.
 

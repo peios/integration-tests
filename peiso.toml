@@ -1,3 +1,5 @@
 [[packages.repository]]
-url = "file://../pkgs/_pkgsOut_/"
+url = "file://../pkgs/_peipkgRepo_"
+# Out-of-band repository trust anchor; rotate deliberately with the repo key.
+trust_anchors = ["63977c7be45624999b88bac5aa55ab5280656ee076617a285c87602a0d980602"]
 keys = ["../pkgs/dev-signing.pub"]
