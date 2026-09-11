@@ -23,18 +23,32 @@
  * is test apparatus, and it has no business on a real Peios.
  *
  * Usage:
- *   pt-jobs [--socket PATH] [--log PATH] REQUEST...
+ *   pt-jobs [--socket PATH] [--log PATH] STEP...
  *
- * Each REQUEST is one compact JSON object, sent as one datagram on the
- * one connection, in order -- so a `submit` and the `status` that asks
- * about the job it created can share a connection, which is what the
- * manager expects of a client that submitted something.
+ * The steps run in order on one connection, so a `submit` and the
+ * `status` that asks about the job it created can share a connection,
+ * which is what the manager expects of a client that submitted
+ * something:
+ *
+ *   send JSON        send one message and read its answer
+ *   send-fds N JSON  the same, with N descriptors attached as SCM_RIGHTS
+ *   send-only JSON   send and read nothing -- for pipelining
+ *   read             read one answer
+ *   sleep N          hold the connection open, idle, for N seconds
+ *
+ * A bare JSON argument is `send JSON`, which is what every caller
+ * written before the steps existed passes.
+ *
+ * The descriptors `send-fds` attaches are dups of /dev/null. What they
+ * are does not matter to the two claims they exist for -- the 64 a
+ * message may carry, and the `MSG_CTRUNC` that a 65th produces -- and a
+ * descriptor the manager might make sense of would muddy both.
  *
  * The socket defaults to /run/services/peinit/jobs.sock.
  *
  * Each answer prints three lines:
  *
- *   reply rc=213 fds=1
+ *   reply rc=213 fds=1 at=1.204
  *   reply-fd0 anon_inode:[pidfd]
  *   reply-json {"status":"ok",…}
  *
@@ -42,6 +56,13 @@
  * one is named by its /proc/self/fd link, which is what tells a pidfd
  * apart from anything else. A test reads those lines and knows what the
  * manager actually attached rather than what a client chose to report.
+ * `at` is seconds since the connect, which is how a test tells an answer
+ * that came back at once from one that waited for something.
+ *
+ * `rc=0` with no error is end of file: the manager closed the
+ * connection. That is a claim of its own -- only REQUEST_TOO_LARGE
+ * closes one -- so it prints as `reply closed at=…` rather than as an
+ * empty answer.
  */
 
 #define _GNU_SOURCE
@@ -53,6 +74,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_SOCKET "/run/services/peinit/jobs.sock"
@@ -88,6 +110,127 @@ static void describe_fd(int fd, char *out, size_t cap)
     out[n] = '\0';
 }
 
+static struct timespec started;
+
+/* Seconds since the connect, so a test can tell an answer that came back
+ * at once from one that waited for a job to move. */
+static double elapsed(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)(now.tv_sec - started.tv_sec)
+        + (double)(now.tv_nsec - started.tv_nsec) / 1e9;
+}
+
+/* Send one message, with `nfds` descriptors attached when asked for.
+ * Returns 0, or the errno that stopped it. */
+static int send_message(int s, const char *json, int nfds)
+{
+    struct iovec iov = { .iov_base = (void *)json, .iov_len = strlen(json) };
+    struct msghdr msg;
+    memset(&msg, 0, sizeof msg);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+
+    char *control = NULL;
+    int *fds = NULL;
+    if (nfds > 0) {
+        /* Every one a dup of /dev/null: the claims are about how many a
+         * message may carry, not about what they point at. */
+        fds = calloc((size_t)nfds, sizeof(int));
+        if (!fds) return ENOMEM;
+        for (int k = 0; k < nfds; k++) {
+            fds[k] = open("/dev/null", O_RDONLY | O_CLOEXEC);
+            if (fds[k] < 0) {
+                int err = errno;
+                for (int j = 0; j < k; j++) close(fds[j]);
+                free(fds);
+                return err;
+            }
+        }
+        size_t space = CMSG_SPACE((size_t)nfds * sizeof(int));
+        control = calloc(1, space);
+        if (!control) {
+            for (int k = 0; k < nfds; k++) close(fds[k]);
+            free(fds);
+            return ENOMEM;
+        }
+        msg.msg_control = control;
+        msg.msg_controllen = space;
+        struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN((size_t)nfds * sizeof(int));
+        memcpy(CMSG_DATA(cmsg), fds, (size_t)nfds * sizeof(int));
+    }
+
+    ssize_t sent = sendmsg(s, &msg, 0);
+    int err = sent < 0 ? errno : 0;
+    if (fds) {
+        for (int k = 0; k < nfds; k++) close(fds[k]);
+        free(fds);
+    }
+    free(control);
+    return err;
+}
+
+/* Read one answer and print what it was. Returns 0 while the connection
+ * is usable, and non-zero once it is not. */
+static int read_reply(int s)
+{
+    static char response[MAX_RESPONSE];
+    struct iovec iov = { .iov_base = response, .iov_len = sizeof response };
+    char control[CMSG_SPACE(MAX_REPLY_FDS * sizeof(int))];
+    memset(control, 0, sizeof control);
+    struct msghdr msg;
+    memset(&msg, 0, sizeof msg);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof control;
+
+    ssize_t got = recvmsg(s, &msg, 0);
+    if (got < 0) {
+        fprintf(logf, "reply rc=-1 errno=%d %s at=%.3f\n",
+                errno, strerror(errno), elapsed());
+        fflush(logf);
+        return 5;
+    }
+    if (got == 0) {
+        /* End of file. Only REQUEST_TOO_LARGE is supposed to produce
+         * this, so it is evidence rather than an empty answer. */
+        fprintf(logf, "reply closed at=%.3f\n", elapsed());
+        fflush(logf);
+        return 6;
+    }
+
+    int fds[MAX_REPLY_FDS];
+    size_t fd_count = 0;
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg;
+         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) continue;
+        size_t payload = cmsg->cmsg_len - CMSG_LEN(0);
+        size_t count = payload / sizeof(int);
+        for (size_t k = 0; k < count && fd_count < MAX_REPLY_FDS; k++) {
+            int fd;
+            memcpy(&fd, CMSG_DATA(cmsg) + k * sizeof(int), sizeof fd);
+            fds[fd_count++] = fd;
+        }
+    }
+
+    fprintf(logf, "reply rc=%zd fds=%zu%s at=%.3f\n", got, fd_count,
+            (msg.msg_flags & MSG_CTRUNC) ? " ctruncated" : "", elapsed());
+    for (size_t k = 0; k < fd_count; k++) {
+        char what[256];
+        describe_fd(fds[k], what, sizeof what);
+        fprintf(logf, "reply-fd%zu %s\n", k, what);
+        close(fds[k]);
+    }
+    fprintf(logf, "reply-json %.*s\n", (int)got, response);
+    fflush(logf);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     logf = stdout;
@@ -101,7 +244,9 @@ int main(int argc, char **argv)
             if (!logf) die("pt-jobs: cannot open log %s: %s", argv[i], strerror(errno));
         } else break;
     }
-    if (i >= argc) die("pt-jobs: no requests given");
+    if (i >= argc) die("pt-jobs: no steps given");
+
+    clock_gettime(CLOCK_MONOTONIC, &started);
 
     int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
     if (s < 0) die("pt-jobs: socket: %s", strerror(errno));
@@ -121,62 +266,65 @@ int main(int argc, char **argv)
     fprintf(logf, "connect rc=0 path=%s\n", sock_path);
     fflush(logf);
 
-    static char response[MAX_RESPONSE];
-
     for (; i < argc; i++) {
-        const char *request = argv[i];
-        fprintf(logf, "request %s\n", request);
+        const char *step = argv[i];
+        int attach = 0;
+        const char *json = NULL;
+        int want_reply = 1;
 
-        /* No control message at all: no token, no descriptors. The
-         * manager takes the connection's identity for the request's. */
-        ssize_t sent = send(s, request, strlen(request), 0);
-        if (sent < 0) {
-            fprintf(logf, "send rc=-1 errno=%d %s\n", errno, strerror(errno));
+        if (strcmp(step, "sleep") == 0) {
+            if (i + 1 >= argc) die("pt-jobs: sleep needs a count");
+            int seconds = atoi(argv[++i]);
+            fprintf(logf, "sleep %d at=%.3f\n", seconds, elapsed());
+            fflush(logf);
+            sleep((unsigned)seconds);
+            continue;
+        }
+        if (strcmp(step, "read") == 0) {
+            fprintf(logf, "read at=%.3f\n", elapsed());
+            fflush(logf);
+            int rc = read_reply(s);
+            if (rc) return rc == 6 ? 0 : rc;
+            continue;
+        }
+        if (strcmp(step, "send-fds") == 0) {
+            if (i + 2 >= argc) die("pt-jobs: send-fds needs a count and a request");
+            attach = atoi(argv[++i]);
+            json = argv[++i];
+        } else if (strcmp(step, "send-only") == 0) {
+            if (i + 1 >= argc) die("pt-jobs: send-only needs a request");
+            json = argv[++i];
+            want_reply = 0;
+        } else if (strcmp(step, "send") == 0) {
+            if (i + 1 >= argc) die("pt-jobs: send needs a request");
+            json = argv[++i];
+        } else {
+            /* A bare JSON object, which is what callers written before
+             * the steps existed pass. */
+            json = step;
+        }
+
+        fprintf(logf, "request fds=%d bytes=%zu at=%.3f\n",
+                attach, strlen(json), elapsed());
+        fprintf(logf, "request-json %s\n", json);
+        fflush(logf);
+
+        /* With no control message there is no token and no descriptor:
+         * the manager takes the connection's identity for the
+         * request's. */
+        int err = send_message(s, json, attach);
+        if (err) {
+            fprintf(logf, "send rc=-1 errno=%d %s at=%.3f\n",
+                    err, strerror(err), elapsed());
             fflush(logf);
             return 4;
         }
+        if (!want_reply) continue;
 
-        struct iovec iov = { .iov_base = response, .iov_len = sizeof response };
-        char control[CMSG_SPACE(MAX_REPLY_FDS * sizeof(int))];
-        memset(control, 0, sizeof control);
-        struct msghdr msg;
-        memset(&msg, 0, sizeof msg);
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = control;
-        msg.msg_controllen = sizeof control;
-
-        ssize_t got = recvmsg(s, &msg, 0);
-        if (got < 0) {
-            fprintf(logf, "reply rc=-1 errno=%d %s\n", errno, strerror(errno));
-            fflush(logf);
-            return 5;
-        }
-
-        int fds[MAX_REPLY_FDS];
-        size_t fd_count = 0;
-        for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg;
-             cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-            if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) continue;
-            size_t payload = cmsg->cmsg_len - CMSG_LEN(0);
-            size_t count = payload / sizeof(int);
-            for (size_t k = 0; k < count && fd_count < MAX_REPLY_FDS; k++) {
-                int fd;
-                memcpy(&fd, CMSG_DATA(cmsg) + k * sizeof(int), sizeof fd);
-                fds[fd_count++] = fd;
-            }
-        }
-
-        fprintf(logf, "reply rc=%zd fds=%zu%s\n", got, fd_count,
-                (msg.msg_flags & MSG_CTRUNC) ? " ctruncated" : "");
-        for (size_t k = 0; k < fd_count; k++) {
-            char what[256];
-            describe_fd(fds[k], what, sizeof what);
-            fprintf(logf, "reply-fd%zu %s\n", k, what);
-            close(fds[k]);
-        }
-        fprintf(logf, "reply-json %.*s\n", (int)got, response);
-        fflush(logf);
+        int rc = read_reply(s);
+        /* A closed connection is an outcome the caller asked to see, not
+         * a failure of the tool. */
+        if (rc) return rc == 6 ? 0 : rc;
     }
 
     close(s);
