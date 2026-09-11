@@ -11,6 +11,7 @@
 # is not in the initramfs root would be weight the tests never touch.
 [baseline]
 edition = "kernel-only"
+package = "dev.peios.testing.peios-kernel-only"
 # Nothing boots this root from a medium; provium launches the kernel
 # directly and this profile supplies its own initramfs. Without this the
 # root would carry live-boot, whose hook would then be in the initramfs

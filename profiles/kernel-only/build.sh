@@ -53,6 +53,31 @@ stamp="$out/.build-stamp"
 tcb_key=${PIT_TCB_KEY:-$(sed -n '/^\[tcb\]/,/^\[.*\]/{s/^priv *= *"\(.*\)".*/\1/p;}' \
     ../../../pkgs/dev.keyring.pekit.toml 2>/dev/null | head -n 1)}
 
+# peiso, from the sibling source tree when there is one, exactly as the
+# peinit profile does it. An installed peiso lags the tree, and a spec
+# knob added since it was installed is reported as `unknown key` — which
+# is how this profile stopped composing when its spec gained
+# `baseline.package`, with the peiso on PATH a fortnight older than it.
+#
+# The fingerprint hashes the SOURCE rather than the binary, and the build
+# is deferred until after the staleness check: `go build -o` rewrites its
+# output on every run, so a binary in the fingerprint would call itself
+# stale every time and recompose on every test run.
+peiso_src=
+peiso=${PT_PEISO:-}
+if [ -z "$peiso" ] && [ -d ../../../peiso ]; then
+    peiso_src=$(readlink -f ../../../peiso)
+    peiso="$out/peiso"
+fi
+if [ -z "$peiso_src" ]; then
+    [ -n "$peiso" ] || peiso=$(command -v peiso 2>/dev/null || true)
+    if [ -z "$peiso" ]; then
+        echo "kernel-only/build.sh: no peiso found (build it, or set PT_PEISO)" >&2
+        exit 1
+    fi
+    peiso=$(readlink -f "$peiso")
+fi
+
 # What the outputs depend on: the two spec layers, this script, the
 # signing key, and the package repository they resolve against.
 # Identity is name/size/mtime rather than content — a rebuilt package
@@ -62,6 +87,11 @@ fingerprint() {
     cat ../../peiso.toml peiso.toml build.sh
     ls -lL ../../../pkgs/_pkgsOut_/ 2>/dev/null || true
     if [ -n "$tcb_key" ]; then ls -lL "$tcb_key" 2>/dev/null || true; fi
+    if [ -n "$peiso_src" ]; then
+        find "$peiso_src" -name '*.go' -o -name 'go.*' | sort | xargs ls -lL
+    else
+        ls -lL "$peiso" 2>/dev/null || true
+    fi
 }
 
 current() {
@@ -90,7 +120,13 @@ fi
 # stamp claiming the tree beside it is current.
 rm -f "$stamp" "$extras"
 rm -rf "$root"
-peiso root ../../peiso.toml peiso.toml --out "$root"
+if [ -n "$peiso_src" ]; then
+    (cd "$peiso_src" && go build -o "$peiso" .) || {
+        echo "kernel-only/build.sh: could not build peiso from $peiso_src" >&2
+        exit 1
+    }
+fi
+"$peiso" root ../../peiso.toml peiso.toml --out "$root"
 
 # --- the fixture initramfs ---------------------------------------------
 

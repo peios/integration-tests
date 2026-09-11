@@ -83,6 +83,29 @@ if [ ! -r "$overlay" ]; then
 fi
 overlay=$(readlink -f "$overlay")
 
+# peiso, from the sibling source tree when there is one, exactly as the
+# peinit and kernel-only profiles do it. An installed peiso lags the tree
+# and reports a spec knob added since it was installed as `unknown key` —
+# which is how this profile stopped composing when its spec gained
+# `baseline.package`. The fingerprint hashes the source and the build
+# waits until after the staleness check, because `go build -o` rewrites
+# its output every run and a binary in the fingerprint would call itself
+# stale every time.
+peiso_src=
+peiso=${PT_PEISO:-}
+if [ -z "$peiso" ] && [ -d ../../../peiso ]; then
+    peiso_src=$(readlink -f ../../../peiso)
+    peiso="$out/peiso"
+fi
+if [ -z "$peiso_src" ]; then
+    [ -n "$peiso" ] || peiso=$(command -v peiso 2>/dev/null || true)
+    if [ -z "$peiso" ]; then
+        warn "no peiso found (build it, or set PT_PEISO)"
+        exit 1
+    fi
+    peiso=$(readlink -f "$peiso")
+fi
+
 # --- staleness -------------------------------------------------------------
 # Identity is name/size/mtime rather than content, as in the kernel-only
 # profile: a rebuilt package always moves one of them, and hashing the
@@ -92,6 +115,11 @@ fingerprint() {
     cat hooks/* fixtures/*
     ls -lL ../../../pkgs/_pkgsOut_/ 2>/dev/null || true
     ls -lL "$mkirf" "$overlay" 2>/dev/null || true
+    if [ -n "$peiso_src" ]; then
+        find "$peiso_src" -name '*.go' -o -name 'go.*' | sort | xargs ls -lL
+    else
+        ls -lL "$peiso" 2>/dev/null || true
+    fi
 }
 
 current() {
@@ -120,7 +148,13 @@ fi
 # stamp claiming the tree beside it is current.
 rm -f "$stamp" "$initrd"
 rm -rf "$root" "$irf"
-peiso root ../../peiso.toml peiso.toml --out "$root"
+if [ -n "$peiso_src" ]; then
+    (cd "$peiso_src" && go build -o "$peiso" .) || {
+        warn "could not build peiso from $peiso_src"
+        exit 1
+    }
+fi
+"$peiso" root ../../peiso.toml peiso.toml --out "$root"
 
 [ -d "$root/boot/initramfs" ] || {
     warn "the composed root has no boot/initramfs — no package landed in the initramfs root"
