@@ -247,12 +247,35 @@ test("an exit arriving for a service that no longer expects one performs no tran
         -- to take it -- the same code path, reached from a different
         -- side.
         vm:run("svctl --no-wait start pt-tr-oneshot"):assert_ok()
-        settle("pt-tr-oneshot", "starting", "the Oneshot to be running its process")
+        -- Running its process, not merely Starting. A service is Starting
+        -- from the moment its launch is dispatched, but its job has a pid
+        -- only once exec is confirmed, and a stop sent before that has no
+        -- process to signal.
+        wait_until(function()
+            local view = status("pt-tr-oneshot")
+            return view.state == "starting" and view.current_job and view.current_job.pid
+        end, { timeout = 90, interval = 0.3, desc = "the Oneshot to be running its process" })
 
         vm:run("svctl --no-wait stop pt-tr-oneshot"):assert_ok()
-        vm:console():expect(
-            "peinit: service pt-tr-oneshot main process exited in state Stopping; " ..
-            "no action taken", 60)
+        -- Polled rather than `console():expect`, so that a miss says what
+        -- the console did report about the service instead of only that
+        -- a line never came.
+        local LATE = "peinit: service pt-tr-oneshot main process exited in state Stopping; " ..
+            "no action taken"
+        local reported = pcall(wait_until, function()
+            return vm:console():read_log():find(LATE, 1, true) and true or nil
+        end, { timeout = 60, interval = 0.5, desc = "the late exit to be reported" })
+        if not reported then
+            local said = {}
+            for _, line in ipairs(peinit.lines(vm:console():read_log())) do
+                if line:find("pt-tr-oneshot", 1, true) or line:find("recovery", 1, true) then
+                    said[#said + 1] = line
+                end
+            end
+            t:assert(false, "the exit was reported as a late one within a minute; the console said: " ..
+                table.concat(said, " | ") .. "; status: " ..
+                vm:run("svctl --json status pt-tr-oneshot").stdout)
+        end
 
         -- No transition was performed for that exit: the service kept
         -- the state the stop put it in.
