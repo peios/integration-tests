@@ -28,6 +28,32 @@ local FILES = {
     ["pt/of-assert.sh"] = counter("assert"),
     ["pt/of-invalid.sh"] = counter("invalid"),
     ["pt/of-manual.sh"] = counter("manual"),
+
+    -- A handler that succeeds the first time it runs and fails every
+    -- time after. Its first run ends (Completed, then Inactive); its
+    -- later runs are failures whose chain the test reads.
+    ["pt/of-ends.sh"] = counter("ends") .. [[
+n=$(cat /run/pt-of-ends.n 2>/dev/null || echo 0)
+n=$((n + 1))
+echo $n > /run/pt-of-ends.n
+if [ $n -eq 1 ]; then exit 0; fi
+exit 1
+]],
+
+    -- of-holds.sh TAG: a handler whose first run stays up until the test
+    -- drops /run/pt-of-TAG.crash (or two minutes pass), then fails; every
+    -- later run fails at once.
+    ["pt/of-holds.sh"] = [[
+/bin/date +%s >> /run/pt-of-$1.log
+n=$(cat /run/pt-of-$1.n 2>/dev/null || echo 0)
+n=$((n + 1))
+echo $n > /run/pt-of-$1.n
+if [ $n -eq 1 ]; then
+    i=0
+    while [ ! -e /run/pt-of-$1.crash ] && [ $i -lt 120 ]; do /bin/sleep 1; i=$((i+1)); done
+fi
+exit 1
+]],
 }
 
 local function service(name, values)
@@ -114,7 +140,41 @@ local SERVICES = {
     -- Failed by hand, twice, so the same Oneshot handler is asked twice.
     service("pt-of-manual", { NOTIFY, NEVER, FALSE, on_failure("pt-of-manualh") }),
     handler("pt-of-manualh", "of-manual.sh"),
+
+    -- Chain retirement. Each pair names the other as its handler, like
+    -- the loop pair above, so every chain ends at the guard — and where
+    -- it ends says where it began. A handler whose chain entry was
+    -- retired starts a fresh chain when it later fails; one whose entry
+    -- was not carries on the chain it was started in.
+    --
+    -- A Oneshot handler that ends between its two failures.
+    service("pt-of-endx", { NOTIFY, NEVER, FALSE, on_failure("pt-of-ends") }),
+    service("pt-of-ends", {
+        NEVER, on_failure("pt-of-endx"),
+        { name = "ImagePath", type = "sz", data = "/bin/sh" },
+        { name = "Arguments", type = "multi", data = { "/pt/of-ends.sh" } },
+        { name = "Type", type = "dword", data = 1 },
+        { name = "Readiness", type = "dword", data = 1 },
+    }),
 }
+
+--- A Simple handler whose first run holds Active until told to fail,
+--- measured against `window` seconds of RestartWindow.
+local function holding_pair(tag, window)
+    SERVICES[#SERVICES + 1] = service("pt-of-" .. tag .. "x",
+        { NOTIFY, NEVER, FALSE, on_failure("pt-of-" .. tag) })
+    SERVICES[#SERVICES + 1] = service("pt-of-" .. tag, {
+        NEVER, on_failure("pt-of-" .. tag .. "x"),
+        { name = "ImagePath", type = "sz", data = "/bin/sh" },
+        { name = "Arguments", type = "multi", data = { "/pt/of-holds.sh", tag } },
+        { name = "Readiness", type = "dword", data = 1 },
+        { name = "RestartWindow", type = "dword", data = window },
+    })
+end
+-- Two seconds of window, which the handler outlasts before it fails...
+holding_pair("held", 2)
+-- ...and the same handler against a window it never reaches.
+holding_pair("brief", 300)
 
 --- A chain of eighteen services, each naming the next as its handler and
 --- none of them able to succeed. No service appears twice, so the set
@@ -336,4 +396,99 @@ test("a chain of handlers is not followed past a depth of sixteen",
         t:assert_eq(view.state, "inactive",
             refused .. " was never started: " .. view.state)
         t:assert(not view.cause, "with no transition recorded against it at all")
+    end)
+
+--- The on_failure.loop_suppressed event that ended the chain between
+--- `a` and `b`, once there is one.
+local function suppression_between(a, b)
+    return wait_until(function()
+        local out = vm:run(
+            "evctl 'EVENTS on_failure.loop_suppressed SINCE 1h ago TAKE 200' --format jsonl",
+            { timeout = 30 })
+        for _, line in ipairs(peinit.lines(out.stdout)) do
+            if line:find('"' .. a .. '"', 1, true) and line:find('"' .. b .. '"', 1, true) then
+                return line
+            end
+        end
+        return nil
+    end, { timeout = 90, interval = 1,
+           desc = "the chain between " .. a .. " and " .. b .. " to be suppressed" })
+end
+
+--- The three names of a suppressed chain, as the event lists them.
+local function chain_of(event)
+    local list = event:match('"chain"%s*:%s*%[([^%]]*)%]')
+    local names = {}
+    for name in (list or ""):gmatch('"([^"]+)"') do names[#names + 1] = name end
+    return names
+end
+
+test("a chain entry is retired when its handler ends, so its next failure starts a fresh chain",
+    { spec = "peinit *cause.a-chain-entry-is-retired-when-the-handler-ends" },
+    function(t)
+        -- pt-of-endx fails and starts pt-of-ends, recording pt-of-ends in
+        -- the chain that failure began. pt-of-ends succeeds: Completed,
+        -- then Inactive. That is the handler ending, and it retires the
+        -- entry.
+        vm:run("svctl --json --no-wait start pt-of-endx", { timeout = 30 }):assert_ok()
+        settle("pt-of-endx", "failed", "pt-of-endx to fail")
+        wait_until(function() return runs("ends") >= 1 end,
+            { timeout = 60, interval = 0.5, desc = "pt-of-ends's first run" })
+        settle("pt-of-ends", "inactive", "pt-of-ends to end after its first run")
+
+        -- Later, on its own, the handler fails. A retired entry means
+        -- this is a new failure and a fresh chain: pt-of-ends starts
+        -- pt-of-endx, whose failure starts pt-of-ends again, whose
+        -- failure is the one the guard stops — three handler starts
+        -- deep, beginning at pt-of-endx.
+        --
+        -- Had the entry survived, the chain would have carried on from
+        -- the first failure: pt-of-ends, then pt-of-endx, then a refusal
+        -- to start pt-of-ends a second time.
+        vm:run("svctl --json --no-wait start pt-of-ends", { timeout = 30 }):assert_ok()
+        local event = suppression_between("pt-of-ends", "pt-of-endx")
+        local chain = chain_of(event)
+        t:assert_eq(table.concat(chain, ","), "pt-of-endx,pt-of-ends,pt-of-endx",
+            "the handler's failure began a chain of its own: " .. event)
+        t:assert(event:find('"attempted_handler":"pt-of-endx"', 1, true),
+            "and the refused start was pt-of-endx's: " .. event)
+        vm:run("sleep 2", { timeout = 10 })
+        t:assert_eq(runs("ends"), 3,
+            "pt-of-ends ran for the first failure, on its own, and once more for the fresh chain")
+    end)
+
+test("a chain entry is retired once its handler has held for RestartWindow, and not on Active alone",
+    { spec = "peinit *cause.a-chain-entry-is-retired-when-the-handler-holds-for-restartwindow" },
+    function(t)
+        -- Two identical handlers, both Active from the moment they spawn
+        -- (Readiness=Alive), both kept up for eight seconds before they
+        -- fail. One has a two-second RestartWindow and so has held its
+        -- window; the other has three hundred seconds and has merely come
+        -- up.
+        for _, tag in ipairs({ "held", "brief" }) do
+            vm:run("svctl --json --no-wait start pt-of-" .. tag .. "x", { timeout = 30 }):assert_ok()
+            settle("pt-of-" .. tag .. "x", "failed", "pt-of-" .. tag .. "x to fail")
+            settle("pt-of-" .. tag, "active", "its handler pt-of-" .. tag .. " to be up")
+        end
+        vm:run("sleep 8", { timeout = 20 })
+        for _, tag in ipairs({ "held", "brief" }) do
+            vm:run("touch /run/pt-of-" .. tag .. ".crash", { timeout = 10 }):assert_ok()
+        end
+
+        -- The handler that held has arrived: its failure is a new one,
+        -- starting a fresh chain from itself.
+        local held = suppression_between("pt-of-held", "pt-of-heldx")
+        t:assert_eq(table.concat(chain_of(held), ","), "pt-of-heldx,pt-of-held,pt-of-heldx",
+            "a handler that held for its window starts a fresh chain when it fails: " .. held)
+
+        -- The one that was merely Active has not: its failure carries on
+        -- the chain it was started in, and the guard stops it a step
+        -- sooner.
+        local brief = suppression_between("pt-of-brief", "pt-of-briefx")
+        t:assert_eq(table.concat(chain_of(brief), ","), "pt-of-brief,pt-of-briefx,pt-of-brief",
+            "a handler Active for less than its window is still in its first chain: " .. brief)
+
+        vm:run("sleep 2", { timeout = 10 })
+        t:assert_eq(runs("held"), 2, "the held handler was started again by its fresh chain")
+        t:assert_eq(runs("brief"), 1, "the brief one was not")
     end)

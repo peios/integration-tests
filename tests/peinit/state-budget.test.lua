@@ -51,6 +51,18 @@ if [ $n -eq 2 ]; then
 fi
 exit 1
 ]],
+    -- bg-window.sh TAG: fails at once the first time, which spends a
+    -- budget of one; the second life stays up until the test drops
+    -- /run/pt-bg-TAG.crash (or five minutes pass) and then fails too.
+    ["pt/bg-window.sh"] = [[
+n=$(cat /run/pt-bg-$1.n 2>/dev/null || echo 0)
+n=$((n + 1))
+echo $n > /run/pt-bg-$1.n
+if [ $n -eq 1 ]; then exit 1; fi
+i=0
+while [ ! -e /run/pt-bg-$1.crash ] && [ $i -lt 300 ]; do /bin/sleep 1; i=$((i+1)); done
+exit 1
+]],
 }
 
 local function service(name, values)
@@ -138,6 +150,26 @@ local SERVICES = {
         { name = "RestartWindow", type = "dword", data = 300 },
     }),
 }
+
+--- A budget of one, spent by the first life, and a four-second window
+--- the second life can clear. `extra` adds values.
+local function windowed(name, extra)
+    local values = {
+        ALIVE, ALWAYS,
+        { name = "ImagePath", type = "sz", data = "/bin/sh" },
+        { name = "Arguments", type = "multi", data = { "/pt/bg-window.sh", name } },
+        { name = "RestartDelay", type = "dword", data = 1 },
+        { name = "RestartMaxRetries", type = "dword", data = 1 },
+        { name = "RestartWindow", type = "dword", data = 4 },
+    }
+    for _, value in ipairs(extra or {}) do values[#values + 1] = value end
+    SERVICES[#SERVICES + 1] = service(name, values)
+end
+-- Reloaded across its window boundary: the reload command takes ten
+-- seconds, far longer than the four-second window.
+windowed("pt-bg-reloaded", { { name = "ExecReload", type = "sz", data = "/bin/sleep 10" } })
+-- The control: the same service, never reloaded.
+windowed("pt-bg-steady")
 
 local vm = peinit.boot({
     name = "budget",
@@ -347,4 +379,70 @@ test("the backoff delay saturates at the cap rather than wrapping",
             "the delay saturated at the sixty-second cap rather than wrapping to " ..
             "something short or standing at 2^32 - 1: " .. delay .. "s")
         t:assert(first[1] <= both[1], "the stamps are in order")
+    end)
+
+test("a reload across the window boundary defers the budget reset to the return to Active",
+    {
+        spec = "peinit *restart.a-reload-across-the-window-boundary-defers-the-reset",
+        -- PEI-1079: the transition into
+        -- Reloading clears the RestartWindow stamp
+        -- (service/runtime/transition.rs:56-57, because
+        -- `satisfies_dependents` excludes Reloading), and no route from
+        -- Reloading back to Active sets it again, while the reset
+        -- deadline is only computed from that stamp
+        -- (service/table/activation/restart.rs:79-100). The reset is not
+        -- deferred to the return: it never happens, for as long as that
+        -- activation lives.
+        tags = { "known-bug" },
+    },
+    function(t)
+        -- pt-bg-reloaded and pt-bg-steady are the same service with a
+        -- budget of one: the first life spends it and the second is the
+        -- one measured. Only pt-bg-reloaded is reloaded, and its reload
+        -- command takes ten seconds — straddling the four-second window
+        -- boundary however the timing falls.
+        for _, name in ipairs({ "pt-bg-reloaded", "pt-bg-steady" }) do
+            vm:run("svctl --json --no-wait start " .. name, { timeout = 30 }):assert_ok()
+        end
+        local second_life = wait_until(function()
+            local view = status("pt-bg-reloaded")
+            local n = stamps("/run/pt-bg-pt-bg-reloaded.n")[1]
+            return view.state == "active" and n == 2 and view or nil
+        end, { timeout = 60, interval = 0.2, desc = "pt-bg-reloaded's second life" })
+        t:assert((second_life.uptime_seconds or 0) < 3,
+            "the reload is issued before the window boundary: up for " ..
+            tostring(second_life.uptime_seconds) .. "s")
+        vm:run("svctl --json --no-wait reload pt-bg-reloaded", { timeout = 30 }):assert_ok()
+        t:assert_eq(status("pt-bg-reloaded").state, "reloading",
+            "the service is Reloading as the boundary passes")
+        settle("pt-bg-reloaded", "active", "the reload to resolve")
+
+        -- The window has long passed, and the service has been back in
+        -- Active for a whole window again besides, so whichever way the
+        -- deferral is counted the reset is due. Both services now fail.
+        settle("pt-bg-steady", "active", "pt-bg-steady's second life")
+        vm:run("sleep 6", { timeout = 20 })
+        for _, name in ipairs({ "pt-bg-reloaded", "pt-bg-steady" }) do
+            vm:run("touch /run/pt-bg-" .. name .. ".crash", { timeout = 10 }):assert_ok()
+        end
+
+        -- The control: never reloaded, its window reset the counter, so
+        -- the crash is restart-eligible again.
+        local steady = wait_until(function()
+            local view = status("pt-bg-steady")
+            return (view.state == "backoff" or view.state == "failed") and view or nil
+        end, { timeout = 30, interval = 0.3, desc = "pt-bg-steady's crash to be judged" })
+        t:assert_eq(steady.cause, "process_crash",
+            "without a reload the window reset the budget: " .. steady.state)
+
+        -- The reloaded service missed the reset at the boundary and got it
+        -- on returning to Active, so its crash is judged the same way.
+        local reloaded = wait_until(function()
+            local view = status("pt-bg-reloaded")
+            return (view.state == "backoff" or view.state == "failed") and view or nil
+        end, { timeout = 30, interval = 0.3, desc = "pt-bg-reloaded's crash to be judged" })
+        t:assert_eq(reloaded.state, "backoff",
+            "the reset was deferred to the return to Active, not lost: " ..
+            reloaded.state .. " / " .. tostring(reloaded.cause))
+        t:assert_eq(reloaded.cause, "process_crash", "and the crash was restart-eligible")
     end)

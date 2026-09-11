@@ -612,3 +612,17 @@ while :; do sleep 1; done
         t:assert_eq(wave_of("authd"), wave_of("pt-x-bottom"),
             "a TCB service takes its place from its own edges: " .. rendered)
     end)
+
+-- Retirement is bookkeeping with no reader. A drained context can
+-- dispatch no further `graph.operation_terminal` whether it is still
+-- held or not, so the event this file reads contexts through is the
+-- same either way, and `svctl` has no view of a context at all. What
+-- retirement changes is PID 1's memory and the cost of its terminal
+-- path, neither of which a guest can measure.
+test("a context is retired once every member is terminal, and not before",
+    {
+        spec = "peinit *exec.a-context-is-retired-once-every-member-is-terminal",
+        covered_by = "cargo:peinit2 execution::graph::tests::context::a_context_is_retired_only_once_every_member_is_terminal",
+        skip = "a drained context dispatches no further graph event whether or not it is still held, and no guest-visible surface names a context's lifetime; runs under cargo test -p peinit2 --all-features --lib execution::graph::tests::context::a_context_is_retired_only_once_every_member_is_terminal",
+    },
+    function(t) end)

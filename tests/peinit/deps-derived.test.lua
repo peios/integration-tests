@@ -110,6 +110,19 @@ local SEED = {
     oneshot("pt-d-reqrole", {
         { name = "Identity", type = "sz", data = "SYSTEM" },
         requires("network:pt-nope") }),
+
+    -- Both need the authority and both already order against the staged
+    -- provider by hand: one plainly, one through a level. The derivation
+    -- must add nothing beside either.
+    oneshot("pt-d-plainauth", { LOCAL_SERVICE, requires("pt-d-authority") }),
+    oneshot("pt-d-levelauth", { LOCAL_SERVICE, requires("pt-d-authority:ready") }),
+    -- The instrument's control: a SYSTEM service, so nothing is derived
+    -- for it, declaring two edges to the same provider. The hard-dependent
+    -- enumeration names a dependent once per edge, which is what makes a
+    -- second edge visible at all.
+    oneshot("pt-d-twoedges", {
+        { name = "Identity", type = "sz", data = "SYSTEM" },
+        requires("pt-d-authority", "pt-d-authority:ready") }),
 }
 
 local vm = peinit.boot({ memory = "800M", name = "derived",
@@ -187,11 +200,46 @@ test("a service that needs the authority gains a Requires on each provider of au
             "the provider is not among its own dependents: " .. warning)
     end)
 
+test("an edge already declared is not added again, including one carrying a level",
+    { spec = "peinit *derived.an-already-declared-edge-is-not-added-again" },
+    function(t)
+        local dependents, raw = hard_dependents_of(vm, "pt-d-authority")
+        t:assert(dependents,
+            "peinit knows something depends hard on the staged authority: " .. tostring(raw))
+
+        -- The enumeration, entry by entry: one per hard edge to the
+        -- provider, not one per service.
+        local count = {}
+        for name in (dependents .. ","):gmatch("%s*([^,]+),") do
+            count[name] = (count[name] or 0) + 1
+        end
+
+        -- The instrument first. pt-d-twoedges declares two edges to the
+        -- provider, and is listed twice: a second edge to the same
+        -- service is something this enumeration shows.
+        t:assert_eq(count["pt-d-twoedges"], 2,
+            "a service with two edges to the provider is listed once per edge: " .. dependents)
+
+        -- Both of these need the authority, and each already declares an
+        -- edge to this provider. Had the derivation added its own plain
+        -- Requires beside the declared one, each would be listed twice.
+        t:assert_eq(count["pt-d-plainauth"], 1,
+            "a declared plain edge is not duplicated: " .. dependents)
+        t:assert_eq(count["pt-d-levelauth"], 1,
+            "nor is a declared edge carrying a level — no plain edge is added beside " ..
+            "`pt-d-authority:ready`: " .. dependents)
+
+        -- The derivation did run for this set: a service with no edge of
+        -- its own to the provider gained one.
+        t:assert_eq(count["pt-d-token"], 1,
+            "the derived edge is there where nothing was declared: " .. dependents)
+    end)
+
 test("every provider of the role becomes its own Requires, so a start is ordered after all of them",
     { spec = "peinit *derived.every-provider-of-the-role-becomes-its-own-requires" },
     function(t)
-        -- pt-d-authority has no trigger and nothing declares an edge to
-        -- it. Starting a service whose Identity needs an authority has
+        -- pt-d-authority has no trigger and nothing pt-d-token declares
+        -- names it. Starting a service whose Identity needs an authority has
         -- to pull it in, alongside authd, because each provider becomes
         -- its own edge.
         t:assert_eq(status(vm, "pt-d-authority").state, "inactive",

@@ -98,6 +98,29 @@ local SERVICES = {
 
     -- A plain resident service, for the restart legs.
     service("pt-tr-cycle", { BOOT, RESIDENT, FOREVER }),
+
+    -- Another, whose ImagePath a test changes while it runs. ImagePath
+    -- is pinned to the running definition (§3.7), so the change waits
+    -- for the service to drain.
+    service("pt-tr-restart", { BOOT, RESIDENT, FOREVER }),
+
+    -- A restart whose start leg is slow, so a status loop has a second
+    -- or two of Starting to see: Readiness=Notify, and the READY=1 that
+    -- ends it comes from pt-notify on a one-second cadence (the first
+    -- datagram after exec is refused, which is why it repeats). It
+    -- exits on SIGTERM, so the stop leg needs no escalation — and that is
+    -- load-bearing: a stop that had to SIGKILL leaves a cgroup the kernel
+    -- kills every later clone into (PEI-1078), so the restart's new main
+    -- would die at birth.
+    service("pt-tr-slowcycle", {
+        BOOT,
+        { name = "ImagePath", type = "sz", data = "/usr/bin/pt-notify" },
+        { name = "Arguments", type = "multi", data = {
+            "sleep", "1", "send", "READY=1", "sleep", "1", "send", "READY=1",
+            "sleep", "1", "send", "READY=1", "sleep", "100000" } },
+        { name = "Readiness", type = "dword", data = 0 },
+        { name = "RestartPolicy", type = "dword", data = 0 },
+    }),
 }
 
 -- `peios.quiet=0`, because one assertion below is on a console line
@@ -110,7 +133,7 @@ local SERVICES = {
 local vm = peinit.boot({
     name = "transitions",
     append = "peios.quiet=0",
-    files = peinit.seed("pt-transitions", SERVICES),
+    files = peinit.merge(peinit.tool("pt-notify"), peinit.seed("pt-transitions", SERVICES)),
 })
 
 local function status(name)
@@ -272,4 +295,116 @@ test("a transition the table does not list cannot be requested",
             t:assert_eq(status(refusal.service).state, refusal.from,
                 "and " .. refusal.service .. " is still " .. refusal.from)
         end
+    end)
+
+--- Write registry values that must land together, in one `reg apply`.
+--- peinit reloads on every registry change, so a key built value by
+--- value is briefly something else.
+local function apply(keys)
+    local batch = peinit.encode_json({ keys = keys })
+    vm:run("cat > /tmp/pt-tr.json <<'PT_JSON_EOF'\n" .. batch ..
+        "\nPT_JSON_EOF\nreg apply /tmp/pt-tr.json", { timeout = 30 }):assert_ok()
+end
+
+test("an administrative restart detours through Inactive, so a definition pinned while running is released by it",
+    { spec = "peinit *trans.an-administrative-restart-detours-through-inactive" },
+    function(t)
+        -- The detour is what a pinned field waits for. ImagePath is pinned
+        -- to the running definition: a change to it is held beside the
+        -- running one until the service drains to a state with no
+        -- process, and only then becomes the definition. Inactive is such
+        -- a state; Stopping and Starting are not. So a restart whose stop
+        -- leg ended in Inactive starts the *new* image, and one that went
+        -- from Stopping straight to Starting — the arrow the table keeps
+        -- for a queued explicit start — would start the old one.
+        local before = settle("pt-tr-restart", "active", "pt-tr-restart to come up at boot")
+        local old_pid = before.current_job.pid
+
+        -- The new image and its arguments in one batch. Arguments is a
+        -- runtime-reloaded field and takes effect at once; ImagePath
+        -- waits. That split is what makes the outcome a clean readout:
+        -- the old image with the new arguments is `/bin/sleep -c …`, which
+        -- exits at once, and the new image with them writes a marker and
+        -- stays up.
+        apply({ {
+            path = [[Machine\System\Services\pt-tr-restart]],
+            values = {
+                { name = "ImagePath", type = "sz", data = "/bin/sh" },
+                { name = "Arguments", type = "multi", data = {
+                    "-c", "echo detoured > /run/pt-tr-restart.marker; exec /bin/sleep 3600" } },
+            },
+        } })
+        vm:run("svctl --json reload-config", { timeout = 30 }):assert_ok()
+
+        -- Pinned: the running process is untouched and nothing new ran.
+        local pinned = status("pt-tr-restart")
+        t:assert_eq(pinned.state, "active", "the reload left the running service alone")
+        t:assert_eq(pinned.current_job.pid, old_pid, "on the same process")
+        t:assert(vm:run("test -e /run/pt-tr-restart.marker").exit_code ~= 0,
+            "and the new image has not run")
+
+        vm:run("svctl restart pt-tr-restart", { timeout = 60 }):assert_ok()
+        local after = settle("pt-tr-restart", "active", "pt-tr-restart to come back from its restart")
+        t:assert(after.current_job.pid ~= old_pid, "the restart replaced the process")
+        t:assert_eq(after.cause, "explicit_start", "and its start leg was an explicit start")
+        local marker = wait_until(function()
+            local ok, text = pcall(function() return vm:read_file("/run/pt-tr-restart.marker") end)
+            return ok and text or nil
+        end, { timeout = 10, interval = 0.3, desc = "the new image's marker" })
+        t:assert(marker:find("detoured", 1, true),
+            "the start leg launched the definition released at the Inactive between the legs")
+    end)
+
+test("a restarting service is briefly observable as Inactive",
+    {
+        spec = "peinit *trans.an-administrative-restart-detours-through-inactive",
+        -- PEI-1080: the stop leg's end and
+        -- the start leg's beginning happen in the same runtime turn
+        -- (supervisor/restart.rs begin_restart_start_after_stop, and
+        -- cgroup_cleanup/stop_main.rs begin_restart_start_after_post_kill,
+        -- both call begin_restart_start_leg right after the transition
+        -- to Inactive), and PID 1 answers no control request inside a
+        -- turn — so no query can ever see the Inactive the TRM says is
+        -- briefly observable.
+        tags = { "known-bug" },
+    },
+    function(t)
+        settle("pt-tr-slowcycle", "active", "pt-tr-slowcycle to be up")
+        -- A status query in a tight loop for fifteen seconds, across the
+        -- whole restart. The loop is bounded by the clock, and its output
+        -- goes to a file rather than to the agent, so nothing here can
+        -- hold `vm:run` open.
+        vm:run("rm -f /run/pt-tr-poll.log /run/pt-tr-poll.done; " ..
+            "( end=$(( $(date +%s) + 15 )); while [ $(date +%s) -lt $end ]; do " ..
+            "svctl --json status pt-tr-slowcycle; echo; done > /run/pt-tr-poll.log 2>&1; " ..
+            "echo done > /run/pt-tr-poll.done ) < /dev/null > /dev/null 2>&1 &",
+            { timeout = 10 }):assert_ok()
+        vm:run("sleep 1", { timeout = 10 })
+        vm:run("svctl restart pt-tr-slowcycle", { timeout = 60 }):assert_ok()
+        wait_until(function()
+            return vm:run("test -e /run/pt-tr-poll.done", { timeout = 10 }).exit_code == 0 or nil
+        end, { timeout = 60, interval = 1, desc = "the status loop to finish" })
+
+        local seen, sequence, samples = {}, {}, 0
+        local log = vm:read_file("/run/pt-tr-poll.log")
+        for state in log:gmatch('"state":"([%a_]+)"') do
+            samples = samples + 1
+            if sequence[#sequence] ~= state then sequence[#sequence + 1] = state end
+            seen[state] = true
+        end
+        local console = {}
+        for _, line in ipairs(peinit.lines(vm:console():read_log())) do
+            if line:find("pt-tr-slowcycle", 1, true) then console[#console + 1] = line end
+        end
+        local rendered = table.concat(sequence, " > ") .. " (" .. samples .. " samples); now " ..
+            vm:run("svctl --json status pt-tr-slowcycle", { timeout = 10 }).stdout ..
+            " console: " .. table.concat(console, " | ")
+        -- The instrument first: the loop saw the service Active before
+        -- the restart and Starting after the hand-over, so it was
+        -- running across the moment the stop leg ended and the start leg
+        -- began.
+        t:assert(seen["active"] and seen["starting"],
+            "the loop spanned the hand-over between the legs: " .. rendered)
+        t:assert(seen["inactive"],
+            "a status query caught the service Inactive between the legs: " .. rendered)
     end)

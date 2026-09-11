@@ -11,8 +11,8 @@
 -- not open a hard one — because netd on this VM is Active and publishes
 -- no level the tests ask for. It cannot prove anything that needs a
 -- level to actually arrive: exactness, retraction, and the hard gate
--- opening. Those are reported as unreachable rather than half-tested
--- here.
+-- opening. Those live in deps-levels-published.test.lua, whose
+-- publishers are `pt-notify` services scripted to send `LEVEL=`.
 --
 -- The VM has only a loopback interface, so netd comes up, reports
 -- READY=1, and never reaches link, addressed or routed. A dependent on
