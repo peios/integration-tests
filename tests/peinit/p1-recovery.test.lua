@@ -143,10 +143,16 @@ test("a registryd that never becomes ready sends peinit to recovery",
         },
     },
     function(t)
-        -- A regular file where registryd's hive directory belongs. The
-        -- daemon execs, cannot create its storage, and exits — so peinit
+        -- A directory where registryd's hive database belongs. The
+        -- daemon execs, cannot open its storage, and exits — so peinit
         -- has a process that started and never signalled, which is the
         -- readiness timeout's case rather than the setup one's.
+        --
+        -- One level down from the obvious lever on purpose. The image
+        -- ships /var/state/loregd itself, and the staging hook merges
+        -- into a directory that already exists rather than replacing it,
+        -- so a regular file staged at that path lands inside it and
+        -- loregd boots normally. The hive file's own path is free.
         --
         -- The wait is bounded, and this is the upper half of the bracket
         -- on that bound: the boot is given sixty seconds before its
@@ -164,7 +170,7 @@ test("a registryd that never becomes ready sends peinit to recovery",
         local log = peinit.boot_to_recovery(t, {
             name = "rec-registryd",
             agent_timeout = 60,
-            files = { ["var/state/loregd"] = "not a directory\n" },
+            files = { ["var/state/loregd/Machine.hive/pt-not-a-hive"] = "not a database\n" },
         })
         t:assert(log:find("entering recovery: Registryd", 1, true),
             "peinit named registryd as the reason: " .. log:sub(-900))
@@ -179,8 +185,19 @@ test("a registryd that never becomes ready sends peinit to recovery",
         -- a timeout and no cause.
         t:assert(log:find("registryd failed; what it said follows", 1, true),
             "peinit relayed registryd's own words")
-        t:assert(log:find("/var/state/loregd", 1, true),
-            "which named the storage it could not create")
+        -- loregd names the hive it could not open ("hive Machine: open
+        -- write connection for Machine: …"), not the path, so that is what
+        -- shows the relayed words are its own.
+        local relayed = {}
+        for _, line in ipairs(peinit.lines(log)) do
+            if line:find("registryd(std", 1, true) then relayed[#relayed + 1] = line end
+        end
+        local named = false
+        for _, line in ipairs(relayed) do
+            if line:find("hive Machine", 1, true) then named = true end
+        end
+        t:assert(named,
+            "which named the storage it could not open: " .. table.concat(relayed, " | "))
         t:assert(not log:find("peinit: phase2 boot complete", 1, true),
             "and there was no Phase 2 without a registry")
     end)
@@ -253,7 +270,7 @@ test("the readiness wait is still running twenty seconds in",
         local log = peinit.boot_to_recovery(t, {
             name = "rec-registryd-early",
             agent_timeout = 20,
-            files = { ["var/state/loregd"] = "not a directory\n" },
+            files = { ["var/state/loregd/Machine.hive/pt-not-a-hive"] = "not a database\n" },
         })
         t:assert(log:find("peinit: phase1 starting registryd", 1, true),
             "the start was under way: " .. log:sub(-800))
