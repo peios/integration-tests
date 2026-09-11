@@ -23,6 +23,20 @@
 edition = "Experimental"
 package = "dev.peios.peios-experimental"
 
+# TEMPORARY, and the one deliberate exception to "the whole edition". Since
+# peinit's control client split into its own package, the edition no
+# longer pulls it in, so the shipped image has no svctl — nor reboot,
+# poweroff, halt or shutdown, which went with it (PEI-1071). Every test in
+# this suite drives peinit through svctl, so without this line not one of
+# them can run.
+#
+# DELETE THIS once the edition depends on dev.peios.peinit-svctl itself.
+# Left in, it keeps this suite green against an image that ships without
+# the client — which is exactly the gap a profile built on the real
+# edition exists to show.
+[[package]]
+name = "dev.peios.peinit-svctl"
+
 # Cheaper squashfs compression, as dist/release's dev layer uses. The
 # medium is built by a test profile's `build`, read once per boot off a
 # virtio disk, and thrown away — its size buys nothing here, and the
