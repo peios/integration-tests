@@ -165,3 +165,40 @@ test("a persistent timer's last run is recorded when the run starts, not when it
         t:assert_eq(json.decode(vm:run("svctl --json status pt-timer").stdout).state,
             "starting", "while the run it recorded is still in flight")
     end)
+
+-- The claims that turn on a reboot. Nothing in this profile survives one —
+-- every write lands in the overlay's tmpfs upper — so a test cannot cut the
+-- power, boot again, and ask what came back. Each is proved by a unit test
+-- in peinit that drives the boot-time decision the reboot would feed into.
+
+test("after step 7 the root is read-only and nothing is outstanding",
+    {
+        spec = "peinit *powerloss.after-step-7-the-root-is-read-only-and-nothing-is-outstanding",
+        covered_by = "cargo:peinit2 supervisor::tests::shutdown::finalize::finalize_shutdown_unmounts_deepest_first_remounts_failures_syncs_and_reboots",
+        skip = "no guest process runs after step 7 remounts the root read-only, and a power cut cannot be delivered to a VM to observe what survives it; runs under cargo test -p peinit2 --all-features --lib supervisor::tests::shutdown::finalize::finalize_shutdown_unmounts_deepest_first_remounts_failures_syncs_and_reboots",
+    },
+    function(t) end)
+
+test("a power loss mid-run does not re-trigger on the next boot",
+    {
+        spec = "peinit *powerloss.a-power-loss-mid-run-does-not-re-trigger",
+        covered_by = "cargo:peinit2 timer::boot::tests::persistent_history_without_missed_occurrence_registers_existing_next",
+        skip = "the timestamp is written at start-initiation, so proving a mid-run loss does not re-trigger needs the write to survive a reboot, and nothing in the tmpfs-overlay profile does; runs under cargo test -p peinit2 --all-features --lib timer::boot::tests::persistent_history_without_missed_occurrence_registers_existing_next",
+    },
+    function(t) end)
+
+test("a power loss before the last-run write does re-trigger on the next boot",
+    {
+        spec = "peinit *powerloss.a-power-loss-before-the-write-does-re-trigger",
+        covered_by = "cargo:peinit2 timer::boot::tests::persistent_missed_history_fires_once_not_once_per_occurrence",
+        skip = "the un-recorded firing has to be read back after a reboot for the catch-up to be observed, and nothing in the tmpfs-overlay profile survives a reboot; runs under cargo test -p peinit2 --all-features --lib timer::boot::tests::persistent_missed_history_fires_once_not_once_per_occurrence",
+    },
+    function(t) end)
+
+test("only a boot that never succeeded leaves the counter advanced across a shutdown power loss",
+    {
+        spec = "peinit *powerloss.only-a-boot-that-never-succeeded-leaves-the-counter-advanced",
+        covered_by = "cargo:peinit2 supervisor::tests::shutdown::runtime_turn::lifecycle_boot_success::boot_success_counter_resets_after_grace_when_no_critical_services_are_required",
+        skip = "the counter is reset only during a successful boot and shutdown never touches it, so the difference shows only across a power loss during shutdown — which needs a reboot the tmpfs-overlay profile cannot survive; runs under cargo test -p peinit2 --all-features --lib supervisor::tests::shutdown::runtime_turn::lifecycle_boot_success::boot_success_counter_resets_after_grace_when_no_critical_services_are_required",
+    },
+    function(t) end)

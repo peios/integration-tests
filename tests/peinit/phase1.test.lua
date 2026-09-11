@@ -317,3 +317,84 @@ test("loopback is up before Phase 2, because services that bind 127.0.0.1 need i
         t:assert(value, "lo's flags parsed: " .. flags)
         t:assert(value % 2 == 1, "lo is up (flags " .. flags .. ")")
     end)
+
+test("a loopback that cannot be brought up is a warning, and Phase 2 goes ahead",
+    { spec = "peinit *phase1.a-loopback-failure-is-a-warning" },
+    function(t)
+        -- peinit finds the loopback by name — if_nametoindex("lo") — in
+        -- step 9. An autorun script, which is step 7, renames it first, so
+        -- the bring-up fails for a reason that touches nothing else in the
+        -- boot. The image ships no `ip`, so the rename is done by a tool
+        -- staged for the purpose; it takes the link down first, because
+        -- the kernel will not rename an interface that is up.
+        local other = peinit.boot({
+            name = "loopback-fail",
+            files = peinit.merge(peinit.tool("pt-ifrename"), {
+                ["lcl/policy/autorun.d/20-pt-lo.sh"] =
+                    { "#!/bin/sh\n/usr/bin/pt-ifrename lo pt-lo0\n", exec = true },
+            }),
+        })
+        local log = other:console():read_log()
+        t:assert(log:find("pt-ifrename: lo -> pt-lo0", 1, true),
+            "the autorun renamed the loopback before step 9: " .. log:sub(-1500))
+
+        local warning = log:match("[^\r\n]*loopback interface lo bring%-up failed[^\r\n]*")
+        t:assert(warning, "peinit reported the failed bring-up: " .. log:sub(-1500))
+        t:assert(warning:find("peinit warning:", 1, true) and warning:find("WARN", 1, true),
+            "as a warning, not a failure: " .. warning)
+
+        -- And the boot carried on past it: Phase 2 started after the
+        -- warning and finished, with no recovery anywhere.
+        local warned = log:find("loopback interface lo bring-up failed", 1, true)
+        local phase2 = log:find("peinit: phase2 boot starting", 1, true)
+        t:assert(phase2 and warned < phase2, "Phase 2 began after the warning")
+        t:assert(log:find("peinit: phase2 boot complete", 1, true), "and completed")
+        t:assert(not log:find("entering recovery", 1, true), "no recovery was entered")
+    end)
+
+-- The rest of Phase 1's failure paths need a syscall inside PID 1 to fail in
+-- a way nothing a test stages can arrange. Each is proved by a unit test in
+-- peinit that drives the step through its syscall seam; these stubs are how
+-- the anchors are cited.
+
+-- Companion: init::tests::orchestrator::machine_id_failure_enters_recovery_before_registryd_start
+-- proves that any error out of ensure_machine_id enters recovery (MachineId).
+test("a CSPRNG failure while generating the machine ID is recovery",
+    {
+        spec = "peinit *phase1.a-csprng-failure-is-recovery",
+        covered_by = "cargo:peinit2 boundary::linux_machine_id::tests::a_csprng_failure_is_still_fatal",
+        skip = "getrandom(2) cannot be made to fail for PID 1 from a guest; runs under cargo test -p peinit2 --all-features --lib boundary::linux_machine_id::tests::a_csprng_failure_is_still_fatal",
+    },
+    function(t) end)
+
+test("failing to stamp a fresh mount with its descriptor is recovery",
+    {
+        spec = "peinit *phase1.a-failed-seed-is-recovery",
+        covered_by = "cargo:peinit2 init::linux::mounts::tests::surfaces_seed_failure_as_recovery_error",
+        skip = "kacs_set_sd on a tmpfs or cgroup2 root peinit has only just mounted cannot be made to fail by anything staged or on the command line; runs under cargo test -p peinit2 --all-features --lib init::linux::mounts::tests::surfaces_seed_failure_as_recovery_error",
+    },
+    function(t) end)
+
+test("a seed that cannot be credited is still mixed in, and the failure recorded",
+    {
+        spec = "peinit *phase1.a-seed-that-cannot-be-credited-is-still-mixed",
+        covered_by = "cargo:peinit2 boundary::linux_random_seed::tests::credit_failure_mixes_without_credit_and_reports_warning_status",
+        skip = "RNDADDENTROPY succeeds for PID 1's SYSTEM token on any seed a test can stage, and /dev is devtmpfs so no staged node can stand in for the RNG; runs under cargo test -p peinit2 --all-features --lib boundary::linux_random_seed::tests::credit_failure_mixes_without_credit_and_reports_warning_status",
+    },
+    function(t) end)
+
+test("a mountinfo read that fails ENOENT or ENOTDIR mounts /proc and reads again",
+    {
+        spec = "peinit *phase1.mountinfo-enoent-retries-after-mounting-proc",
+        covered_by = "cargo:peinit2 init::linux::mounts::tests::mountinfo_enoent_or_enotdir_mounts_proc_and_reads_again",
+        skip = "prelude always mount-moves /proc into the root before exec'ing peinit, so PID 1 never starts without it; runs under cargo test -p peinit2 --all-features --lib init::linux::mounts::tests::mountinfo_enoent_or_enotdir_mounts_proc_and_reads_again",
+    },
+    function(t) end)
+
+test("any other failure to read or parse mountinfo is recovery",
+    {
+        spec = "peinit *phase1.unreadable-mountinfo-is-recovery",
+        covered_by = "cargo:peinit2 init::linux::mounts::tests::an_unreadable_or_unparseable_mountinfo_is_a_recovery_error",
+        skip = "/proc/self/mountinfo is generated by the kernel and no guest lever makes it unreadable or malformed for PID 1; runs under cargo test -p peinit2 --all-features --lib init::linux::mounts::tests::an_unreadable_or_unparseable_mountinfo_is_a_recovery_error",
+    },
+    function(t) end)

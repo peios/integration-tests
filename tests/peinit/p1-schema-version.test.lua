@@ -76,3 +76,65 @@ test("a SchemaVersion that is not a REG_DWORD fails the probe and sends peinit t
         t:assert(not log:find("peinit: phase2 boot complete", 1, true),
             "with no Phase 2")
     end)
+
+-- The guard's passing half for an absent value. peinit ensures the value
+-- exists and then reads it back, so an absent value at the read means the
+-- ensure's write did not take effect — and the way a real registry produces
+-- exactly that is a layer. LCS resolves each value to its highest-precedence
+-- entry, a tombstone in a layer above the base masks whatever the base
+-- holds, and peinit's ensure writes to the base: it finds the value absent,
+-- writes it, and reads it back absent again. The fixture is a hive carrying
+-- such a layer, built the same way as the one above.
+local masked
+
+test("a hive whose SchemaVersion is masked by a higher-precedence layer (the fixture for the test below)",
+    function(t)
+        local vm = peinit.boot({ name = "schema-mask-capture" })
+        -- The layer table lives in the registry, under this key, which a
+        -- fresh image does not have yet.
+        vm:run([[reg new 'Machine\System\Registry']]):assert_ok()
+        vm:run([[reg new 'Machine\System\Registry\Layers']]):assert_ok()
+        -- Precedence 1, above the base layer's 0, so its tombstone wins.
+        vm:run("reg layer new pt-schema-mask --precedence 1"):assert_ok()
+        vm:run([[reg mask 'Machine\System\Services' SchemaVersion --layer pt-schema-mask]])
+            :assert_ok()
+        local check = vm:run([[reg get 'Machine\System\Services' SchemaVersion]])
+        t:assert(check.exit_code ~= 0,
+            "the value now reads as absent: " .. check.stdout .. check.stderr)
+
+        masked = {
+            [HIVE] = vm:read_file("/var/state/loregd/Machine.hive"),
+            [WAL] = vm:read_file("/var/state/loregd/Machine.hive-wal"),
+        }
+        t:assert(#masked[HIVE] > 0 and #masked[WAL] > 0,
+            "loregd's storage was captured (" .. #masked[HIVE] .. " + " ..
+                #masked[WAL] .. " bytes)")
+    end)
+
+test("a SchemaVersion that is absent at the probe reads as zero and passes",
+    { spec = "peinit *phase1.an-absent-schema-version-passes" },
+    function(t)
+        t:assert(masked, "the fixture boot produced a hive")
+        -- An ordinary boot, not a recovery: the probe found nothing, read
+        -- that as schema version 0, and let Phase 1 go on.
+        local vm = peinit.boot({ name = "schema-masked", files = masked })
+        local log = vm:console():read_log()
+        t:assert(log:find("peinit: phase1 registryd started", 1, true),
+            "registryd passed readiness and the probe: " .. log:sub(-1200))
+        t:assert(not log:find("entering recovery", 1, true),
+            "the absent value did not send the boot to recovery")
+        t:assert(log:find("peinit: phase2 boot complete", 1, true),
+            "and the boot went on through Phase 2")
+
+        -- What the probe read is what the registry still says: the layer
+        -- came through with the hive, and SchemaVersion is absent from the
+        -- effective view — so the ensure's write did not take effect where
+        -- the read looks, which is the case the rule is for.
+        local layers = vm:run("reg layer ls")
+        layers:assert_ok()
+        t:assert(layers.stdout:find("pt-schema-mask", 1, true),
+            "the masking layer is loaded in this boot: " .. layers.stdout)
+        local read = vm:run([[reg get 'Machine\System\Services' SchemaVersion]])
+        t:assert(read.exit_code ~= 0,
+            "SchemaVersion is absent: " .. read.stdout .. read.stderr)
+    end)

@@ -19,7 +19,17 @@
 local peinit = require("helpers.peinit")
 peinit.claim(1)
 
-local vm = peinit.boot()
+-- One staged autorun, for the mount-table claim at the end of the file:
+-- autoruns are Phase 1 step 7, after every mount Phase 1 makes, so this
+-- is PID 1's mount table as Phase 1 left it. /run is one of those mounts.
+local vm = peinit.boot({
+    files = {
+        ["lcl/policy/autorun.d/20-pt-mounts.sh"] = {
+            "#!/bin/sh\ncat /proc/self/mountinfo > /run/pt-phase1-mountinfo\n",
+            exec = true,
+        },
+    },
+})
 
 --- One field out of a /proc/N/status file, as a string.
 local function proc_status(pid, field)
@@ -239,4 +249,111 @@ test("LimitNOFILE reaches the process, and nothing else is limited",
             t:assert_eq(max.stdout:match("%S+"), "max",
                 "peinit set no memory ceiling on the service's cgroup")
         end
+    end)
+
+--- Write `keys` into the registry as one atomic `reg apply` batch, so a
+--- watch-triggered reload never sees a definition half written.
+local function apply(keys, name)
+    local file = "/tmp/pt-" .. name .. ".json"
+    vm:run("cat > " .. file .. " <<'PT_JSON_EOF'\n" .. peinit.encode_json({ keys = keys })
+        .. "\nPT_JSON_EOF"):assert_ok()
+    vm:run("reg apply " .. file):assert_ok()
+end
+
+test("the registry is read at boot and on an explicit reload, and at no other time",
+    {
+        spec = "peinit *intro.the-registry-is-read-at-boot-and-on-reload",
+        -- PEI-1084: §1.1 says peinit reads the registry synchronously
+        -- only at boot and on an explicit reload,
+        -- but every drained registry watch event runs the same full,
+        -- synchronous reload (runtime/turn/registry_watch.rs, and §10.4
+        -- says so), so a definition written with no reload is read anyway.
+        tags = { "known-bug" },
+    },
+    function(t)
+        -- The boot's read is every other test in this file. What is left
+        -- is the claim's other edge: between boot and an explicit reload,
+        -- nothing is read. A whole definition, written with no reload
+        -- asked for, is the probe.
+        apply({
+            { path = [[Machine\System\Services\pt-intro-unannounced]], values = {
+                { name = "ImagePath", type = "sz", data = "/bin/true" },
+                { name = "Type", type = "dword", data = 1 },
+                { name = "Identity", type = "sz", data = "SYSTEM" },
+            } },
+        }, "intro-unannounced")
+        vm:clock():sleep("3s")
+        local before = vm:run("svctl --json status pt-intro-unannounced")
+        local unknown_before = before.stdout:find("UNKNOWN_SERVICE", 1, true) ~= nil
+
+        -- An explicit reload reads it — the half of the claim that holds,
+        -- checked first so that the failure below is about the other half.
+        vm:run("svctl reload-config"):assert_ok()
+        local after = vm:run("svctl --json status pt-intro-unannounced")
+        after:assert_ok()
+        t:assert(after.stdout:find('"service":"pt-intro-unannounced"', 1, true),
+            "an explicit reload read the new definition: " .. after.stdout)
+
+        t:assert(unknown_before,
+            "and before the reload peinit had not read it, three seconds after it was written: "
+            .. before.stdout .. before.stderr)
+    end)
+
+test("peinit mounts nothing after Phase 1",
+    { spec = "peinit *intro.no-mounting-beyond-phase-1" },
+    function(t)
+        -- No mount feature beyond the fixed Phase 1 set means PID 1's
+        -- mount table, as Phase 1 left it, is the mount table: nothing
+        -- peinit does afterwards adds to it. This test runs last and
+        -- exercises what a running peinit does — a service with a runtime
+        -- directory started, restarted and stopped, a submitted job, a
+        -- configuration reload — on top of everything the tests above did,
+        -- and then compares.
+        local function mounts(text)
+            local set, count = {}, 0
+            for line in text:gmatch("[^\r\n]+") do
+                local id, point = line:match("^(%d+) %d+ %S+ %S+ (%S+) ")
+                if id then
+                    set[id .. " " .. point] = true
+                    count = count + 1
+                end
+            end
+            return set, count
+        end
+        local phase1, phase1_count = mounts(vm:read_file("/run/pt-phase1-mountinfo"))
+        t:assert(phase1_count > 0, "the autorun recorded Phase 1's mount table")
+        for _, point in ipairs({ "/dev/pts", "/dev/shm", "/run", "/sys/fs/cgroup" }) do
+            local present = false
+            for entry in pairs(phase1) do
+                if entry:match(" (.*)$") == point then present = true end
+            end
+            t:assert(present, "Phase 1's own " .. point .. " is in it")
+        end
+
+        apply({
+            { path = [[Machine\System\Services\pt-intro-mounts]], values = {
+                { name = "ImagePath", type = "sz", data = "/bin/sleep" },
+                { name = "Arguments", type = "multi", data = { "100000" } },
+                { name = "Identity", type = "sz", data = "SYSTEM" },
+                { name = "Readiness", type = "dword", data = 1 },
+                { name = "RuntimeDirectories", type = "multi", data = { "pt-intro-mounts" } },
+                { name = "Conditions", type = "multi", data = { "directory:/run" } },
+            } },
+        }, "intro-mounts")
+        vm:run("svctl reload-config"):assert_ok()
+        vm:run("svctl start pt-intro-mounts"):assert_ok()
+        vm:run("svctl restart pt-intro-mounts"):assert_ok()
+        vm:run("svctl stop pt-intro-mounts"):assert_ok()
+        vm:run("svctl --json job submit /bin/true"):assert_ok()
+        vm:run("svctl reload-config"):assert_ok()
+        vm:clock():sleep("2s")
+
+        local now, now_count = mounts(vm:read_file("/proc/1/mountinfo"))
+        for entry in pairs(now) do
+            t:assert(phase1[entry], "a mount appeared after Phase 1: " .. entry)
+        end
+        for entry in pairs(phase1) do
+            t:assert(now[entry], "a Phase 1 mount went away: " .. entry)
+        end
+        t:assert_eq(now_count, phase1_count, "PID 1's mount table is the one Phase 1 left")
     end)

@@ -117,3 +117,18 @@ test("a pre-increment counter at the threshold sends the boot to recovery",
         t:assert(log:find("Recovery mode", 1, true),
             "three prior attempts reached the default threshold: " .. log:sub(-400))
     end)
+
+-- A counter that is present and readable but cannot be *written* — a full
+-- disk — is treated as a counter of zero, and the boot continues. Reaching
+-- it needs the write to fail while the read succeeds, which the profile has
+-- no lever for: the counter lives on a tmpfs upper that is half of RAM, and
+-- nothing a test stages makes one file writable to read and not to write.
+-- The unit test drives the increment through its file boundary with a
+-- failing write and checks the boot goes on with the counter treated as 0.
+test("a boot-attempt write failure is read as a counter of zero and the boot continues",
+    {
+        spec = "peinit *attempts.a-write-failure-reads-as-zero",
+        covered_by = "cargo:peinit2 init::tests::orchestrator::boot_attempt_increment_failure_treats_counter_as_zero_and_continues",
+        skip = "the counter's file is on a SYSTEM-writable tmpfs half the size of RAM, and no staged state makes it readable but unwritable for PID 1; runs under cargo test -p peinit2 --all-features --lib init::tests::orchestrator::boot_attempt_increment_failure_treats_counter_as_zero_and_continues",
+    },
+    function(t) end)
