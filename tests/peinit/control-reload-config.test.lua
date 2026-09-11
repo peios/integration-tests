@@ -26,15 +26,28 @@ local function resident(name, argument)
     }
 end
 
-local function boot(name)
-    return peinit.boot({
-        name = name,
-        files = peinit.seed("pt-reload", {
-            { path = [[Machine\System]] },
-            { path = [[Machine\System\Services]] },
-            resident("pt-resident"),
-        }),
-    })
+--- Boot with pt-resident, plus any `extra.keys` in the seed and any
+--- `extra.files` (a staged guest tool, say) alongside it.
+local function boot(name, extra)
+    extra = extra or {}
+    local keys = {
+        { path = [[Machine\System]] },
+        { path = [[Machine\System\Services]] },
+        resident("pt-resident"),
+    }
+    for _, key in ipairs(extra.keys or {}) do keys[#keys + 1] = key end
+    local files = peinit.seed("pt-reload", keys)
+    if extra.files then files = peinit.merge(files, extra.files) end
+    return peinit.boot({ name = name, files = files })
+end
+
+--- Write `keys` in one `reg apply` transaction, so peinit's registry
+--- watch sees a single change rather than a key assembled in steps.
+local function apply(vm, keys, name)
+    local file = "/tmp/pt-" .. (name or "apply") .. ".json"
+    vm:run("cat > " .. file .. " <<'PT_JSON_EOF'\n" .. peinit.encode_json({ keys = keys })
+        .. "\nPT_JSON_EOF"):assert_ok()
+    vm:run("reg apply " .. file):assert_ok()
 end
 
 --- The main process's PID for `service`, or nil.
@@ -262,4 +275,251 @@ test("a registry definition for registryd is merged onto it rather than restarti
         list:assert_ok()
         local count = select(2, list.stdout:gsub('"service":"registryd"', ""))
         t:assert_eq(count, 1, "there is exactly one registryd in the list")
+    end)
+
+local SERVICES = [[Machine\System\Services]]
+
+--- The value of `field` in a `svctl --json status` answer, or nil.
+local function status_field(vm, service, field)
+    return vm:run("svctl --json status " .. service).stdout:match('"' .. field .. '":"([^"]*)"')
+end
+
+--- One transaction carrying three changes a reload will read in turn: a
+--- new service, a new description on the running one, and a definition
+--- whose StartTimeout is a string where a number belongs. The first two
+--- are perfectly good; the third will not decode.
+local function plant_undecodable(vm)
+    apply(vm, {
+            { path = SERVICES .. [[\pt-fresh]], values = {
+                { name = "ImagePath", type = "sz", data = "/bin/true" },
+                { name = "Identity", type = "sz", data = "SYSTEM" },
+                { name = "Type", type = "dword", data = 1 },
+                { name = "Readiness", type = "dword", data = 1 },
+            } },
+            { path = SERVICES .. [[\pt-resident]], values = {
+                { name = "Description", type = "sz", data = "rewritten by the reload" },
+            } },
+            { path = SERVICES .. [[\pt-broken]], values = {
+                { name = "ImagePath", type = "sz", data = "/bin/true" },
+                { name = "Identity", type = "sz", data = "SYSTEM" },
+                { name = "StartTimeout", type = "sz", data = "soon" },
+            } },
+        }, "undecodable")
+end
+
+test("an undecodable key fails the whole reload, and nothing read alongside it is applied",
+    { spec = "peinit *control.reload-config.reads-precede-every-mutation" },
+    function(t)
+        local vm = boot("reload-undecodable")
+        -- If peinit mutated anything before it had read everything, one
+        -- of the two good changes would have landed by the time the third
+        -- refused to decode.
+        plant_undecodable(vm)
+
+        local reload = vm:run("svctl --json reload-config")
+        t:assert(reload.exit_code ~= 0, "the reload was refused: " .. reload.stdout)
+
+        -- Nothing the reload read was applied: the new service does not
+        -- exist and the running one kept its description.
+        t:assert(vm:run("svctl --json status pt-fresh").stdout:find("UNKNOWN_SERVICE", 1, true),
+            "the good new definition read alongside it was not admitted")
+        t:assert(not vm:run("svctl --json status pt-resident").stdout
+                :find("rewritten by the reload", 1, true),
+            "and the good change to the running service was not applied either")
+
+        -- Every reload fails the same way until the key is repaired —
+        -- including this second explicit one, so no other configuration
+        -- change can take effect in the meantime.
+        local again = vm:run("svctl --json reload-config")
+        t:assert(again.exit_code ~= 0, "a second reload fails the same way: " .. again.stdout)
+
+        -- Repaired by removal, the same reload admits everything else it
+        -- was holding back — which is what shows the two good changes
+        -- were refused for the bad key's sake and not their own.
+        vm:run("reg del '" .. SERVICES .. [[\pt-broken' --recursive]]):assert_ok()
+        local repaired = wait_until(function()
+            local r = vm:run("svctl --json reload-config")
+            if r.exit_code == 0 then return r end
+        end, { timeout = 30, desc = "a reload to succeed once the key is gone" })
+        t:assert(repaired, "the reload succeeds once the key is gone")
+        t:assert(not vm:run("svctl --json status pt-fresh").stdout:find("UNKNOWN_SERVICE", 1, true),
+            "the new service is admitted now")
+        t:assert_eq(status_field(vm, "pt-resident", "description"), "rewritten by the reload",
+            "and so is the new description")
+    end)
+
+test("a reload refused for an undecodable key names the key and what was wrong",
+    {
+        spec = "peinit *control.reload-config.an-undecodable-definition-aborts-the-reload",
+        -- PEI-1075. The refusal holds (the test above), the naming does
+        -- not: `reload_config_error_response`
+        -- (src/supervisor/control_command/error.rs) keeps a validation
+        -- failure's findings but renders a registry read failure — where
+        -- a decode error lands — as the generic
+        -- {"code":"INTERNAL_ERROR","message":"control request failed"},
+        -- discarding the error it was given.
+        tags = { "known-bug" },
+    },
+    function(t)
+        local vm = boot("reload-undecodable-named")
+        plant_undecodable(vm)
+
+        -- Every reload fails on this key until it is repaired, including
+        -- the ones a registry change triggers, so the answer is the only
+        -- place an operator learns which key to repair.
+        local reload = vm:run("svctl --json reload-config")
+        t:assert(reload.exit_code ~= 0, "the reload was refused: " .. reload.stdout)
+        t:assert(reload.stdout:find("pt%-broken"),
+            "naming the service that would not decode: " .. reload.stdout)
+        t:assert(reload.stdout:find("StartTimeout", 1, true),
+            "and what was wrong with it: " .. reload.stdout)
+    end)
+
+--- Every target PID 1 holds a descriptor on, from /proc/1/fd.
+local function pid1_targets(vm)
+    local out = {}
+    for line in vm:run("ls -l /proc/1/fd 2>/dev/null").stdout:gmatch("[^\r\n]+") do
+        local target = line:match("%->%s+(.*)$")
+        if target then out[#out + 1] = (target:gsub("%s+$", "")) end
+    end
+    return out
+end
+
+--- How many of PID 1's descriptors point at `path`. Counting one file's
+--- descriptors rather than PID 1's total is what makes this immune to
+--- everything else PID 1 opens and closes meanwhile.
+local function held(vm, path)
+    local count = 0
+    for _, target in ipairs(pid1_targets(vm)) do
+        if target == path or target == path .. " (deleted)" then count = count + 1 end
+    end
+    return count
+end
+
+test("a reload prunes the fd store of a service that no longer exists",
+    { spec = "peinit *control.reload-config.prunes-fd-stores-of-vanished-services" },
+    function(t)
+        -- Which store can outlive its service's definition? Not one whose
+        -- service was stopped: an explicit stop clears the store (§10.6,
+        -- `fdstore.an-explicit-stop-clears-the-store`). The store survives
+        -- only an automatic restart. So the service here stores a
+        -- descriptor and then crashes, and its restart policy holds it in
+        -- Backoff for thirty seconds with nothing running — the store kept
+        -- for a restart that is coming. Removing the definition in that
+        -- window leaves a store whose service no longer exists, and that
+        -- is what the reload has to prune.
+        local MARKER = "/run/pt-keep.marker"
+        local vm = boot("reload-prune", {
+            files = peinit.tool("pt-notify"),
+            keys = { { path = SERVICES .. [[\pt-keep]], values = {
+                { name = "ImagePath", type = "sz", data = "/usr/bin/pt-notify" },
+                { name = "Arguments", type = "multi", data = {
+                    -- sleep 1 first: the first datagram after exec is
+                    -- refused, before peinit has recorded the main job.
+                    "--log", "/run/pt-keep.log", "sleep", "1",
+                    "send-fd", MARKER, "FDSTORE=1\\nFDNAME=kept",
+                    "write", "/run/pt-keep.done", "ok", "sleep", "1",
+                    "exit", "1",
+                } },
+                { name = "Identity", type = "sz", data = "SYSTEM" },
+                { name = "Readiness", type = "dword", data = 1 },
+                { name = "RestartPolicy", type = "dword", data = 1 },
+                { name = "RestartDelay", type = "dword", data = 30 },
+                { name = "FdStoreMax", type = "dword", data = 4 },
+            } } },
+        })
+        vm:run("echo kept > " .. MARKER):assert_ok()
+        vm:run("svctl --json --no-wait start pt-keep"):assert_ok()
+        wait_until(function() return vm:run("test -f /run/pt-keep.done"):ok() or nil end,
+            { timeout = 60, interval = 0.2, desc = "pt-keep to store its descriptor" })
+
+        wait_until(function()
+            return vm:run("svctl --json status pt-keep").stdout:find('"state":"backoff"', 1, true)
+        end, { timeout = 20, desc = "pt-keep to crash into Backoff" })
+        t:assert_eq(held(vm, MARKER), 1,
+            "the store is kept through the crash, for the restart Backoff is waiting to make")
+
+        -- Remove the definition while nothing is running, which §3.8
+        -- discards outright, and reload.
+        vm:run("reg del '" .. SERVICES .. [[\pt-keep' --recursive]]):assert_ok()
+        wait_until(function()
+            return vm:run("svctl --json status pt-keep").stdout:find("UNKNOWN_SERVICE", 1, true)
+        end, { timeout = 30, desc = "the definition's removal to be reloaded" })
+        local pruned = wait_until(function() return held(vm, MARKER) == 0 or nil end,
+            { timeout = 10, interval = 0.3, desc = "the store to be pruned" })
+        t:assert(pruned, "the reload that forgot the service closed its stored descriptor")
+    end)
+
+test("a reload refreshes the socket limits, the global environment and the control descriptor",
+    { spec = "peinit *control.reload-config.refreshes-more-than-definitions" },
+    function(t)
+        -- The sentence lists six things a reload refreshes besides
+        -- definitions. Three are observable from a running guest and are
+        -- asserted here: a control socket limit, the global environment
+        -- layer, and the control descriptor. The shutdown settings are
+        -- only observable during a shutdown, and the log configuration
+        -- and eventd socket path only through eventd's own plumbing;
+        -- none of the three is exercised. One reload moving three
+        -- unrelated settings is what "more than definitions" claims.
+        local vm = boot("reload-refresh", {
+            files = peinit.tool("pt-ctl"),
+            keys = {
+                { path = [[Machine\System\Init]] },
+                { path = [[Machine\System\Init\EnvVars]] },
+                { path = SERVICES .. [[\pt-envprobe]], values = {
+                    { name = "ImagePath", type = "sz", data = "/bin/sh" },
+                    { name = "Arguments", type = "multi", data = {
+                        "-c", 'echo "v=$PT_RELOAD_ENV" > /run/pt-envprobe.out' } },
+                    { name = "Type", type = "dword", data = 1 },
+                    { name = "Identity", type = "sz", data = "SYSTEM" },
+                    { name = "Readiness", type = "dword", data = 1 },
+                    { name = "RestartPolicy", type = "dword", data = 0 },
+                } },
+            },
+        })
+
+        --- One frame of `bytes` bytes on a fresh control connection.
+        local function frame_answer(bytes)
+            local frame = '{"command":"status","service":"pt-resident","pad":"'
+                .. string.rep("A", bytes) .. '"}'
+            vm:run("pt-ctl --log /run/pt-ctl-frame.log '" .. frame .. "'", { timeout = 30 })
+            return tostring(vm:read_file("/run/pt-ctl-frame.log"))
+        end
+
+        local function probe_env()
+            vm:run("svctl --json start pt-envprobe", { timeout = 60 }):assert_ok()
+            return tostring(vm:read_file("/run/pt-envprobe.out")):gsub("%s+$", "")
+        end
+
+        -- Before: the default MaxRequestSize (64 KiB) takes a 5 KiB frame,
+        -- and the global environment says nothing about PT_RELOAD_ENV.
+        t:assert(frame_answer(5000):find('"status":"ok"', 1, true),
+            "a 5 KiB frame is served under the default bound")
+        t:assert_eq(probe_env(), "v=", "and a service starts with no PT_RELOAD_ENV")
+
+        apply(vm, {
+            { path = [[Machine\System\Init]], values = {
+                { name = "MaxRequestSize", type = "dword", data = 4096 },
+            } },
+            { path = [[Machine\System\Init\EnvVars]], values = {
+                { name = "PT_RELOAD_ENV", type = "sz", data = "after" },
+            } },
+        }, "refresh")
+        vm:run("svctl --json reload-config"):assert_ok()
+
+        t:assert(frame_answer(5000):find("REQUEST_TOO_LARGE", 1, true),
+            "after the reload the same frame is past the new 4 KiB bound")
+        t:assert_eq(probe_env(), "v=after",
+            "and the next start sees the global environment the reload read")
+
+        -- Last, because it takes reload-config away: a control descriptor
+        -- granting SYSTEM shutdown alone. The registry watch's own reload
+        -- is what applies it, and the next explicit reload is refused.
+        vm:run("reg set 'Machine\\System\\Init' ControlSecurity hex:"
+            .. peinit.system_descriptor_hex(0x0001)):assert_ok()
+        local refused = wait_until(function()
+            local r = vm:run("svctl --json reload-config")
+            if r.stdout:find("ACCESS_DENIED", 1, true) then return r end
+        end, { timeout = 30, desc = "the control descriptor to be refreshed" })
+        t:assert(refused, "the reload refreshed the control descriptor, which now refuses reload-config")
     end)
