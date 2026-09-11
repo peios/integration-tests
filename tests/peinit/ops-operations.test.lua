@@ -24,6 +24,22 @@ local peinit = require("helpers.peinit")
 -- nothing here needs a boot to itself.
 peinit.claim(1)
 
+--- Ignores SIGTERM like pt-stubborn, but is killed after eight seconds:
+--- a stop leg long enough to withdraw its definition during, and short
+--- enough to wait out. Each is used up by the test that withdraws it.
+local function withdrawable(name)
+    return { path = [[Machine\System\Services\]] .. name, values = {
+        { name = "ImagePath", type = "sz", data = "/bin/sh" },
+        { name = "Arguments", type = "multi",
+          data = { "-c", "trap '' TERM; while :; do sleep 1; done" } },
+        { name = "Identity", type = "sz", data = "SYSTEM" },
+        { name = "Readiness", type = "dword", data = 1 },
+        { name = "StopTimeout", type = "dword", data = 8 },
+        { name = "RestartPolicy", type = "dword", data = 0 },
+        { name = "Triggers", type = "multi", data = { "boot" } },
+    } }
+end
+
 local function definitions()
     return {
         { path = [[Machine\System]] },
@@ -78,6 +94,8 @@ local function definitions()
             { name = "RestartPolicy", type = "dword", data = 0 },
             { name = "Triggers", type = "multi", data = { "boot" } },
         } },
+        withdrawable("pt-withdrawn"),
+        withdrawable("pt-withdrawn2"),
     }
 end
 
@@ -381,4 +399,63 @@ test("a terminal operation is dropped after its sixty-second grace period",
         local gone = operation(id)
         t:assert_eq(gone.code, "UNKNOWN_OPERATION",
             "the operation is no longer held: " .. gone.raw)
+    end)
+
+--- Restart `name`, and withdraw its definition once the stop leg is
+--- draining. Returns the restart's operation identifier.
+local function withdraw_mid_restart(t, name)
+    local restart = send("restart " .. name, true)
+    t:assert(restart.operation, "the restart was accepted: " .. restart.raw)
+    wait_until(function()
+        return vm:run("svctl --json status " .. name).stdout:find('"state":"stopping"', 1, true)
+    end, { timeout = 10, interval = 0.2, desc = name .. "'s stop leg to begin" })
+    -- The registry watch delivers the removal; nothing has to ask for a
+    -- reload.
+    vm:run("reg del 'Machine\\System\\Services\\" .. name .. "' --recursive"):assert_ok()
+    return restart.operation
+end
+
+test("a restart whose definition is withdrawn during its stop leg is aborted",
+    { spec = "peinit *op.a-restart-is-aborted-when-its-definition-is-withdrawn-mid-stop" },
+    function(t)
+        -- The second of the two roads to Aborted. The stop leg still
+        -- finishes — pt-withdrawn ignores SIGTERM and is killed at its
+        -- eight-second deadline — but by then there is no definition to
+        -- start, so the restart cannot complete and is aborted with a
+        -- reason of its own.
+        local id = withdraw_mid_restart(t, "pt-withdrawn")
+
+        -- Read from the event rather than operation-status: by the time
+        -- the restart is terminal its service has been discarded, and the
+        -- query checks a right on a service that no longer exists
+        -- (PEI-1076, and the test after this one).
+        local aborted = wait_until(function()
+            for _, event in ipairs(events({ "operation.aborted" })) do
+                if field(event, "operation_id") == id then return event end
+            end
+        end, { timeout = 40, interval = 1, desc = "the restart's operation.aborted event" })
+        t:assert_eq(field(aborted, "reason"), "definition_removed_during_restart_stop_leg",
+            "the restart was aborted because its definition went away during the stop leg: "
+            .. aborted.payload)
+        t:assert(vm:run("svctl --json status pt-withdrawn").stdout:find("UNKNOWN_SERVICE", 1, true),
+            "and nothing was started in its place")
+    end)
+
+test("a retained operation stays queryable after its service is discarded",
+    {
+        spec = "peinit *op.a-terminal-operation-is-dropped-after-sixty-seconds",
+        -- PEI-1076. A terminal operation is kept sixty seconds "long enough
+        -- for a polling client to collect the result", but operation-status
+        -- checks SERVICE_QUERY_STATUS on the target service, and a discarded
+        -- service has no descriptor to check: the answer is UNKNOWN_SERVICE
+        -- for an operation peinit still holds.
+        tags = { "known-bug" },
+    },
+    function(t)
+        local id = withdraw_mid_restart(t, "pt-withdrawn2")
+        local view = wait_until(function()
+            local v = operation(id)
+            if v.state ~= "pending" and v.state ~= "running" then return v end
+        end, { timeout = 40, interval = 1, desc = "the aborted restart to be readable" })
+        t:assert_eq(view.state, "aborted", "the aborted restart can be read back: " .. view.raw)
     end)
