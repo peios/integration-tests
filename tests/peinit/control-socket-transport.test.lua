@@ -45,6 +45,8 @@ local vm = peinit.boot({
     name = "control-transport",
     files = peinit.merge(
         peinit.tool("pt-ctl"),
+        peinit.tool("pt-jobs"),
+        peinit.tool("pt-sockinfo"),
         peinit.seed("pt-control-transport", {
             { path = [[Machine\System]] },
             { path = [[Machine\System\Init]], values = {
@@ -321,4 +323,100 @@ test("peinit sets no mode bits on the sockets it creates",
                 path .. " carries bind's mode under PID 1's umask "
                 .. string.format("%03o", umask) .. ", and nothing peinit chose")
         end
+    end)
+
+-- ---- the listeners ------------------------------------------------------
+
+local O_NONBLOCK = 0x800       -- 04000
+local O_CLOEXEC = 0x80000      -- 02000000
+
+--- PID 1's descriptor number for the socket with this inode, or nil.
+local function pid1_fd_for_inode(inode)
+    for line in vm:run("ls -l /proc/1/fd 2>/dev/null").stdout:gmatch("[^\r\n]+") do
+        local fd, target = line:match("(%d+)%s+%->%s+socket:%[(%d+)%]")
+        if target == tostring(inode) then return fd end
+    end
+end
+
+--- The `flags:` of PID 1's descriptor `fd`, as a number. fdinfo prints
+--- them in octal, and folds the descriptor's close-on-exec in as
+--- O_CLOEXEC, so one read answers both halves of SOCK_CLOEXEC |
+--- SOCK_NONBLOCK.
+local function pid1_fd_flags(fd)
+    local info = tostring(vm:read_file("/proc/1/fdinfo/" .. fd))
+    return tonumber(info:match("flags:%s*(%d+)"), 8), info
+end
+
+--- What sock_diag says about the listener at each path, keyed by path.
+--- unix_diag is a module in this kernel; the first request loads it, and
+--- modprobe is the fallback if that autoload does not happen.
+local function listeners(paths)
+    local command = "pt-sockinfo " .. table.concat(paths, " ")
+    local r = vm:run(command)
+    if r.stdout:find("dump failed", 1, true) then
+        vm:run("modprobe unix_diag")
+        r = vm:run(command)
+    end
+    local out = { raw = r.stdout }
+    for path, rest in r.stdout:gmatch("socket path=(%S+) ([^\r\n]*)") do
+        out[path] = {
+            inode = tonumber(rest:match("inode=(%d+)")),
+            backlog = tonumber(rest:match("backlog=(%d+)")),
+        }
+    end
+    return out
+end
+
+test("both listeners are non-blocking and close-on-exec, with a backlog of 32",
+    {
+        spec = {
+            "peinit *control.the-listener-flags-and-backlog",
+            "peinit *jobs.the-listener-flags-and-backlog",
+        },
+    },
+    function(t)
+        -- Each anchor carries one clause no running guest can see. The
+        -- control socket is "unlinked when peinit drops it", which is PID
+        -- 1 ending. The jobs socket's "stale path is unlinked before the
+        -- bind" needs a file at that path before Phase 1, and /run is a
+        -- tmpfs peinit mounts itself, so nothing staged can be there
+        -- first. Everything else in the two sentences is asserted.
+        local JOBS_SOCKET = "/run/services/peinit/jobs.sock"
+        local found = listeners({ CONTROL_SOCKET, JOBS_SOCKET })
+        for _, path in ipairs({ CONTROL_SOCKET, JOBS_SOCKET }) do
+            local l = found[path]
+            t:assert(l and l.inode, path .. " is a listening socket sock_diag can see: " .. found.raw)
+            t:assert_eq(l.backlog, 32, path .. " listens with a backlog of 32")
+
+            local fd = pid1_fd_for_inode(l.inode)
+            t:assert(fd, path .. " is held by PID 1")
+            local flags, info = pid1_fd_flags(fd)
+            t:assert(flags and flags & O_NONBLOCK ~= 0,
+                path .. "'s listener is non-blocking: " .. info)
+            t:assert(flags & O_CLOEXEC ~= 0,
+                path .. "'s listener is close-on-exec: " .. info)
+        end
+
+        -- And a connection the jobs listener accepted carries the same
+        -- two flags, which is what accept4 "under the same flags" means.
+        -- A pending wait keeps the connection open while it is looked at.
+        local id = vm:run("svctl --json --no-wait job submit /bin/sleep 60")
+            .stdout:match('"id":"([^"]+)"')
+        t:assert(id, "a job to wait on")
+        vm:run("( pt-jobs --log /run/pt-jobs-flags.log '{\"command\":\"wait\",\"job_id\":\""
+            .. id .. "\"}' ) >/dev/null 2>&1 &")
+        local accepted = wait_until(function()
+            for line in tostring(vm:read_file("/proc/net/unix")):gmatch("[^\r\n]+") do
+                if line:find(JOBS_SOCKET, 1, true) then
+                    local inode = line:match("%s03%s+(%d+)%s")
+                    if inode then return tonumber(inode) end
+                end
+            end
+        end, { timeout = 20, desc = "the jobs listener to accept the waiting connection" })
+        local fd = pid1_fd_for_inode(accepted)
+        t:assert(fd, "PID 1 holds the accepted connection")
+        local flags, info = pid1_fd_flags(fd)
+        t:assert(flags & O_NONBLOCK ~= 0 and flags & O_CLOEXEC ~= 0,
+            "and accepted it non-blocking and close-on-exec: " .. info)
+        vm:run("svctl --json job stop " .. id, { timeout = 60 })
     end)
