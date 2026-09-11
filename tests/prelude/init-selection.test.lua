@@ -37,7 +37,7 @@ test("an init= that exists is exec'd, and the fallback chain is never reached",
             kernel_cmdline_append = "init=/bin/pt-alt-init",
             files = prelude.files({
                 hooks = { root = { body = prelude.root_hook("root",
-                    "cp -a /mnt/rootfs/bin/peinit2 /mnt/rootfs/bin/pt-alt-init") } },
+                    "cp -R --preserve=exec,timestamps /mnt/rootfs/bin/peinit2 /mnt/rootfs/bin/pt-alt-init") } },
             }),
         })
         local log = vm:console():read_log()
@@ -143,7 +143,7 @@ test("a candidate that is present but cannot be exec'd is reported and the next 
                 "rm -f /mnt/rootfs/bin/peinit2",
                 "cat /fixtures/rootfs/bin/peinit2 > /mnt/rootfs/bin/peinit2",
                 "mkdir -p /mnt/rootfs/sbin",
-                "cp -a /fixtures/rootfs/bin/peinit2 /mnt/rootfs/sbin/init",
+                "cp -R --preserve=exec,timestamps /fixtures/rootfs/bin/peinit2 /mnt/rootfs/sbin/init",
             }, "\n")) } },
         }) })
         local log = vm:console():read_log()

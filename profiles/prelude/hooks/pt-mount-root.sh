@@ -40,13 +40,23 @@ seed-sd /mnt/rootfs
 # The payload becomes the root. Its /bin/peinit2 is the provium agent,
 # which is what prelude execs at the handoff — so a test can ask the
 # agent what prelude left behind.
-cp -a /fixtures/rootfs/. /mnt/rootfs/
+#
+# `--preserve=exec,timestamps`, not `-a`. On Peios `-a` is
+# --preserve=all and "all" includes the security descriptor, which
+# peiosutils' cp reads through kacs_get_sd — and that read is refused with
+# EACCES on the initramfs payload, so `-a` failed every boot of this
+# profile once peiosutils was productionised. The files do not want their
+# initramfs descriptors anyway: they inherit from the seeded root they
+# land in. `exec` is the one attribute that must come across — under KACS
+# it is the intrinsic "this is executable" flag, and the agent at
+# /bin/peinit2 is useless without it.
+cp -R --preserve=exec,timestamps /fixtures/rootfs/. /mnt/rootfs/
 
-# And seed it again. `cp -a` preserves extended attributes, and the
-# security descriptor is one — so copying the payload in carries the
-# descriptor of the directory it came from over the top of the one
-# seeded above, leaving the new root with whatever /fixtures/rootfs
-# happened to inherit inside the initramfs rather than the template.
+# And seed it again. The `.` entry is the source directory itself, so the
+# copy applies that directory's preserved attributes to /mnt/rootfs; the
+# second stamp makes sure the new root ends up with the template whatever
+# the copy did to it — the descriptor no longer comes across, but this is
+# the step that guarantees it rather than an assumption about cp.
 #
 # Seeding twice rather than once after the copy, because the copy itself
 # needs a stamped destination: an unseeded tmpfs denies everything, so

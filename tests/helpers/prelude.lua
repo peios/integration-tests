@@ -259,7 +259,11 @@ function M.root_hook(name, after)
         "pt_gate " .. name,
         "mount -t tmpfs tmpfs /mnt/rootfs",
         "seed-sd /mnt/rootfs",
-        "cp -a /fixtures/rootfs/. /mnt/rootfs/",
+        -- Not `cp -a`: that preserves the security descriptor, which
+        -- peiosutils' cp reads through kacs_get_sd and is refused on the
+        -- initramfs payload. profiles/prelude/hooks/pt-mount-root.sh has
+        -- the whole story.
+        "cp -R --preserve=exec,timestamps /fixtures/rootfs/. /mnt/rootfs/",
         after or "",
         "pt_mark " .. name .. " outcome=satisfied",
         "exit 0",

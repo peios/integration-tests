@@ -67,7 +67,7 @@ set -eu
 pt_gate mount-root
 mount -t tmpfs tmpfs /mnt/rootfs
 seed-sd /mnt/rootfs
-cp -a /fixtures/rootfs/. /mnt/rootfs/
+cp -R --preserve=exec,timestamps /fixtures/rootfs/. /mnt/rootfs/
 pt_mark mount-root outcome=satisfied
 ]]
 

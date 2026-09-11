@@ -106,7 +106,7 @@ test("a /mnt/rootfs on the initramfs's own device is no root, however full a hoo
             "set -eu",
             ". /fixtures/pt-hook.sh",
             "pt_gate populate",
-            "cp -a /fixtures/rootfs/. /mnt/rootfs/",
+            "cp -R --preserve=exec,timestamps /fixtures/rootfs/. /mnt/rootfs/",
             'pt_mark populate init="$([ -x /mnt/rootfs/bin/peinit2 ] && echo present || echo absent)" \\',
             '    dev="$(stat -c %d /mnt/rootfs)" rootdev="$(stat -c %d /)"',
             "pt_mark populate outcome=satisfied",
