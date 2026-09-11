@@ -26,25 +26,7 @@ local function with_vm(opts, body)
     if not ok then error(err, 0) end
 end
 
-local function states(vm)
-    local out, any = {}, false
-    for name, state in vm:run("svctl --json list").stdout
-        :gmatch('"service":"([^"]+)","state":"([^"]+)"') do
-        out[name] = state
-        any = true
-    end
-    assert(any, "svctl list answered with no services")
-    return out
-end
-
-local function settle(vm)
-    wait_until(function()
-        for name, state in pairs(states(vm)) do
-            if state == "starting" and not name:find("^pt%-") then return false end
-        end
-        return true
-    end, { timeout = 60, interval = 0.5, desc = "the image's own services to settle" })
-end
+local settle = peinit.settle
 
 local function pause(seconds)
     pcall(wait_until, function() return false end,

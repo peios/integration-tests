@@ -41,18 +41,10 @@ local function states(vm)
     return out
 end
 
---- Wait until none of the image's own services is still Starting.
----
---- Deliberately blind to this suite's `pt-` services: one test here
---- wants one parked in Starting, and waiting for it would deadlock.
-local function settle(vm)
-    wait_until(function()
-        for name, state in pairs(states(vm)) do
-            if state == "starting" and not name:find("^pt%-") then return false end
-        end
-        return true
-    end, { timeout = 60, interval = 0.5, desc = "the image's own services to settle" })
-end
+-- Blind to this suite's `pt-` services, which matters here: one test
+-- wants one parked in Starting. See `helpers.peinit.settle` for why it
+-- waits on operations rather than on Starting.
+local settle = peinit.settle
 
 --- Wait `seconds` on the host, without asking the guest for anything.
 local function pause(seconds)

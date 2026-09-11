@@ -350,6 +350,42 @@ function M.system_descriptor_hex(mask)
         function(byte) return string.format("%02x", byte:byte()) end))
 end
 
+--- Wait until the boot has finished launching: no service of the
+--- image's own has an operation in flight.
+---
+--- Every shutdown test needs this before it triggers, because of
+--- PEI-826: a shutdown that lands while a service is still starting
+--- takes PID 1 to recovery. The shutdown files each used to settle by
+--- waiting for no image service to be in Starting — which misses a start
+--- still *queued*, whose service is Inactive with an operation behind it
+--- and becomes Starting a moment later. On an image with more services
+--- than the suite was written against, that window was hit about one run
+--- in three, and the test that tripped it failed waiting for a poweroff
+--- from a machine already in the recovery shell. An operation is what a
+--- queued start and a running one have in common, so that is what this
+--- waits on.
+---
+--- Blind to this suite's own `pt-` services by default: some tests park
+--- one in Starting on purpose, and waiting for it would deadlock.
+--- `{all = true}` waits on those too, for a file whose own services must
+--- also be past their boot start before it shuts down.
+function M.settle(vm, opts)
+    opts = opts or {}
+    wait_until(function()
+        local list = vm:run("svctl --json list").stdout
+        local any = false
+        for name in list:gmatch('"service":"([^"]+)"') do
+            any = true
+            if opts.all or not name:find("^pt%-") then
+                local status = vm:run("svctl --json status " .. name).stdout
+                if not status:find('"current_operation":null', 1, true) then return false end
+            end
+        end
+        return any
+    end, { timeout = opts.timeout or 90, interval = 0.5,
+           desc = "every image service's boot operation to finish" })
+end
+
 --- Whether an `svctl` result was a denial: `"denied"` or `"allowed"`.
 ---
 --- ACCESS_DENIED is peinit's answer to a failed check; any other answer

@@ -43,12 +43,9 @@ local function with_vm(opts, body)
     if not ok then error(err, 0) end
 end
 
---- Wait until nothing in the service table is still Starting.
-local function settle(vm)
-    wait_until(function()
-        return not vm:run("svctl --json list").stdout:find('"state":"starting"', 1, true)
-    end, { timeout = 60, interval = 0.5, desc = "the boot to settle" })
-end
+--- Wait until nothing in the service table has a boot operation in
+--- flight, this file's own services included.
+local function settle(vm) peinit.settle(vm, { all = true }) end
 
 --- Issue something that ends the machine. The guest may die mid-command,
 --- which is not a failure of the command.
