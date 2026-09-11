@@ -398,3 +398,33 @@ test("a trigger introduced by a configuration reload is armed like any other",
             { timeout = 30, interval = 0.5,
               desc = "the trigger added by the reload to fire" })
     end)
+
+-- The last-run write's forked-child mechanism and its failure handling
+-- are unit tests in the peinit crate, cited here. No guest can reach
+-- either: the write is done by a short-lived child of PID 1 that exits
+-- the instant the registry write returns, with no reliable surface a
+-- guest can observe; and making that write *fail* would need the
+-- registry write to be refused inside PID 1's own forked child, which a
+-- guest cannot arrange -- the child runs as SYSTEM with full registry
+-- access and registryd is up.
+
+test("the last-run write happens in a forked child",
+    {
+        spec = "peinit *evalt.the-last-run-write-happens-in-a-forked-child",
+        covered_by = "cargo:peinit2 registry::lcs::timer::tests::the_last_run_write_is_performed_in_a_forked_child",
+        skip = "the write is performed by a short-lived forked child of PID 1 with no " ..
+            "observable surface from a guest; runs under cargo test -p peinit2 --all-features " ..
+            "--lib registry::lcs::timer::tests::the_last_run_write_is_performed_in_a_forked_child",
+    },
+    function(t) end)
+
+test("a failed last-run write is reported and nothing is retried",
+    {
+        spec = "peinit *evalt.a-failed-last-run-write-is-reported-and-nothing-is-retried",
+        covered_by = "cargo:peinit2 runtime::linux::timer_last_run::tests::a_failed_write_is_reported_once_and_then_forgotten",
+        skip = "a failed write needs the registry write to fail inside PID 1's forked child, " ..
+            "which a guest cannot provoke (the child is SYSTEM and registryd is up); runs under " ..
+            "cargo test -p peinit2 --all-features --lib " ..
+            "runtime::linux::timer_last_run::tests::a_failed_write_is_reported_once_and_then_forgotten",
+    },
+    function(t) end)

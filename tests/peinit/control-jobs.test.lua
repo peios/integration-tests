@@ -145,6 +145,17 @@ test("a stop with wait is answered when the job is terminal, not when the stop i
             "with how it ended: " .. stopped.stdout)
     end)
 
+test("an answer that cannot be built is that connection's error and does not abort the flush",
+    {
+        spec = "peinit *jobs.an-unbuildable-answer-does-not-abort-the-flush",
+        covered_by = "cargo:peinit2 supervisor::tests::submitted::connection::an_unbuildable_answer_does_not_abort_the_flush_of_the_others",
+        skip = "a guest cannot have one job's record purged at the instant of the flush while " ..
+            "another wait is answerable, nor make PID 1 fail to duplicate a pidfd; runs under cargo " ..
+            "test -p peinit2 --all-features --lib " ..
+            "supervisor::tests::submitted::connection::an_unbuildable_answer_does_not_abort_the_flush_of_the_others",
+    },
+    function(t) end)
+
 test("a connection with a wait outstanding is not closed by JobsConnectionTimeout",
     { spec = "peinit *jobs.a-connection-with-a-pending-wait-is-never-idle" },
     function(t)

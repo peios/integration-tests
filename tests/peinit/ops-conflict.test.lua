@@ -124,6 +124,37 @@ local function definitions()
             { name = "RestartMaxRetries", type = "dword", data = 20 },
             { name = "Triggers", type = "multi", data = { "boot" } },
         } },
+        -- A binding pair: pt-cx-bound BindsTo pt-cx-anchor, with a zero
+        -- restart budget and no restart policy, so only the budget-exempt
+        -- recovery path can ever bring it back.
+        { path = [[Machine\System\Services\pt-cx-anchor]], values = {
+            { name = "ImagePath", type = "sz", data = "/bin/sleep" },
+            { name = "Arguments", type = "multi", data = { "100000" } },
+            { name = "Identity", type = "sz", data = "SYSTEM" },
+            { name = "Readiness", type = "dword", data = 1 },
+            { name = "RestartPolicy", type = "dword", data = 0 },
+            { name = "Triggers", type = "multi", data = { "boot" } },
+        } },
+        { path = [[Machine\System\Services\pt-cx-bound]], values = {
+            { name = "ImagePath", type = "sz", data = "/bin/sleep" },
+            { name = "Arguments", type = "multi", data = { "100000" } },
+            { name = "Identity", type = "sz", data = "SYSTEM" },
+            { name = "Readiness", type = "dword", data = 1 },
+            { name = "BindsTo", type = "multi", data = { "pt-cx-anchor" } },
+            { name = "RestartPolicy", type = "dword", data = 0 },
+            { name = "RestartMaxRetries", type = "dword", data = 0 },
+            { name = "Triggers", type = "multi", data = { "boot" } },
+        } },
+        -- A Oneshot fired by a seconds-granular timer, so a firing from
+        -- Inactive creates a start operation and labels it Timer.
+        { path = [[Machine\System\Services\pt-timerfire]], values = {
+            { name = "ImagePath", type = "sz", data = "/bin/true" },
+            { name = "Type", type = "dword", data = 1 },
+            { name = "Identity", type = "sz", data = "SYSTEM" },
+            { name = "Readiness", type = "dword", data = 1 },
+            { name = "Triggers", type = "multi", data = { "timer:*-*-* *:*:0/2" } },
+            { name = "TimerPersistent", type = "dword", data = 0 },
+        } },
     }
     for i = 1, 4 do
         keys[#keys + 1] = hangs("pt-hangs" .. i)
@@ -417,6 +448,79 @@ test("a restart-eligible failure creates a start with the RestartPolicy source",
             end
         end
         t:assert(found, "a restart-policy start was requested for the crashing service")
+    end)
+
+test("BindsToRecovery restarts are outside the restart budget",
+    { spec = "peinit *conflict.bindstorecovery-restarts-are-outside-the-restart-budget" },
+    function(t)
+        -- pt-cx-bound has RestartPolicy=Never and RestartMaxRetries=0: a
+        -- zero budget, and nothing in the policy that could authorise a
+        -- start. So the only path that can bring it back is BindsToRecovery,
+        -- and that it does come back is the claim -- the recovery start is
+        -- not subject to the budget it would otherwise have exhausted at
+        -- the first restart.
+        local function view(service)
+            local out = shared:run("svctl --json status " .. service).stdout
+            return {
+                state = out:match('"state":"([^"]+)"'),
+                cause = out:match('"cause":"([^"]+)"'),
+                job = out:match('"current_job":{"id":"([^"]+)"'),
+            }
+        end
+        local function await(service, state, desc)
+            return wait_until(function()
+                local v = view(service)
+                return v.state == state and v or nil
+            end, { timeout = 90, interval = 0.3, desc = desc })
+        end
+
+        await("pt-cx-anchor", "active", "the binding target to come up")
+        local before = await("pt-cx-bound", "active", "the bound service to come up").job
+
+        -- Stopping the target takes the bound service down with it.
+        shared:run("svctl stop pt-cx-anchor"):assert_ok()
+        local down = await("pt-cx-bound", "failed", "pt-cx-bound to follow the target down")
+        t:assert_eq(down.cause, "binds_to_propagation",
+            "it went down because its dependency did, not on its own account")
+
+        -- The target returns; the bound service recovers, budget or no.
+        shared:run("svctl start pt-cx-anchor"):assert_ok()
+        local recovered = wait_until(function()
+            local v = view("pt-cx-bound")
+            return v.state == "active" and v.job ~= before and v or nil
+        end, { timeout = 90, interval = 0.3, desc = "pt-cx-bound to be recovered" })
+        t:assert_eq(recovered.cause, "binds_to_recovery",
+            "a service with a zero budget was restarted anyway, by the recovery path")
+    end)
+
+test("a timer firing creates an operation from the current state, labelled Timer",
+    { spec = "peinit *conflict.a-timer-firing-creates-an-operation-from-the-current-state" },
+    function(t)
+        -- pt-timerfire is a Oneshot with nothing but a schedule, so the
+        -- only thing that can start it is a firing. From Inactive (and, as
+        -- a Oneshot, from Completed after each run) a firing creates a
+        -- start operation, and it carries `timer` as its source rather
+        -- than admin or boot. The state-by-state classification of the
+        -- rest of the table -- a Simple already running is a no-op, a
+        -- Oneshot mid-run sets one pending flag -- is exercised
+        -- behaviourally in timer-evaluation.test.lua; what this adds is
+        -- that the operation a firing does create is attributed to the
+        -- timer path.
+        local found = wait_until(function()
+            for _, event in ipairs(events(shared, { "operation.requested",
+                                                    "operation.started" })) do
+                if field(event, "service") == "pt-timerfire"
+                    and field(event, "source") == "timer" then
+                    return event
+                end
+            end
+        end, { timeout = 30, interval = 1,
+               desc = "a timer-sourced start operation for pt-timerfire" })
+
+        t:assert_eq(field(found, "type"), "start",
+            "the firing created a start operation: " .. found.payload)
+        t:assert_eq(field(found, "caller"), "nil",
+            "with no caller, because a timer is not a principal: " .. found.payload)
     end)
 
 test("the boot plan's starts carry the Boot source",

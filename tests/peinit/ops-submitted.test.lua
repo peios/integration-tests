@@ -18,8 +18,16 @@
 -- And `MaxJobsPerSubmitter` is seeded down to 2. The shipped default is
 -- 64, which a shell loop could reach but not cheaply, and the claim is
 -- about the bound rather than about its value.
+--
+-- The last two tests speak the jobs socket from a provium worker
+-- (helpers/peinit_client.lua) rather than through svctl: one attaches tokens
+-- svctl never would, and the other sends a record larger than any
+-- command line can carry.
 
 local peinit = require("helpers.peinit")
+local token = require("helpers.token")
+local us = require("helpers.unixsock")
+local f = require("helpers.peinit_client")
 -- One VM for the file: the quota probe runs once at boot and the rest
 -- is submissions, which need no boot of their own.
 peinit.claim(1)
@@ -57,6 +65,10 @@ local function definitions()
         { path = [[Machine\System]] },
         { path = [[Machine\System\Init]], values = {
             { name = "MaxJobsPerSubmitter", type = "dword", data = 2 },
+            -- Room for a definition past the 2 MiB argument bound, which
+            -- the default 64 KiB record limit would refuse as
+            -- REQUEST_TOO_LARGE before the definition was ever read.
+            { name = "MaxJobMessageSize", type = "dword", data = 4194304 },
         } },
         { path = [[Machine\System\Services]] },
         { path = [[Machine\System\Services\pt-quota]], values = {
@@ -609,3 +621,154 @@ test("job.status is emitted at most once per job per second, and the view stays 
 
         vm:run("svctl --json job stop " .. id, { timeout = 60 })
     end)
+
+test("an attached token below Impersonation level is refused with BAD_TOKEN",
+    { spec = "peinit *submit.a-token-below-impersonation-level-is-refused-with-bad-token" },
+    function(t)
+        -- svctl submits as the caller's own primary token and never
+        -- attaches one, so the worker does it: a token minted for a local
+        -- user at a chosen level, carried on the `submit` record as a
+        -- KACS_SCM_TOKEN. The worker is SYSTEM, holds
+        -- SeImpersonatePrivilege, and so passes the kernel's attach gate
+        -- for any level, and what reaches peinit is the token at the
+        -- level it was minted at.
+        local SUBMIT = '{"command":"submit","image_path":"/bin/true"}'
+        local user_sid = token.sid_string(token.SID.TEST_USER)
+
+        f.with_worker(vm, function(w)
+            local function submit_with(level)
+                local tok = assert(token.mint(w, {
+                    user_sid = token.SID.TEST_USER,
+                    token_type = token.TYPE.IMPERSONATION,
+                    impersonation_level = level,
+                }))
+                local fd, err = us.socket(w, us.AF_UNIX, us.SOCK.SEQPACKET)
+                assert(fd, "socket: " .. tostring(err))
+                assert(us.connect(w, fd, f.JOBS_SOCKET).ret == 0, "connect to the jobs socket")
+                local answer, why = f.jobs_request(w, fd, SUBMIT, tok)
+                w:syscall(3, fd); w:syscall(3, tok)
+                assert(answer, "no answer to the submit: " .. tostring(why))
+                return {
+                    raw = answer,
+                    code = answer:match('"code":"([^"]+)"'),
+                    identity = answer:match('"identity":"([^"]+)"'),
+                }
+            end
+
+            -- The control: at Impersonation the token is a job identity,
+            -- and the job runs as the user it names.
+            local acting = submit_with(token.LEVEL.IMPERSONATION)
+            t:assert(acting.raw:find('"status":"ok"', 1, true) and not acting.code,
+                "an Impersonation-level token is accepted: " .. acting.raw)
+            t:assert_eq(acting.identity, user_sid,
+                "and the job's identity is the user the token names: " .. acting.raw)
+
+            -- Below it, refused, and refused as a bad token rather than
+            -- for anything about who the token names — which is the same
+            -- user as the control.
+            local identification = submit_with(token.LEVEL.IDENTIFICATION)
+            t:assert_eq(identification.code, "BAD_TOKEN",
+                "an Identification-level token is refused: " .. identification.raw)
+            local anonymous = submit_with(token.LEVEL.ANONYMOUS)
+            t:assert_eq(anonymous.code, "BAD_TOKEN",
+                "and so is an Anonymous-level one: " .. anonymous.raw)
+        end)
+    end)
+
+test("arguments and environment together are refused past 2 MiB",
+    {
+        spec = "peinit *submit.arguments-and-environment-are-bounded-at-two-mib",
+        -- One byte over is refused cleanly, which is what this asserts.
+        -- The other side of the boundary — a definition *at* 2 MiB, which
+        -- the article says is accepted — cannot be exercised here: peinit
+        -- accepts it, runs it, and then cannot emit its `job.ended` KMES
+        -- event, whose payload carries the whole ~2 MiB `arguments`
+        -- array. `kmes_emit` fails with ENOSPC and that ends the runtime
+        -- loop, taking PID 1 to recovery. A definition that fills one
+        -- default 64 KiB record already does it (PEI-1082). So this file
+        -- proves only the refusal, and does not send an accepted large
+        -- definition that would kill the machine for every test after
+        -- it; the accept side is ops-submitted-large.test.lua, on a boot
+        -- of its own.
+    },
+    function(t)
+        -- The bound is on argv plus envp as execve counts them: every
+        -- string and its terminating NUL, the image path as argv[0], and
+        -- each variable as NAME=VALUE. 2 MiB + 1 of that does not fit in
+        -- a 64 KiB record, so this boot raises MaxJobMessageSize to 4 MiB
+        -- (in `definitions()` above); and it does not fit a sequenced-
+        -- packet socket's default send buffer either, so the worker
+        -- forces its own up before it sends. The one byte that tips the
+        -- total over the limit is in the environment, so the message the
+        -- refusal names counts argv and envp together rather than only
+        -- one of them.
+        local LIMIT = 2 * 1024 * 1024
+        local image = "/bin/true"
+        local arguments, bytes = {}, #image + 1
+        for k = 1, 20 do
+            arguments[k] = string.rep("a", 100000)
+            bytes = bytes + 100001
+        end
+        local pad = 101
+        local env_bytes = #"PT_PAD" + 1 + pad + 1
+        local last = LIMIT + 1 - bytes - env_bytes - 1
+        local list = {}
+        for k = 1, #arguments do list[k] = '"' .. arguments[k] .. '"' end
+        list[#list + 1] = '"' .. string.rep("b", last) .. '"'
+        local over = '{"command":"submit","image_path":"' .. image .. '","arguments":[' ..
+            table.concat(list, ",") .. '],"environment":{"PT_PAD":"' ..
+            string.rep("c", pad) .. '"}}'
+        t:assert_eq(bytes + last + 1 + env_bytes, LIMIT + 1,
+            "the definition totals one byte over 2 MiB")
+
+        -- Room in the send buffer for the ~2 MiB record. SO_SNDBUFFORCE
+        -- is the privileged form, which the worker's SYSTEM token holds;
+        -- the plain one is capped by wmem_max, raised first in case the
+        -- force is ever not available.
+        vm:run("echo 16777216 > /proc/sys/net/core/wmem_max")
+
+        f.with_worker(vm, function(w)
+            local fd = assert(us.socket(w, us.AF_UNIX, us.SOCK.SEQPACKET))
+            local size = string.pack("<i4", 8 * 1024 * 1024)
+            local forced = w:syscall(us.NR.setsockopt, {
+                args = { fd, 1, 32, 0, 4 }, bufs = { size }, ptrs = { 3 } })
+            if forced.ret ~= 0 then
+                w:syscall(us.NR.setsockopt, {
+                    args = { fd, 1, 7, 0, 4 }, bufs = { size }, ptrs = { 3 } })
+            end
+            local connected = us.connect(w, fd, f.JOBS_SOCKET)
+            assert(connected.ret == 0, "connect to the jobs socket: " ..
+                us.errname(connected.errno))
+            local refused, why = f.jobs_request(w, fd, over)
+            w:syscall(3, fd)
+            assert(refused, "no answer to the over-limit submit: " .. tostring(why))
+
+            t:assert_eq(refused:match('"code":"([^"]+)"'), "INVALID_ARGUMENTS",
+                "a definition one byte over 2 MiB is refused: " .. refused:sub(1, 300))
+            t:assert(refused:find("total " .. (LIMIT + 1) .. " bytes, over the " ..
+                LIMIT .. " limit", 1, true),
+                "counting argv and envp together against the 2 MiB bound: " ..
+                refused:sub(1, 300))
+        end)
+
+        -- And the refusal left peinit answering: a definition over the
+        -- bound is rejected, not a message that ends the runtime loop.
+        t:assert(vm:run("svctl --json job submit /bin/true"):ok(),
+            "peinit still serves the jobs socket after the refusal")
+    end)
+
+-- A stop on a job still queued for launch cancels it before it runs. No
+-- guest can hold a job in the launch queue long enough to stop it there:
+-- the queue drains one job per pump step, a `submit` is not answered
+-- until its own job has left Created, and the window between enqueue and
+-- launch is a single turn. It is a unit test in the peinit crate.
+test("a stop on a queued job cancels it before it runs",
+    {
+        spec = "peinit *submit.a-stop-on-a-queued-job-cancels-it-before-it-runs",
+        covered_by = "cargo:peinit2 supervisor::tests::submitted::stop::stopping_a_job_that_has_not_launched_cancels_it",
+        skip = "a job sits in the launch queue for one pump step, too briefly for a guest to " ..
+            "stop it there, and a submit is not answered until its job has left Created; runs under " ..
+            "cargo test -p peinit2 --all-features --lib " ..
+            "supervisor::tests::submitted::stop::stopping_a_job_that_has_not_launched_cancels_it",
+    },
+    function(t) end)

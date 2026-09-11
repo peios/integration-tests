@@ -570,3 +570,22 @@ test("peinit's own audit records go into the same ring as the lifecycle events",
         t:assert(kinds["graph.operation_terminal"] and kinds["operation.completed"],
             "an audit record and a lifecycle record came out of one snapshot")
     end)
+
+-- output.dropped is a unit test in the peinit crate, cited here: the
+-- event fires when peinit's write to a submitted job's output sink
+-- returns EAGAIN -- a sink pipe held full and unread while the job
+-- floods it -- and the "once per job, on the first drop" bookkeeping
+-- lives inside PID 1's log-pipe reader. The guest ships no client that
+-- can hold a sink descriptor open and unread to provoke it, and the
+-- drop-once rule has no observable surface but the event itself.
+
+test("output.dropped is emitted once per job, on the first drop",
+    {
+        spec = "peinit *emit.output-dropped-is-emitted-once-per-job",
+        covered_by = "cargo:peinit2 runtime::logging::tests::a_sink_that_would_block_counts_each_dropped_line_and_reports_the_first",
+        skip = "the drop needs peinit's write to a submitter's sink to return EAGAIN on a " ..
+            "full, unread sink pipe, which no guest client can hold open; runs under cargo test " ..
+            "-p peinit2 --all-features --lib " ..
+            "runtime::logging::tests::a_sink_that_would_block_counts_each_dropped_line_and_reports_the_first",
+    },
+    function(t) end)

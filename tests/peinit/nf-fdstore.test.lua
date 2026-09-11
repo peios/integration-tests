@@ -21,18 +21,17 @@
 -- restart is a separate claim and gets a service that crashes and is
 -- restarted by policy.
 --
--- One claim here has no route from the guest:
---
---   fdstore.a-returned-listener-keeps-its-captured-identity
---     A listener's captured identity is visible only to a client reading
---     the peer token of a connection to it, and it would have to differ
---     between the two incarnations to be recognisable at all -- so the
---     test needs both a way to change the service's identity across the
---     restart and a client that reports a connection's peer token. The
---     image ships no such client, and `report` sees a descriptor's type
---     and address but not its token.
+-- A listener's captured identity is visible only to a client reading the
+-- peer token of a connection to it, and it has to differ between the two
+-- incarnations to be recognisable at all. The last test here does both:
+-- the service's Identity changes across the restart, and the client is a
+-- provium worker reading KACS_SO_PEER_TOKEN (helpers/peinit_client.lua).
 
 local peinit = require("helpers.peinit")
+local kacs = require("helpers.kacs")
+local token = require("helpers.token")
+local us = require("helpers.unixsock")
+local f = require("helpers.peinit_client")
 peinit.claim(1)
 
 local vm = peinit.boot({ name = "nffdstore", files = peinit.tool("pt-notify") })
@@ -708,4 +707,104 @@ test("a discarded definition clears the store",
               desc = "the store to go with the definition" })
         t:assert_eq(held(path), 0,
             "the descriptors went with the definition")
+    end)
+
+test("a listener handed back to the next incarnation still conveys the identity it was created under",
+    { spec = "peinit *fdstore.a-returned-listener-keeps-its-captured-identity" },
+    function(t)
+        -- The first incarnation runs as LocalService and stores a
+        -- listening socket. The definition is then changed to run as
+        -- SYSTEM, and the service restarted: an administrator's restart
+        -- keeps the store, so the SYSTEM incarnation is handed the
+        -- LocalService listener at fd 3. A client connecting to it reads
+        -- the identity the kernel captured when listen() was called —
+        -- and peinit does not touch that, so it is still LocalService.
+        --
+        -- The control is a second listener the SYSTEM incarnation makes
+        -- itself: that one conveys SYSTEM, so the LocalService answer is
+        -- about the handed-back listener rather than about the client.
+        --
+        -- Everything the LocalService incarnation writes lives in a
+        -- directory the test opens to everyone first; /run itself is
+        -- not a place LocalService may create files. And the staged
+        -- pt-notify carries a descriptor granting SYSTEM and
+        -- Administrators alone, so LocalService's exec of it fails with
+        -- EACCES until Everyone is given read and execute.
+        local name = "pt-fs-ident"
+        local dir = "/run/" .. name
+        vm:run("mkdir -p " .. dir):assert_ok()
+        t:assert_eq(kacs.set_sd(vm, dir, kacs.grant(kacs.ALL_RIGHTS)).ret, 0,
+            "the working directory is opened to every principal")
+        t:assert_eq(kacs.set_sd(vm, "/usr/bin/pt-notify", kacs.descriptor(kacs.acl({
+            kacs.ace(kacs.ACE_ALLOWED, 0x10000000, kacs.SID.LOCAL_SYSTEM, 0),
+            kacs.ace(kacs.ACE_ALLOWED, 0xA0000000, kacs.SID.EVERYONE, 0),
+        }))).ret, 0, "and pt-notify may be run by any principal")
+
+        local function incarnation(identity, steps)
+            local arguments = { "--log", dir .. "/" .. identity .. ".log", "sleep", "1" }
+            for _, step in ipairs(steps) do arguments[#arguments + 1] = step end
+            for _, step in ipairs({ "write", dir .. "/" .. identity .. ".done", "ok",
+                                    "sleep", "100000" }) do
+                arguments[#arguments + 1] = step
+            end
+            apply({ { path = [[Machine\System\Services\]] .. name, values = {
+                { name = "ImagePath", type = "sz", data = "/usr/bin/pt-notify" },
+                { name = "Arguments", type = "multi", data = arguments },
+                { name = "Identity", type = "sz", data = identity },
+                { name = "Readiness", type = "dword", data = 1 },
+                { name = "RestartPolicy", type = "dword", data = 0 },
+                { name = "StartTimeout", type = "dword", data = 60 },
+                { name = "FdStoreMax", type = "dword", data = 8 },
+            } } })
+        end
+        local function await(file)
+            wait_until(function() return vm:run("test -f " .. file):ok() or nil end,
+                { timeout = 90, interval = 0.3,
+                  desc = file .. " to be written: " .. diagnose(name) })
+            vm:run("sleep 0.5")
+        end
+
+        incarnation("LocalService", {
+            "send-listener", dir .. "/first.sock", "FDSTORE=1\\nFDNAME=first",
+        })
+        wait_until(function() return status(name) ~= nil or nil end,
+            { timeout = 60, interval = 0.3, desc = "the registry watch to deliver " .. name })
+        vm:run("svctl --json --no-wait start " .. name):assert_ok()
+        await(dir .. "/LocalService.done")
+
+        local LOCAL_SERVICE = "S-1-5-19"
+        local SYSTEM = token.sid_string(token.SID.LOCAL_SYSTEM)
+        f.with_worker(vm, function(w)
+            local c = assert(f.connect_as(w, dir .. "/first.sock", us.SOCK.STREAM, nil))
+            t:assert_eq(f.peer_user(w, c), LOCAL_SERVICE,
+                "while its creator runs, the listener conveys LocalService")
+        end)
+
+        -- The same service, now defined to run as SYSTEM, and a script
+        -- that reports what it was handed and makes a listener of its own.
+        incarnation("SYSTEM", {
+            "report", dir .. "/report",
+            "send-listener", dir .. "/second.sock", "FDSTORE=1\\nFDNAME=second",
+        })
+        vm:run("sleep 2")
+        vm:run("svctl --json --no-wait restart " .. name):assert_ok()
+        await(dir .. "/SYSTEM.done")
+
+        local handed = report(dir .. "/report")
+        t:assert_eq(handed.LISTEN_FDNAMES, "first",
+            "the SYSTEM incarnation was handed the stored listener: " .. handed.raw)
+        t:assert(handed.fds[1] and handed.fds[1].fd == 3 and
+            handed.fds[1].detail:find(dir .. "/first.sock", 1, true) and
+            handed.fds[1].detail:find("listening=1", 1, true),
+            "at fd 3, still listening on the path the first incarnation bound: " .. handed.raw)
+
+        f.with_worker(vm, function(w)
+            local returned = assert(f.connect_as(w, dir .. "/first.sock", us.SOCK.STREAM, nil))
+            local fresh = assert(f.connect_as(w, dir .. "/second.sock", us.SOCK.STREAM, nil))
+            t:assert_eq(f.peer_user(w, fresh), SYSTEM,
+                "a listener the SYSTEM incarnation made conveys SYSTEM")
+            t:assert_eq(f.peer_user(w, returned), LOCAL_SERVICE,
+                "while the one handed back to it still conveys LocalService, " ..
+                "the identity captured when the previous instance called listen()")
+        end)
     end)

@@ -341,3 +341,31 @@ test("each named shortcut fires exactly where its equivalent expression would",
         fired_exactly(t, hour, SHORTCUT, { "sc-minutely", "sc-hourly" },
             "an hour that is not midnight")
     end)
+
+-- The two daylight-saving cases are unit tests in the peinit crate,
+-- cited here. They cannot run in the VM: the image ships no
+-- /usr/share/zoneinfo (PEI-832), so jiff resolves no IANA zone and a
+-- schedule naming `Europe/London` will not even parse there, let alone
+-- fire across a DST boundary. The calendar evaluator resolves the zone
+-- against the host's tzdata under `cargo test`, where the transition can
+-- be crossed on demand rather than waited for.
+
+test("a time in the spring-forward gap does not fire",
+    {
+        spec = "peinit *cal.a-time-in-the-spring-forward-gap-does-not-fire",
+        covered_by = "cargo:peinit2 timer::calendar::tests::spring_dst_gap_is_skipped",
+        skip = "DST resolution needs tzdata, absent from the image (PEI-832), so " ..
+            "Europe/London does not resolve in the VM; runs under cargo test -p peinit2 " ..
+            "--all-features --lib timer::calendar::tests::spring_dst_gap_is_skipped",
+    },
+    function(t) end)
+
+test("a time in the repeated hour fires once, on the first occurrence",
+    {
+        spec = "peinit *cal.a-time-in-the-repeated-hour-fires-once-on-the-first-occurrence",
+        covered_by = "cargo:peinit2 timer::calendar::tests::autumn_dst_fold_uses_first_occurrence",
+        skip = "DST resolution needs tzdata, absent from the image (PEI-832), so " ..
+            "Europe/London does not resolve in the VM; runs under cargo test -p peinit2 " ..
+            "--all-features --lib timer::calendar::tests::autumn_dst_fold_uses_first_occurrence",
+    },
+    function(t) end)

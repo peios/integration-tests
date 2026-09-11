@@ -24,7 +24,7 @@
 -- copy sent while the service is not Reloading is a documented no-op
 -- (execution/notify/reload.rs: the field is recorded and ignored).
 --
--- Two things have no route from the guest:
+-- One thing has no route from the guest:
 --
 --   the console half of
 --   reload.an-unconfirmed-reload-is-reported-on-the-console-and-audited
@@ -35,14 +35,13 @@
 --     and stopping `login-console` does not bring them back. The audit
 --     half is asserted below, and it carries the same sentence.
 --
---   state.a-ready-carrying-a-stale-generation-is-rejected
---     A READY=1 from a previous incarnation needs that incarnation's
---     process to still be alive after the generation has advanced.
---     job/store/create.rs forbids a second live main job, so the
---     previous process is always reaped first -- and a reaped pid cannot
---     be forged into credentials either, the kernel answering ESRCH. The
---     invariant holds by construction rather than by a check the suite
---     can trip.
+-- §6.1's stale-generation invariant (state.a-ready-carrying-a-stale-
+-- generation-is-rejected) was once described here as unreachable, on the
+-- premise that a live previous-incarnation process cannot exist -- but an
+-- Abandoned service keeps exactly that: its previous main process alive
+-- and still its current main job across the generation increment. It is a
+-- VM test in state-abandoned.test.lua; the §10.5 notification-side anchor
+-- is nf-stale-generation.test.lua.
 
 local peinit = require("helpers.peinit")
 peinit.claim(1)

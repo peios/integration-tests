@@ -15,7 +15,9 @@
 -- definitions below are written at runtime through `reg apply` and
 -- picked up by peinit's registry watch, rather than seeded at boot.
 --
--- Two claims in this article have no route from here:
+-- Two claims in this article have no route from a guest, and are unit
+-- tests in the peinit crate, cited by the skipped stubs at the end of
+-- this file:
 --
 --   notify.a-datagram-without-credentials-is-rejected
 --     peinit sets SO_PASSCRED on the socket (notify/socket.rs), so the
@@ -24,19 +26,21 @@
 --     `send-nocred` step and it makes no observable difference: there is
 --     no way to present the receiver with a credential-less datagram.
 --
---   notify.a-stale-activation-generation-is-rejected
---     A stale generation needs a live process whose job record is a
---     previous incarnation's. job/store/create.rs forbids a second live
---     main job, so the previous process is always reaped before the
---     generation advances -- and a reaped pid cannot be forged either,
---     since the kernel answers ESRCH.
+--   notify.the-pidfd-is-verified-against-the-senders-pid
+--     It differs from the plain pid match only once a pid has been
+--     recycled under a job record peinit still holds, and peinit reaps a
+--     job the moment its pidfd signals exit -- so a held job never
+--     carries a recycled pid. What IS reachable from here is the
+--     authentication chain's outcome, which the unauthenticated-sender
+--     test below asserts.
 --
--- The pidfd step (notify.the-pidfd-is-verified-against-the-senders-pid)
--- is in the same family: it differs from the plain pid match only once a
--- pid has been recycled under a job record peinit still holds, and
--- peinit reaps a job the moment its pidfd signals exit. What is
--- reachable is the authentication chain's outcome, which the
--- unauthenticated-sender test below asserts.
+-- The third, notify.a-stale-activation-generation-is-rejected, was once
+-- listed here as unreachable too, on the premise that a live
+-- previous-incarnation process cannot exist -- create.rs forbids a second
+-- live main job, so the previous is reaped before the generation
+-- advances. That premise is wrong: an *Abandoned* service keeps its
+-- previous main process alive and still its current main job across the
+-- generation increment. It is a VM test in nf-stale-generation.test.lua.
 
 local peinit = require("helpers.peinit")
 -- One VM: every test here is a service definition written into a running
@@ -639,3 +643,31 @@ test("MAINPID= names nothing peinit will supervise",
         end, { timeout = 30, desc = "the service to notice its own child's death" })
         t:assert(ended, "killing the forked child is what ends the service")
     end)
+
+-- The three authentication claims no guest can reach (see the header),
+-- each cited to the peinit unit test that proves it.
+
+test("a datagram without credentials is rejected",
+    {
+        spec = "peinit *notify.a-datagram-without-credentials-is-rejected",
+        covered_by = "cargo:peinit2 notify::socket::tests::a_datagram_without_credentials_is_rejected",
+        skip = "peinit sets SO_PASSCRED, so the kernel attaches credentials to every " ..
+            "datagram and a guest cannot present a credential-less one; runs under cargo test " ..
+            "-p peinit2 --all-features --lib notify::socket::tests::a_datagram_without_credentials_is_rejected",
+    },
+    function(t) end)
+
+test("the pidfd is verified against the sender's pid",
+    {
+        spec = "peinit *notify.the-pidfd-is-verified-against-the-senders-pid",
+        covered_by = "cargo:peinit2 supervisor::tests::notify::readiness::pidfd_mismatch_rejects_authenticated_pid_without_state_change",
+        skip = "the pidfd check differs from a pid match only under a recycled pid, which " ..
+            "peinit's reap-on-exit means a held job never carries; runs under cargo test -p peinit2 " ..
+            "--all-features --lib supervisor::tests::notify::readiness::pidfd_mismatch_rejects_authenticated_pid_without_state_change",
+    },
+    function(t) end)
+
+-- notify.a-stale-activation-generation-is-rejected is a VM test in
+-- nf-stale-generation.test.lua: an Abandoned service's escaped main
+-- process is a live previous incarnation, still the current main job,
+-- after the generation has advanced.

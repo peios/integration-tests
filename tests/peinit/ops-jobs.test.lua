@@ -370,3 +370,38 @@ test("a submitted job's entry outlives its record by sixty seconds, and then it 
         t:assert_eq(never.stdout:match('"code":"([^"]+)"'), "UNKNOWN_JOB",
             "as is an identifier that never named a job: " .. never.stdout)
     end)
+
+-- Three §8.1 rules live below the socket surface, with no route from a
+-- guest, and are unit tests in the peinit crate cited here.
+
+test("an exit observed in the setup window is held, not applied",
+    {
+        spec = "peinit *job.an-exit-in-the-setup-window-is-held-not-applied",
+        covered_by = "cargo:peinit2 supervisor::tests::reaped_before_setup::an_exit_reaped_before_the_setup_status_is_held_and_replayed",
+        skip = "the window between fork and the error pipe's EOF is microseconds wide and no " ..
+            "job carries the pid yet, so a guest cannot present an exit inside it; runs under cargo " ..
+            "test -p peinit2 --all-features --lib " ..
+            "supervisor::tests::reaped_before_setup::an_exit_reaped_before_the_setup_status_is_held_and_replayed",
+    },
+    function(t) end)
+
+test("pid and pidfd land on the record only on exec confirmation",
+    {
+        spec = "peinit *job.pid-and-pidfd-land-only-on-exec-confirmation",
+        covered_by = "cargo:peinit2 supervisor::tests::boot_launch::pid_and_pidfd_land_only_on_exec_confirmation",
+        skip = "the Created window before the error pipe's EOF is not observable from a guest, " ..
+            "and a submitter is not answered until the job has left Created; runs under cargo test " ..
+            "-p peinit2 --all-features --lib " ..
+            "supervisor::tests::boot_launch::pid_and_pidfd_land_only_on_exec_confirmation",
+    },
+    function(t) end)
+
+test("a stale launch-queue entry is discarded rather than fatal",
+    {
+        spec = "peinit *job.a-stale-queue-entry-is-discarded-rather-than-fatal",
+        covered_by = "cargo:peinit2 supervisor::tests::stale_launch_queue::a_queued_job_whose_record_has_gone_is_dropped_not_fatal",
+        skip = "a queue id with no record is a bookkeeping fault a guest cannot stage, and its " ..
+            "old fatal outcome ended PID 1's loop; runs under cargo test -p peinit2 --all-features " ..
+            "--lib supervisor::tests::stale_launch_queue::a_queued_job_whose_record_has_gone_is_dropped_not_fatal",
+    },
+    function(t) end)
