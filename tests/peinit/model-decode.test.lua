@@ -329,6 +329,21 @@ test("value names are matched case-insensitively",
             "and so is `STARTTIMEOUT`")
     end)
 
+test("a duplicate known field is a decode error",
+    {
+        spec = "peinit *schema.a-duplicate-known-field-is-a-decode-error",
+        covered_by = "cargo:peinit2 registry::tests::validation::schema::duplicate_known_fields_are_rejected_case_insensitively",
+        -- No guest can present the decoder with a duplicated field. The
+        -- registry folds value-name case, so two values whose names fold to
+        -- one field (`ImagePath` and `imagepath`, say) collapse to a single
+        -- value in the store before peinit ever reads the key -- a live
+        -- `reg apply` of both leaves one value holding the last write, so the
+        -- decoder is handed one field, not two. The decoder's rejection of a
+        -- duplicate is therefore only reachable in-process.
+        skip = "the registry case-folds value names, so a definition carrying a field twice cannot be written -- the two collapse to one value before peinit reads them; runs under cargo test -p peinit2 --all-features --lib registry::tests::validation::schema::duplicate_known_fields_are_rejected_case_insensitively",
+    },
+    function(t) end)
+
 test("an unknown value on a service key is ignored",
     { spec = "peinit *schema.an-unknown-value-on-a-service-key-is-ignored" },
     function(t)

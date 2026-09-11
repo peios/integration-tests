@@ -378,6 +378,44 @@ test("a child setup failure after the fork is PreExecFailure, and names the step
             "and it is reported as the exec step rather than as the working-directory one")
     end)
 
+-- The setup pipe between the parent and its pre-exec child is entirely
+-- internal to PID 1: the child writes a structured payload to a pipe the
+-- parent holds, and nothing about it reaches a guest. The wire itself --
+-- its length, its step-identifier table, and the parent failing closed on
+-- a payload it cannot trust -- is proved in the crate.
+
+test("the error payload the child writes is exactly eight bytes",
+    {
+        spec = "peinit *preexec.the-error-payload-is-eight-bytes",
+        covered_by = "cargo:peinit2 boundary::linux_launch::process::model::tests::child_setup_evidence_payload_is_exactly_eight_bytes",
+        skip = "the payload is written by peinit's pre-exec child to a pipe only PID 1 reads, so its byte layout is not observable from a guest; runs under cargo test -p peinit2 --all-features --lib boundary::linux_launch::process::model::tests::child_setup_evidence_payload_is_exactly_eight_bytes",
+    },
+    function(t) end)
+
+test("the child setup step identifiers are a stable table",
+    {
+        spec = "peinit *preexec.the-child-setup-step-identifiers",
+        covered_by = "cargo:peinit2 boundary::model::process::launch_failure::tests::pre_exec_step_ids_match_the_wire_table",
+        skip = "the step identifiers exist only inside PID 1 and on the setup pipe between it and its pre-exec child, so no guest can read the numeric table; runs under cargo test -p peinit2 --all-features --lib boundary::model::process::launch_failure::tests::pre_exec_step_ids_match_the_wire_table",
+    },
+    function(t) end)
+
+test("identifier 8 is reserved and never emitted",
+    {
+        spec = "peinit *preexec.identifier-8-is-reserved",
+        covered_by = "cargo:peinit2 boundary::model::process::launch_failure::tests::identifier_eight_is_the_reserved_environment_step",
+        skip = "id 8 is the environment step, which the child never performs -- peinit builds the environment in the parent and applies it with execve -- so the slot is reserved and no guest could observe it emitted; runs under cargo test -p peinit2 --all-features --lib boundary::model::process::launch_failure::tests::identifier_eight_is_the_reserved_environment_step",
+    },
+    function(t) end)
+
+test("malformed child setup evidence fails closed with PreExecFailure",
+    {
+        spec = "peinit *preexec.malformed-evidence-fails-closed",
+        covered_by = "cargo:peinit2 supervisor::launch::failure::classify::tests::malformed_child_setup_evidence_fails_closed_as_pre_exec_failure",
+        skip = "the malformed payload is one only peinit's own pre-exec child could write to the internal setup pipe, so a guest cannot inject one to make the parent fail closed; runs under cargo test -p peinit2 --all-features --lib supervisor::launch::failure::classify::tests::malformed_child_setup_evidence_fails_closed_as_pre_exec_failure",
+    },
+    function(t) end)
+
 test("one StartTimeout bounds the hooks and the readiness wait, and the cause says which it expired in",
     {
         spec = {

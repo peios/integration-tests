@@ -266,6 +266,23 @@ test("registryd alone is launched without the global layer",
             "while an ordinary service started from the same snapshot does have it")
     end)
 
+test("the registryd exemption matches on identity and name together",
+    {
+        spec = "peinit *env.the-exemption-matches-identity-and-name",
+        covered_by = "cargo:peinit2 execution::launch::environment::tests::launch_environment_applies_global_env_to_non_system_registryd",
+        -- The positive exemption (registryd, launched SYSTEM, skips the
+        -- global layer) is the VM test above. Its *narrowness* -- that both
+        -- the resolved identity being SYSTEM and the name being registryd are
+        -- required -- cannot be exercised from a guest: there is only one
+        -- registryd on the machine and it is compiled-in as SYSTEM, so a
+        -- non-SYSTEM registryd (the identity half) and a second service named
+        -- registryd cannot be produced. The unit test builds a registryd job
+        -- with a non-SYSTEM identity and shows it receives the ordinary
+        -- layering, proving the identity condition is load-bearing.
+        skip = "the exemption's narrowness needs a non-SYSTEM registryd (or a second service named registryd), and neither can exist in a booted machine -- registryd is compiled-in as SYSTEM; runs under cargo test -p peinit2 --all-features --lib execution::launch::environment::tests::launch_environment_applies_global_env_to_non_system_registryd",
+    },
+    function(t) end)
+
 -- The last two claims each need a boot of their own, because they are
 -- about the layer being built differently rather than about a service.
 

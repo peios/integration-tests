@@ -63,6 +63,39 @@ local SERVICES = {
         { name = "Conditions", type = "multi", data = { "directory:/run", "path:/run" } },
         { name = "Asserts", type = "multi", data = { "file:/pt-not-here" } },
     } },
+    -- Demand-only, with a filesystem condition on a path that *exists*, so
+    -- the only thing that can skip it is the check failing to report. Its
+    -- checks/ cgroup is frozen before the start, which is how the helper is
+    -- made to miss its deadline.
+    { path = [[Machine\System\Services\pt-chk-timeout]], values = {
+        { name = "ImagePath", type = "sz", data = "/bin/sleep" },
+        { name = "Arguments", type = "multi", data = { "3600" } },
+        { name = "Identity", type = "sz", data = "SYSTEM" },
+        { name = "Readiness", type = "dword", data = 1 },
+        { name = "RestartPolicy", type = "dword", data = 0 },
+        { name = "PreStartCheckTimeout", type = "dword", data = 3 },
+        { name = "Conditions", type = "multi", data = { "path:/" } },
+    } },
+    -- Two services that want /dev/tty3 (a spare virtual console, so the
+    -- image's own login-console on /dev/console is untouched). The waiter
+    -- carries a filesystem condition, so its start forks a helper; freezing
+    -- the helper holds it pending while the holder takes the terminal.
+    { path = [[Machine\System\Services\pt-tty-holder]], values = {
+        { name = "ImagePath", type = "sz", data = "/bin/sleep" },
+        { name = "Arguments", type = "multi", data = { "3600" } },
+        { name = "Identity", type = "sz", data = "SYSTEM" },
+        { name = "Readiness", type = "dword", data = 1 },
+        { name = "TTYPath", type = "sz", data = "/dev/tty3" },
+    } },
+    { path = [[Machine\System\Services\pt-tty-waiter]], values = {
+        { name = "ImagePath", type = "sz", data = "/bin/sleep" },
+        { name = "Arguments", type = "multi", data = { "3600" } },
+        { name = "Identity", type = "sz", data = "SYSTEM" },
+        { name = "Readiness", type = "dword", data = 1 },
+        { name = "TTYPath", type = "sz", data = "/dev/tty3" },
+        { name = "PreStartCheckTimeout", type = "dword", data = 30 },
+        { name = "Conditions", type = "multi", data = { "path:/" } },
+    } },
 }
 
 local vm = peinit.boot({ name = "evaluation", files = peinit.seed("pt-eval", SERVICES) })
@@ -81,6 +114,19 @@ local function entries(path)
     local set = {}
     for _, entry in ipairs(listing) do set[entry.name] = entry.entry_type end
     return set
+end
+
+--- Create a service's cgroup root and freeze it before the start, so that a
+--- pre-start check helper cloned into its `checks/` sub-cgroup cannot run and
+--- therefore cannot report. cgroup2 propagates the freeze to descendants, so
+--- the helper is frozen the moment it lands. This is the only way to make a
+--- `stat()` of an existing path miss `PreStartCheckTimeout` from a guest: the
+--- helper never blocks on I/O here, so it is stopped rather than delayed.
+local function freeze_root(service)
+    local root = "/sys/fs/cgroup/peinit/" .. service
+    vm:run("mkdir -p " .. root):assert_ok()
+    vm:run("echo 1 > " .. root .. "/cgroup.freeze"):assert_ok()
+    return root
 end
 
 test("a service whose terminal is held is skipped before its conditions are evaluated",
@@ -160,4 +206,78 @@ test("one helper run answers both the conditions and the asserts",
         end
         t:assert_eq(extra, 0,
             "and it is the only sub-cgroup in the tree: one run, not one per list")
+    end)
+
+test("a check that does not report in time is treated as not satisfied",
+    { spec = "peinit *check.a-check-that-does-not-report-in-time-is-not-satisfied" },
+    function(t)
+        -- pt-chk-timeout's condition is `path:/`, which exists -- so a helper
+        -- that reported would pass it and the service would start. The helper
+        -- is frozen in its checks/ cgroup before the start, so it never
+        -- reports, and PreStartCheckTimeout (3s) fires. The fail-safe
+        -- direction is "not satisfied", so the condition fails and the
+        -- service is Skipped -- the opposite of what a reported `path:/`
+        -- would have produced.
+        freeze_root("pt-chk-timeout")
+        vm:run("svctl --no-wait start pt-chk-timeout"):assert_ok()
+
+        -- The helper did land, and it is frozen: the timeout is a real
+        -- deadline being missed, not a helper that never started.
+        wait_until(function()
+            local ok, events = pcall(function()
+                return vm:read_file("/sys/fs/cgroup/peinit/pt-chk-timeout/checks/cgroup.events")
+            end)
+            return ok and events:find("populated 1") and events:find("frozen 1") or nil
+        end, { timeout = 15, interval = 0.3, desc = "the check helper to be frozen in checks/" })
+
+        local status = settled("pt-chk-timeout")
+        t:assert_eq(status.state, "skipped",
+            "the service was skipped, though the path it checked exists: " ..
+            tostring(status.cause))
+        t:assert_eq(status.cause, "condition_skipped",
+            "because the unreported check was treated as not satisfied, and a " ..
+            "failed condition skips")
+    end)
+
+test("the terminal is re-checked after the helper returns, not carried over from before it ran",
+    { spec = "peinit *start.the-terminal-is-rechecked-after-the-helper" },
+    function(t)
+        -- The waiter has a filesystem condition, so its start forks a helper
+        -- and the terminal question is asked twice: once in the cacheable
+        -- pass before the fork, and again on the helper's completion. Freeze
+        -- the waiter's helper so it stays pending -- during a fresh start
+        -- from Inactive the service is not yet Starting, so it does not
+        -- itself hold the terminal while it waits.
+        freeze_root("pt-tty-waiter")
+        vm:run("svctl --no-wait start pt-tty-waiter"):assert_ok()
+        wait_until(function()
+            local ok, events = pcall(function()
+                return vm:read_file("/sys/fs/cgroup/peinit/pt-tty-waiter/checks/cgroup.events")
+            end)
+            return ok and events:find("populated 1") or nil
+        end, { timeout = 15, interval = 0.3, desc = "the waiter's helper to be pending" })
+
+        -- At the cacheable pass /dev/tty3 was free, so the waiter got past
+        -- the terminal gate and into the helper. Now the holder takes the
+        -- terminal while the helper is stuck.
+        local holder = wait_until(function()
+            vm:run("svctl start pt-tty-holder")
+            local out = json.decode(vm:run("svctl --json status pt-tty-holder").stdout)
+            return out.state == "active" and out or nil
+        end, { timeout = 30, interval = 0.5, desc = "pt-tty-holder to take /dev/tty3" })
+        t:assert_eq(holder.state, "active", "the holder now owns /dev/tty3")
+
+        -- Thaw the helper. It reports `path:/` satisfied, so the condition
+        -- passes -- the only thing that can stop the waiter now is the
+        -- terminal, and only if peinit re-checks it. It does: the waiter is
+        -- Skipped with TtyUnavailable rather than starting on a terminal
+        -- another service holds.
+        vm:run("echo 0 > /sys/fs/cgroup/peinit/pt-tty-waiter/cgroup.freeze"):assert_ok()
+        local waiter = settled("pt-tty-waiter")
+        t:assert_eq(waiter.state, "skipped",
+            "the waiter was skipped rather than started onto a held terminal: " ..
+            tostring(waiter.cause))
+        t:assert_eq(waiter.cause, "tty_unavailable",
+            "on the terminal, which was free when the helper was forked and taken " ..
+            "while it ran -- so the answer came from a fresh re-check, not the cache")
     end)

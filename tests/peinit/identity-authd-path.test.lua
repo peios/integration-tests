@@ -36,7 +36,7 @@ end
 
 local vm = peinit.boot({
     name = "identity-authd-path",
-    files = peinit.seed("pt-authd", {
+    files = peinit.merge(peinit.tool("pt-attest"), peinit.seed("pt-authd", {
         { path = [[Machine\System]] },
         { path = [[Machine\System\Services]] },
         resident("pt-authd-local", "LocalService"),
@@ -44,7 +44,7 @@ local vm = peinit.boot({
         on_demand("pt-authd-ondemand", "LocalService"),
         on_demand("pt-authd-system", "SYSTEM"),
         on_demand("pt-authd-stranger", "pt-nobody"),
-    }),
+    })),
 })
 
 local function token_of(pid)
@@ -185,6 +185,43 @@ test("every service's reported identity is the one its token actually carries",
             end
         end
         t:assert(checked > 3, "several services were checked, not none (" .. checked .. ")")
+    end)
+
+test("a ServiceAttest from anything but PID 1 is refused, even when the peer is SYSTEM",
+    { spec = "peinit *token.a-service-attest-must-come-from-pid-1" },
+    function(t)
+        -- The authority authorises a ServiceAttest on two facts about the
+        -- connection: that the peer's token names SYSTEM, and that the peer
+        -- is PID 1. The second is not redundant -- SYSTEM alone is every
+        -- platform daemon on the machine. Nothing in peinit enforces it; it
+        -- is authd's, from the connection's own peer credentials.
+        --
+        -- pt-attest connects to /run/logon.sock and sends a well-formed
+        -- ServiceAttest. It runs as an ordinary guest process: SYSTEM (the
+        -- agent's own identity), but emphatically not PID 1. The first fact
+        -- holds and the second does not, which is exactly the case the rule
+        -- exists for.
+        local whoami = vm:run("token show --pid $$")
+        whoami:assert_ok()
+        t:assert(whoami.stdout:find("S%-1%-5%-18") or whoami.stdout:find("Local System"),
+            "the sender is SYSTEM, so the SYSTEM half of the check is satisfied: " ..
+            whoami.stdout)
+
+        local attest = vm:run("/usr/bin/pt-attest /run/logon.sock SYSTEM pt-attest-probe")
+        attest:assert_ok()
+        t:assert_contains(attest.stdout, "denied",
+            "a non-PID-1 caller was refused a token: " .. attest.stdout)
+        -- PermissionDenied (§2.B code 3): the peer may not attest at all,
+        -- rather than AuthenticationFailed or AccountRestricted -- the
+        -- refusal is about who is asking, not about the identity named.
+        t:assert_contains(attest.stdout, "denial=3",
+            "with PermissionDenied, the code for a peer that may not attest")
+
+        -- The contrast is the booted machine itself: peinit *is* PID 1, and
+        -- the LocalService daemons it attested for are running -- so the
+        -- request the guest was refused is one peinit makes successfully.
+        t:assert_eq(token_of(pid_of("pt-authd-local")).principal.user, "S-1-5-19",
+            "while peinit, as PID 1, attested a LocalService token that is in use")
     end)
 
 test("an unreachable authority fails every non-SYSTEM start and no SYSTEM one",

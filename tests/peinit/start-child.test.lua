@@ -210,3 +210,26 @@ test("a service with a TTYPath owns its terminal on all three streams; one witho
         t:assert_eq(tonumber(stat_fields(1)[7]), 0,
             "which is peinit's own position, whose session it stayed in")
     end)
+
+-- Two steps of the child path have no visible surface. The exit codes are
+-- the child's own `_exit` values, and peinit acts on the error pipe rather
+-- than on the child's wait status -- so a pre-exec failure never surfaces a
+-- 126 or 127 to a guest. And the NOTIFY_SOCKET confirmation only fails when
+-- the variable is absent, which peinit's own environment construction never
+-- lets happen. Both are proved in the crate.
+
+test("a setup failure exits 126 and a failed exec 127",
+    {
+        spec = "peinit *child.a-setup-failure-exits-126-and-a-failed-exec-127",
+        covered_by = "cargo:peinit2 boundary::linux_launch::process::child::tests::child_setup_and_exec_use_the_conventional_exit_codes",
+        skip = "peinit reports a pre-exec failure through the error pipe and kills the cgroup rather than surfacing the child's wait status, so the 126/127 exit codes never reach a guest; runs under cargo test -p peinit2 --all-features --lib boundary::linux_launch::process::child::tests::child_setup_and_exec_use_the_conventional_exit_codes",
+    },
+    function(t) end)
+
+test("the child confirms NOTIFY_SOCKET is present rather than setting it",
+    {
+        spec = "peinit *child.notify-socket-is-confirmed-not-set",
+        covered_by = "cargo:peinit2 boundary::linux_launch::command::tests::notify_socket_confirmation_discriminates_present_from_absent",
+        skip = "peinit always inserts NOTIFY_SOCKET in the base environment and filters any configured value out of the layers below, so a guest cannot make the variable absent and drive the child's confirmation to its EINVAL failure; runs under cargo test -p peinit2 --all-features --lib boundary::linux_launch::command::tests::notify_socket_confirmation_discriminates_present_from_absent",
+    },
+    function(t) end)

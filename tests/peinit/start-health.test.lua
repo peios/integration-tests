@@ -126,6 +126,21 @@ local SERVICES = {
         { name = "HealthCheckRetries", type = "dword", data = 3 },
         { name = "RestartWindow", type = "dword", data = 120 },
     }),
+    -- A non-SYSTEM service with a passing health check. Its probe token is
+    -- minted by the authority, so hiding the logon socket makes the probe
+    -- fail to *launch* -- a different thing from a probe that ran and failed.
+    -- Demand-only, so the launch-failure window is the test's to open.
+    { path = [[Machine\System\Services\pt-hc-authd]], values = {
+        { name = "ImagePath", type = "sz", data = "/bin/sleep" },
+        { name = "Arguments", type = "multi", data = { "3600" } },
+        { name = "Identity", type = "sz", data = "LocalService" },
+        { name = "Readiness", type = "dword", data = 1 },
+        { name = "RestartPolicy", type = "dword", data = 0 },
+        { name = "HealthCheck", type = "sz", data = "/bin/true" },
+        { name = "HealthCheckInterval", type = "dword", data = 1 },
+        { name = "HealthCheckRetries", type = "dword", data = 1 },
+        { name = "RestartWindow", type = "dword", data = 60 },
+    } },
     -- A Oneshot whose timing is perfectly valid -- 2 x 1 is well inside
     -- the window -- and which is rejected anyway, for declaring a
     -- HealthCheck it will never run.
@@ -418,4 +433,46 @@ test("a violating definition arriving on reload-config is a finding, and a findi
         -- one.
         t:assert_contains(vm:run("svctl status pt-hc-ok").stdout, "active",
             "and the running service was left alone")
+    end)
+
+test("a health check that cannot be launched is not counted against the service",
+    { spec = "peinit *health.a-launch-failure-is-not-counted" },
+    function(t)
+        -- pt-hc-authd runs as LocalService, so each health probe needs a
+        -- token from the authority. With the socket in place the probe runs
+        -- and passes, so the service becomes Healthy -- which establishes
+        -- that its probes do run and do count when they can.
+        vm:run("svctl start pt-hc-authd"):assert_ok()
+        local before = wait_until(function()
+            local out = json.decode(vm:run("svctl --json status pt-hc-authd").stdout)
+            return out.health == "healthy" and out or nil
+        end, { timeout = 30, interval = 0.5, desc = "pt-hc-authd's first probe to pass" })
+        local pid = before.current_job and before.current_job.pid
+        t:assert(pid, "the healthy service has a main process")
+
+        -- Move the socket aside. Every probe from now on cannot mint a
+        -- token, so it fails to launch -- with HealthCheckRetries=1, a
+        -- single *counted* failure would exhaust the budget and restart the
+        -- service. Several intervals pass here (interval is 1s).
+        vm:run("mv /run/logon.sock /run/logon.sock.hidden"):assert_ok()
+        local ok, err = pcall(function()
+            vm:run("sleep 6")
+
+            -- The service is untouched: still Active, still Healthy, and the
+            -- same process -- a launch failure said nothing about it, so
+            -- nothing was counted, nothing escalated, and it was not
+            -- restarted. "The probe could not be run" is not "the probe ran
+            -- and the service is unhealthy".
+            local after = json.decode(vm:run("svctl --json status pt-hc-authd").stdout)
+            t:assert_eq(after.state, "active",
+                "the service stayed Active across repeated probe launch failures")
+            t:assert(after.health ~= "unhealthy",
+                "and was not marked unhealthy: health is " .. tostring(after.health))
+            t:assert_eq(after.current_job and after.current_job.pid, pid,
+                "and it is the same process -- it was never restarted")
+        end)
+        -- Always restore the socket, so a failure here does not strand the
+        -- rest of the machine's non-SYSTEM services.
+        vm:run("mv /run/logon.sock.hidden /run/logon.sock")
+        if not ok then error(err) end
     end)
