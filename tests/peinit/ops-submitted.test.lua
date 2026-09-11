@@ -72,7 +72,14 @@ local function definitions()
     }
 end
 
-local vm = peinit.boot({ name = "opssub", files = peinit.seed("pt-sub", definitions()) })
+-- pt-notify is the job image for the notification tests at the end of
+-- the file: a submitted job speaks the notification socket like a
+-- service, and nothing in the image can be a job's main process and
+-- write a datagram with credentials.
+local vm = peinit.boot({
+    name = "opssub",
+    files = peinit.merge(peinit.tool("pt-notify"), peinit.seed("pt-sub", definitions())),
+})
 
 --- Submit a job and return its identifier and the view the submit
 --- answered with. Every `svctl job submit` is its own connection: peinit
@@ -507,6 +514,98 @@ test("svctl's job commands are split across the two sockets",
         t:assert(tostring(submit_without_jobs.stderr):find("/pt%-none"),
             "while without the jobs socket it cannot connect: "
             .. tostring(submit_without_jobs.stderr))
+
+        vm:run("svctl --json job stop " .. id, { timeout = 60 })
+    end)
+
+--- Submit pt-notify as a job running `steps`, then writing a marker and
+--- sleeping. Returns the job's identifier once the steps have run.
+---
+--- The first step is always `sleep 1`: a datagram sent the instant after
+--- exec can arrive before peinit has recorded the job's pid, and is then
+--- refused as coming from no one it supervises.
+local function notifying_job(name, options, steps)
+    local quoted = {}
+    for _, step in ipairs(steps) do quoted[#quoted + 1] = "'" .. step .. "'" end
+    local done = "/run/" .. name .. ".done"
+    local id = submit(options .. " /usr/bin/pt-notify sleep 1 " .. table.concat(quoted, " ")
+        .. " write " .. done .. " ok sleep 100000")
+    wait_until(function() return vm:run("test -f " .. done):ok() or nil end,
+        { timeout = 60, interval = 0.2, desc = name .. " to run its notification steps" })
+    -- The marker is written after the last datagram is sent; peinit still
+    -- has to read it.
+    vm:run("sleep 0.5")
+    return id
+end
+
+test("a submitted job's notifications set what §8.5 says, and nothing else",
+    { spec = "peinit *submit.the-notification-fields-a-submitted-job-may-send" },
+    function(t)
+        -- Every row of the table, in one job. The literal `\n` in each
+        -- message is pt-notify's line separator.
+        local id = notifying_job("pt-jn-fields", "--readiness notify --stop-timeout 3", {
+            "send", "STATUS=working\\nPROGRESS=3/10\\nPROGRESS_UNIT=items",
+            -- N above T: that line is dropped, never repaired, and the rest
+            -- of the datagram is applied.
+            "send", "PROGRESS=11/10\\nSTATUS=still working",
+            -- A unit outside the three is dropped.
+            "send", "PROGRESS_UNIT=furlongs",
+            -- A job has no reload, no watchdog and no fd store.
+            "send", "RELOADING=1\\nWATCHDOG=1",
+            "send", "READY=1",
+            "send", "STOPPING=1",
+        })
+
+        local view = vm:run("svctl --json job status " .. id).stdout
+        t:assert_eq(view:match('"state":"([^"]+)"'), "running",
+            "the job is still running, none of it taken as a reason to act: " .. view)
+        t:assert(view:find('"ready":true', 1, true),
+            "READY=1 made a notify job ready: " .. view)
+        t:assert_eq(view:match('"status_text":"([^"]*)"'), "still working",
+            "STATUS= is retained, and the later datagram's is the one kept: " .. view)
+        t:assert(view:find('"current":3,', 1, true) and view:find('"total":10,', 1, true),
+            "PROGRESS=3/10 is retained and the out-of-range 11/10 was dropped: " .. view)
+        t:assert(view:find('"unit":"items"', 1, true),
+            "PROGRESS_UNIT=items is retained and the unknown unit was dropped: " .. view)
+
+        -- STOPPING=1 was recorded, so the stop sends no termination
+        -- signal. pt-notify does not handle SIGTERM: had one been sent the
+        -- job would have died of it at once. It dies instead of the kill
+        -- at its three-second stop deadline.
+        local stopped = vm:run("svctl --json job stop " .. id, { timeout = 60 }).stdout
+        t:assert_eq(stopped:match('"exit_signal":(%d+)'), "9",
+            "a job that sent STOPPING=1 is not sent SIGTERM, and is killed at the deadline: "
+            .. stopped)
+    end)
+
+test("job.status is emitted at most once per job per second, and the view stays current",
+    { spec = "peinit *emit.job-status-is-emitted-at-most-once-per-job-per-second" },
+    function(t)
+        -- Twenty status updates, sent back to back — far more than one a
+        -- second. Every one changes status_text, so every one is due an
+        -- event; the rate limit is what stops twenty arriving.
+        local steps = {}
+        for k = 1, 20 do
+            steps[#steps + 1] = "send"
+            steps[#steps + 1] = "STATUS=update " .. k
+        end
+        local id = notifying_job("pt-jn-rate", "", steps)
+
+        -- A query sees the latest value, whatever the events are doing.
+        local view = vm:run("svctl --json job status " .. id).stdout
+        t:assert_eq(view:match('"status_text":"([^"]*)"'), "update 20",
+            "the view is current on every query: " .. view)
+
+        -- The burst took well under a second. Give any trailing event its
+        -- second, then count.
+        vm:run("sleep 2")
+        local count = 0
+        for _, event in ipairs(events({ "job.status" })) do
+            if event.payload:find(id, 1, true) then count = count + 1 end
+        end
+        t:assert(count >= 1, "the burst produced a job.status event")
+        t:assert(count <= 2,
+            "and at most one a second — twenty updates inside one second gave " .. count)
 
         vm:run("svctl --json job stop " .. id, { timeout = 60 })
     end)
