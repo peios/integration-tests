@@ -349,27 +349,67 @@ test("a service whose definition has been removed is not offered the terminal, h
             "and not to the higher-precedence one whose definition had gone")
     end)
 
--- Two more queues, on one boot.
+-- Three more queues, on one boot.
 --
 --   /dev/tty6  a holder that exits immediately and is restarted always,
 --              so it spends most of its life between attempts
 --   /dev/tty7  two deferred starts wanting one terminal at the same
 --              moment, which is one of the two places §11.6 says has
 --              genuinely simultaneous candidates
+--   /dev/tty8  a holder that will not die, and a service that wants the
+--              terminal after it has been given up on
+--
+-- The tty8 holder ignores SIGTERM, so a stop escalates to a kill, and it
+-- is provoked into Abandoned exactly as failure-unkillable.test.lua does
+-- it: its main process is moved out of its cgroup before the stop, where
+-- the cgroup kill cannot reach it, and a keeper keeps `main/` populated
+-- across the post-kill deadline. PostKillTimeout is raised so the keeper
+-- wins that race comfortably.
+local STUCK_ROOT = "/sys/fs/cgroup/peinit/pt-a-stuck"
+local stuck = [[#!/bin/sh
+trap '' TERM
+while : ; do /bin/sleep 1 ; done
+]]
+local keeper = [[#!/bin/sh
+N=0
+while [ $N -lt 40 ] ; do
+  /bin/sleep 300 &
+  echo $! > ]] .. STUCK_ROOT .. [[/main/cgroup.procs
+  N=$((N+1))
+  /bin/sleep 1
+done
+]]
 local backoff = peinit.boot({
     memory = MEM, cpus = CPUS,
     name = "terminal-backoff",
-    files = seed_services("zz-pt-backoff", {
-        on_tty("pt-b-holder", "/dev/tty6", {
-            triggers = { "boot" }, image = "/bin/true",
-            extra = { { name = "RestartPolicy", type = "dword", data = 2 },
-                      { name = "RestartDelay", type = "dword", data = 5 } },
-        }),
-        on_tty("pt-b-wait", "/dev/tty6", { triggers = { "tty:released" }, precedence = 99 }),
+    files = peinit.merge(
+        {
+            ["lcl/pt/stuck.sh"] = { stuck, exec = true },
+            ["lcl/pt/keeper.sh"] = { keeper, exec = true },
+        },
+        seed_services("zz-pt-backoff", {
+            on_tty("pt-b-holder", "/dev/tty6", {
+                triggers = { "boot" }, image = "/bin/true",
+                extra = { { name = "RestartPolicy", type = "dword", data = 2 },
+                          { name = "RestartDelay", type = "dword", data = 5 } },
+            }),
+            on_tty("pt-b-wait", "/dev/tty6", { triggers = { "tty:released" }, precedence = 99 }),
 
-        on_tty("pt-d-aaa", "/dev/tty7", { triggers = { "boot:settled" }, precedence = 1 }),
-        on_tty("pt-d-zzz", "/dev/tty7", { triggers = { "boot:settled" }, precedence = 90 }),
-    }),
+            on_tty("pt-d-aaa", "/dev/tty7", { triggers = { "boot:settled" }, precedence = 1 }),
+            on_tty("pt-d-zzz", "/dev/tty7", { triggers = { "boot:settled" }, precedence = 90 }),
+
+            on_tty("pt-a-stuck", "/dev/tty8", {
+                triggers = { "boot" }, image = "/lcl/pt/stuck.sh",
+                extra = { { name = "RestartPolicy", type = "dword", data = 0 },
+                          { name = "StopTimeout", type = "dword", data = 2 } },
+            }),
+            on_tty("pt-a-next", "/dev/tty8", {}),
+            {
+                path = [[Machine\System\Boot]],
+                values = { { name = "PostKillTimeout", type = "dword", data = 20 } },
+            },
+        })
+    ),
 })
 local deferred = backoff
 
@@ -401,6 +441,52 @@ test("deferred starts are dispatched highest-precedence first, so the winner tak
             "the higher-precedence deferred service took the terminal")
         t:assert(wait_state(deferred, "pt-d-aaa", "skipped"),
             "and the other was skipped: " .. tostring(state_of(deferred, "pt-d-aaa")))
+    end)
+
+test("an Abandoned service no longer holds its terminal",
+    { spec = "peinit *terminal.abandoned-releases" },
+    function(t)
+        t:assert(wait_state(backoff, "pt-a-stuck", "active"), "the tty8 holder is holding")
+
+        -- While it holds, the terminal check is live: a second service
+        -- asking for tty8 is skipped for it.
+        backoff:run("svctl start pt-a-next")
+        t:assert(wait_state(backoff, "pt-a-next", "skipped"),
+            "a second service was skipped while the holder was active")
+        t:assert(status(backoff, "pt-a-next"):find("tty_unavailable", 1, true),
+            "for the terminal: " .. status(backoff, "pt-a-next"))
+
+        -- Now make the holder unkillable, and stop it.
+        local pid = status(backoff, "pt-a-stuck"):match("pid: (%d+)")
+        t:assert(pid, "the holder has a main process")
+        backoff:run("mkdir -p /sys/fs/cgroup/pt-a-escape"):assert_ok()
+        backoff:run("echo " .. pid .. " > /sys/fs/cgroup/pt-a-escape/cgroup.procs"):assert_ok()
+        backoff:run("/lcl/pt/keeper.sh > /dev/null 2>&1 &")
+        backoff:run("svctl stop pt-a-stuck --no-wait"):assert_ok()
+        wait_until(function() return state_of(backoff, "pt-a-stuck") == "abandoned" end,
+            { timeout = 60, interval = 1, desc = "the holder to be abandoned" })
+
+        -- The process that survived still has the terminal as its
+        -- controlling terminal, and the next owner could not attach to it
+        -- while it did — which is the operator's problem the manual
+        -- accepts, not peinit's. It is killed here so that the start below
+        -- can succeed; the service stays Abandoned, since an exit in that
+        -- state changes nothing (§6.2), which is what is checked next.
+        backoff:run("kill -9 " .. pid)
+        wait_until(function()
+            return not status(backoff, "pt-a-stuck"):find("pid: " .. pid, 1, true)
+        end, { timeout = 30, interval = 0.5, desc = "peinit to reap the surviving process" })
+        t:assert_eq(state_of(backoff, "pt-a-stuck"), "abandoned",
+            "the holder is still Abandoned after its process went")
+
+        -- The same start as before, on the same terminal, with the holder
+        -- Abandoned rather than Active: not skipped, started.
+        backoff:run("svctl start pt-a-next")
+        t:assert(wait_state(backoff, "pt-a-next", "active"),
+            "the terminal was free to be taken: " .. status(backoff, "pt-a-next"))
+        local next_pid = status(backoff, "pt-a-next"):match("pid: (%d+)")
+        t:assert_eq(backoff:run("readlink /proc/" .. tostring(next_pid) .. "/fd/0").stdout:gsub("%s+$", ""),
+            "/dev/tty8", "and the new owner is on it")
     end)
 
 test("two services wanting one terminal from the boot plan: the loser is skipped and the machine survives",

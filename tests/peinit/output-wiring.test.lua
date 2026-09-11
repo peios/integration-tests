@@ -58,6 +58,11 @@ local vm = peinit.boot({
         {
             ["lcl/pt/say.sh"] = { say, exec = true },
             ["lcl/pt/onterminal.sh"] = { onterminal, exec = true },
+            -- Staged without the execute bit, which under KACS is the
+            -- intrinsic "this is executable" flag: a job naming it is
+            -- accepted and then fails between fork and exec, so it never
+            -- runs and never has pipes for the runtime to read.
+            ["lcl/pt/not-executable"] = "#!/bin/sh\necho pt-never-ran\n",
         },
         peinit.seed("zz-pt-wiring", {
             { path = [[Machine\System]] },
@@ -284,6 +289,101 @@ test("an attached sink gets the job's lines untagged and in the order it wrote t
 
         local job = submitted.stdout:match("job ([%x-]+):")
         t:assert(job, "svctl reported the job's identifier: " .. submitted.stdout)
+    end)
+
+--- Whether PID 1 holds a descriptor for `path`. A FIFO is named in
+--- /proc/<pid>/fd by its path, so this is how a test sees whether peinit
+--- still has a sink open.
+local function peinit_holds(vm, path)
+    return vm:run("ls -l /proc/1/fd").stdout:find("-> " .. path, 1, true) ~= nil
+end
+
+local function read_or_empty(vm, path)
+    local ok, text = pcall(function() return vm:read_file(path) end)
+    return ok and text or ""
+end
+
+--- A FIFO for a job's sink, with a reader that copies everything to a
+--- file and then writes `pt-eof` — which it can only do once every writer
+--- has closed the FIFO, so the marker is the moment the last holder of the
+--- sink let go of it.
+local function fifo_with_reader(vm, name)
+    local fifo, out = "/run/pt-" .. name .. ".fifo", "/run/pt-" .. name .. ".out"
+    vm:run("mkfifo " .. fifo):assert_ok()
+    vm:run("sh -c 'cat " .. fifo .. " > " .. out .. "; echo pt-eof >> " .. out ..
+        "' > /dev/null 2>&1 &"):assert_ok()
+    return fifo, out
+end
+
+test("the sink closes after the job's last line, at once on a failed write, and unwritten for a job that never ran",
+    { spec = "peinit *output.the-sink-is-closed-when-the-pipes-are" },
+    function(t)
+        -- Each sink here is svctl's standard output, pointed at a FIFO.
+        -- svctl is run without --wait, so it prints its acknowledgement
+        -- into the FIFO and exits: from then on PID 1 holds the only other
+        -- write end, and the reader reaches end-of-file exactly when PID 1
+        -- closes it.
+
+        -- The ordinary case. Two lines three seconds apart: between them
+        -- the job's pipes are open, and so is the sink.
+        local fifo, out = fifo_with_reader(vm, "close")
+        vm:run("svctl job submit --output /bin/sh -c " ..
+            "'sleep 1; echo pt-close-first; sleep 3; echo pt-close-last' > " .. fifo):assert_ok()
+        wait_until(function() return read_or_empty(vm, out):find("pt-close-first", 1, true) end,
+            { timeout = 15, interval = 0.2, desc = "the first line through the sink" })
+        t:assert(peinit_holds(vm, fifo), "between the two lines PID 1 holds the sink open")
+        t:assert(not read_or_empty(vm, out):find("pt-eof", 1, true),
+            "and the reader has not been given end-of-file")
+
+        local text = wait_until(function()
+            local s = read_or_empty(vm, out)
+            return s:find("pt-eof", 1, true) and s or nil
+        end, { timeout = 20, interval = 0.2, desc = "the sink to close" })
+        local last, eof = text:find("pt-close-last", 1, true), text:find("pt-eof", 1, true)
+        t:assert(last and last < eof,
+            "the last line went to the sink before it was closed: " .. text)
+        t:assert(not peinit_holds(vm, fifo), "and PID 1 holds it no longer")
+
+        -- A write that fails for a reason other than blocking. The reader
+        -- takes one line — svctl's acknowledgement, which names the job —
+        -- and goes, so the FIFO has no reader left and peinit's next write
+        -- to it fails with EPIPE. The job itself carries on for a minute.
+        local wfifo = "/run/pt-wfail.fifo"
+        vm:run("mkfifo " .. wfifo):assert_ok()
+        vm:run("sh -c 'head -n 1 " .. wfifo .. " > /run/pt-wfail.out' > /dev/null 2>&1 &"):assert_ok()
+        vm:run("svctl job submit --output /bin/sh -c " ..
+            "'sleep 2; echo pt-wfail-1; echo pt-wfail-2; sleep 60' > " .. wfifo):assert_ok()
+        local job = wait_until(function()
+            return read_or_empty(vm, "/run/pt-wfail.out"):match("job ([%x-]+):")
+        end, { timeout = 15, interval = 0.2, desc = "the reader to take svctl's acknowledgement" })
+        t:assert(peinit_holds(vm, wfifo), "PID 1 holds the sink while the job has written nothing")
+        wait_until(function() return not peinit_holds(vm, wfifo) end,
+            { timeout = 20, interval = 0.5, desc = "PID 1 to close a sink whose reader has gone" })
+        t:assert(vm:run("svctl job status " .. job).stdout:find("job " .. job .. ": running", 1, true),
+            "and it closed it at once, not when the job ended — the job is still running: " ..
+            vm:run("svctl job status " .. job).stdout)
+
+        -- A job that never ran. It fails between fork and exec, so it has
+        -- no pipes and writes nothing; the sink it was given is closed
+        -- without a line reaching it.
+        local nfifo, nout = fifo_with_reader(vm, "never")
+        vm:run("svctl job submit --output /lcl/pt/not-executable > " .. nfifo)
+        local never = wait_until(function()
+            local s = read_or_empty(vm, nout)
+            return s:find("pt-eof", 1, true) and s or nil
+        end, { timeout = 20, interval = 0.2, desc = "the never-run job's sink to close" })
+        local id = never:match("job ([%x-]+):")
+        t:assert(id, "svctl's acknowledgement named the job: " .. never)
+        t:assert(vm:run("svctl job status " .. id).stdout:find("job " .. id .. ": failed", 1, true),
+            "the job failed without running: " .. vm:run("svctl job status " .. id).stdout)
+        -- Everything the reader got is svctl's own acknowledgement — one
+        -- `job …:` line and `field: value` lines — and then end-of-file.
+        for line in never:gmatch("[^\r\n]+") do
+            t:assert(line == "pt-eof" or line:find("^job ") or line:find("^[%a ]+: "),
+                "nothing but svctl's acknowledgement reached the sink: " .. line)
+        end
+        t:assert(not never:find("pt-never-ran", 1, true), "the job wrote nothing")
+        t:assert(not peinit_holds(vm, nfifo), "and PID 1 holds nothing of it")
     end)
 
 test("a submitted job's output is recorded whether or not a sink was attached",

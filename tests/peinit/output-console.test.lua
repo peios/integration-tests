@@ -338,6 +338,72 @@ test("registryd's Phase 1 output is queryable from eventd and is not on the cons
             "the failure-path relay did not run on a boot where registryd was fine")
     end)
 
+test("a Phase 1 registryd that cannot serve has its own words relayed, and the machine is lost under CRIT",
+    {
+        spec = {
+            "peinit *console.a-phase-1-registryd-failure-is-relayed-to-the-console",
+            "peinit *console.the-crit-tag-means-the-machine-is-about-to-be-lost",
+        },
+    },
+    function(t)
+        -- The "says READY=1 and then cannot serve" arm. `/sbin/registryd`
+        -- is a StrataFS view whose create layer is `/lcl/sbin`, so a script
+        -- staged there is the binary Phase 1 execs. It says one thing on
+        -- each stream and hands over to pt-notify, which reports ready —
+        -- and then nothing answers the registry, so peinit's first read
+        -- after readiness fails. That is the case where registryd's own
+        -- words are the only explanation there is, and the one this relay
+        -- exists for; the "never becomes ready" arm is p1-recovery's.
+        local log = peinit.boot_to_recovery(t, {
+            name = "console-registryd",
+            memory = MEM, cpus = CPUS,
+            agent_timeout = 25,
+            files = peinit.merge(peinit.tool("pt-notify"), {
+                ["lcl/sbin/registryd"] = {
+                    "#!/bin/sh\n" ..
+                    "echo pt-registryd-said-on-stdout\n" ..
+                    "echo pt-registryd-said-on-stderr >&2\n" ..
+                    "exec /usr/bin/pt-notify sleep 1 send READY=1 sleep 300\n",
+                    exec = true,
+                },
+            }),
+        })
+        local all = peinit.lines(log)
+        local header, crit
+        for index, line in ipairs(all) do
+            if line == "[FAILED] peinit: registryd failed; what it said follows" then header = index end
+            if line:find("^%[ CRIT %] peinit: entering recovery: ") then crit = index end
+        end
+        t:assert(header, "peinit announced the relay with the FAILED tag: " .. log:sub(-1500))
+
+        -- What registryd wrote, each line under its stream's name, with
+        -- the blank tag every relayed line carries.
+        local relayed = {}
+        for index = header + 1, #all do
+            local stream, said = all[index]:match("^%[      %] registryd%((%a+)%): (.*)$")
+            if not stream then break end
+            relayed[said] = stream
+        end
+        t:assert_eq(relayed["pt-registryd-said-on-stdout"], "stdout",
+            "registryd's stdout line was relayed under its stream")
+        t:assert_eq(relayed["pt-registryd-said-on-stderr"], "stderr",
+            "and its stderr line under its own")
+
+        -- CRIT is the machine being lost: the boot is going to recovery,
+        -- and it is the last thing peinit says about the boot.
+        t:assert(crit and crit > header,
+            "the recovery entry follows, tagged CRIT: " ..
+            tostring(log:match("[^\n]*entering recovery[^\n]*")))
+        t:assert(not log:find("peinit: phase2 boot starting", 1, true),
+            "and the boot never reached Phase 2")
+
+        -- A boot that is not lost has no line in that column at all.
+        for _, line in ipairs(lines(vm)) do
+            t:assert(not line:find("^%[ CRIT %]"),
+                "the ordinary boot printed nothing under CRIT: " .. line)
+        end
+    end)
+
 test("the banner is the first thing peinit prints, and it names the mode the boot starts in",
     {
         spec = {

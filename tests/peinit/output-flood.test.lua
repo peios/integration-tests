@@ -131,6 +131,7 @@ local capped = peinit.boot({
             ["lcl/pt/long.sh"] = { long, exec = true },
             ["lcl/pt/flood.sh"] = { flood, exec = true },
         },
+        peinit.tool("pt-pipesz"),
         peinit.seed("zz-pt-flood", {
             { path = [[Machine\System]] },
             { path = [[Machine\System\Services]] },
@@ -147,6 +148,18 @@ local capped = peinit.boot({
             },
             oneshot("pt-long", "/lcl/pt/long.sh"),
             oneshot("pt-flood", "/lcl/pt/flood.sh"),
+            -- Asks the kernel how big its own stdout and stderr pipes are.
+            {
+                path = [[Machine\System\Services\pt-pipesz]],
+                values = {
+                    { name = "ImagePath", type = "sz", data = "/usr/bin/pt-pipesz" },
+                    { name = "Arguments", type = "multi", data = { "/run/pt-pipesz.out", "1", "2" } },
+                    { name = "Type", type = "dword", data = 1 },
+                    { name = "Identity", type = "sz", data = "SYSTEM" },
+                    { name = "Readiness", type = "dword", data = 1 },
+                    { name = "Triggers", type = "multi", data = { "boot" } },
+                },
+            },
             -- Both must have written everything before eventd exists, so
             -- that delivery is the buffer's ordered replay rather than
             -- the lossy live path: §11.3 allows loss downstream of the
@@ -193,6 +206,25 @@ test("a knob below its minimum is refused in favour of the compiled-in default, 
         -- decide how the machine boots.
         t:assert(log:find("peinit: phase2 boot complete", 1, true),
             "none of the three failed the boot")
+    end)
+
+test("MaxLogBufferPerService is the capacity of the service's own pipes",
+    { spec = "peinit *flood.the-per-service-bound-is-the-pipes-own-capacity" },
+    function(t)
+        -- Not a buffer peinit keeps beside the pipe: the pipe itself is
+        -- sized with F_SETPIPE_SZ, so the kernel does the buffering and the
+        -- bound is where it belongs. This boot sets the key to one page,
+        -- which is a sixteenth of what a Linux pipe gets by default, and
+        -- the service asks F_GETPIPE_SZ about the descriptors it was
+        -- handed.
+        local report = wait_until(function()
+            local ok, text = pcall(function() return capped:read_file("/run/pt-pipesz.out") end)
+            return ok and text:find("fd=2", 1, true) and text or nil
+        end, { timeout = 30, interval = 0.5, desc = "pt-pipesz to report" })
+        t:assert(report:find("fd=1 pipe_size=4096\n", 1, true),
+            "the service's stdout pipe holds exactly the configured 4096 bytes: " .. report)
+        t:assert(report:find("fd=2 pipe_size=4096\n", 1, true),
+            "and so does its stderr pipe: " .. report)
     end)
 
 test("a line over the limit is cut to exactly the limit and marked, and its tail is not emitted again",
@@ -258,3 +290,31 @@ test("a service that writes far faster than the pipe holds loses no line at the 
             "every one of the " .. FLOOD_LINES .. " lines survived the read; missing " ..
             #missing .. ", first few: " .. table.concat(missing, ",", 1, math.min(#missing, 8)))
     end)
+
+-- Two halves of this page are left to unit tests, each for its own
+-- reason. The per-event half of the read budget is on the wire, in
+-- output-eventd-wire.test.lua, and the loop's priorities are raced for
+-- real in output-fairness.test.lua; what those cannot show is below.
+
+test("a turn with several ready pipes reads up to the budget from each",
+    {
+        spec = "peinit *flood.the-read-budget-bounds-one-readable-event",
+        covered_by = "cargo:peinit2 supervisor::tests::shutdown::runtime_turn::work_pump::boot::one_turn_reads_up_to_the_budget_from_each_ready_pipe",
+        skip = "which reads share one loop iteration is invisible from a guest — the wire shows one datagram " ..
+            "per readable event but nothing marks where a turn ends; runs under cargo test -p peinit2 " ..
+            "--all-features --lib " ..
+            "supervisor::tests::shutdown::runtime_turn::work_pump::boot::one_turn_reads_up_to_the_budget_from_each_ready_pipe",
+    },
+    function(t) end)
+
+test("the shutdown deadline timer is handled after signals and before every other source",
+    {
+        spec = "peinit *flood.signals-are-handled-at-the-highest-priority",
+        covered_by = "cargo:peinit2 supervisor::tests::shutdown::runtime_turn::loop_turn::runtime_turn_handles_signals_and_the_power_button_first_then_the_deadline_timer",
+        skip = "the deadline timer is armed only during a shutdown, when no service start — the authd call a " ..
+            "test holds PID 1 on — is accepted (§12.2 step 1), and the one other way to park PID 1, a " ..
+            "ptrace-stop, sends it to recovery (PEI-1085); runs under cargo test -p " ..
+            "peinit2 --all-features --lib " ..
+            "supervisor::tests::shutdown::runtime_turn::loop_turn::runtime_turn_handles_signals_and_the_power_button_first_then_the_deadline_timer",
+    },
+    function(t) end)

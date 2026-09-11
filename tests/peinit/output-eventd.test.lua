@@ -38,6 +38,18 @@ while [ $i -lt ]] .. LINES .. [[ ]; do
 done
 ]]
 
+-- Four hundred numbered lines of about a hundred bytes, written as fast
+-- as the shell can, for the test that needs a burst to land entirely
+-- inside the window in which eventd is gone.
+local GAP_LINES = 400
+local gap = [[#!/bin/sh
+i=0
+while [ $i -lt ]] .. GAP_LINES .. [[ ]; do
+    echo "pt-gap-$i-..........................................................................................."
+    i=$((i + 1))
+done
+]]
+
 local function early_service_keys(extra)
     local keys = {
         { path = [[Machine\System]] },
@@ -56,6 +68,39 @@ local function early_service_keys(extra)
             path = [[Machine\System\Services\eventd]],
             values = {
                 { name = "Requires", type = "multi", data = { "authd", "pt-handoff" } },
+                -- Eight seconds between a crash and the restart, rather than
+                -- the default one, so that a test which kills eventd has a
+                -- window it can put a whole burst of output into by
+                -- construction instead of by racing the restart.
+                { name = "RestartDelay", type = "dword", data = 8 },
+            },
+        },
+        -- Started by hand, never at boot: the burst for the gap test. It
+        -- stays Completed once it has run, so that "the burst is over" is
+        -- a state a test can read rather than infer.
+        {
+            path = [[Machine\System\Services\pt-gap]],
+            values = {
+                { name = "ImagePath", type = "sz", data = "/lcl/pt/gap.sh" },
+                { name = "Type", type = "dword", data = 1 },
+                { name = "RemainAfterExit", type = "dword", data = 1 },
+                { name = "Identity", type = "sz", data = "SYSTEM" },
+                { name = "Readiness", type = "dword", data = 1 },
+            },
+        },
+        -- A service that tries to write to eventd's log socket itself,
+        -- rather than through its pipes. SYSTEM, deliberately: the user a
+        -- token names is not what the socket's descriptor turns on.
+        {
+            path = [[Machine\System\Services\pt-broker]],
+            values = {
+                { name = "ImagePath", type = "sz", data = "/usr/bin/pt-notify" },
+                { name = "Arguments", type = "multi", data = {
+                    "--socket", "/run/eventd/log.sock", "--log", "/run/pt-broker.log",
+                    "send-nocred", "pt-broker-direct", "sleep", "300",
+                } },
+                { name = "Identity", type = "sz", data = "SYSTEM" },
+                { name = "Readiness", type = "dword", data = 1 },
             },
         },
     }
@@ -95,11 +140,33 @@ local function records_from(vm, origin, want, tries)
     return records
 end
 
+--- Restart a service once it is Active.
+---
+--- PEI-803: a restart that reaches a service in Backoff takes PID 1 to
+--- recovery (`MissingCurrentMainJob`). The restarts in this file are
+--- only a way of making a service write something, and a
+--- loaded host can leave one of the image's services between attempts at
+--- the moment a test reaches for it. This file intermittently lost its
+--- whole VM at its first restart — the connection closed mid-reply, then
+--- no control socket — which is that bug's symptom exactly, though the
+--- state pnpd was in at the time was not captured. So they wait for Active
+--- first: the claims here are about forwarding, not about that.
+local function restart_when_active(vm, service)
+    wait_until(function()
+        return vm:run("svctl status " .. service).stdout:find(service .. ": active", 1, true)
+    end, { timeout = 60, interval = 1, desc = service .. " to be active before it is restarted" })
+    return vm:run("svctl restart " .. service)
+end
+
 local vm = peinit.boot({
     memory = MEM, cpus = CPUS,
     name = "handoff",
     files = peinit.merge(
-        { ["lcl/pt/early.sh"] = { early, exec = true } },
+        {
+            ["lcl/pt/early.sh"] = { early, exec = true },
+            ["lcl/pt/gap.sh"] = { gap, exec = true },
+        },
+        peinit.tool("pt-notify"),
         peinit.seed("zz-pt-handoff", early_service_keys())
     ),
 })
@@ -240,7 +307,7 @@ test("output produced after the handoff is forwarded as it arrives",
         -- already Active when the service was restarted, so peinit read
         -- the pipe and sent it on the same turn.
         local before = #records_from(vm, "pnpd", 0)
-        vm:run("svctl restart pnpd"):assert_ok()
+        restart_when_active(vm, "pnpd"):assert_ok()
         local after = records_from(vm, "pnpd", before + 1)
         t:assert(#after > before,
             "the restarted service's output reached eventd live, " ..
@@ -294,8 +361,8 @@ test("peinit uses one datagram socket for eventd and does not make another per b
         -- Several hundred more records through the sink. If a socket
         -- were created per record, or per batch, this would show.
         for _ = 1, 3 do
-            vm:run("svctl restart pnpd")
-            vm:run("svctl restart installerd")
+            restart_when_active(vm, "pnpd")
+            restart_when_active(vm, "installerd")
         end
         vm:run("sleep 3")
 
@@ -322,7 +389,7 @@ test("when eventd dies the buffer takes over, and the handoff repeats when it co
 
         -- Output produced while eventd is gone. It cannot be forwarded,
         -- so if it turns up later it was buffered in the meantime.
-        vm:run("svctl restart installerd")
+        restart_when_active(vm, "installerd")
 
         t:assert(wait_for_eventd(vm), "eventd restarted and became Active again")
         local restarted = vm:run("svctl status eventd").stdout:match("pid: (%d+)")
@@ -337,6 +404,93 @@ test("when eventd dies the buffer takes over, and the handoff repeats when it co
         local records = records_from(vm, "installerd", 1)
         t:assert(#records > 0,
             "output written while eventd was down reached the restarted eventd")
+    end)
+
+test("no service can write to the log socket itself, so every record comes through peinit",
+    { spec = "peinit *eventd.peinit-is-the-only-service-output-broker" },
+    function(t)
+        -- A service, started as SYSTEM, sends a datagram straight to the
+        -- log socket instead of writing to its pipes. Its token carries the
+        -- Service logon group, as every phase-2 service token does, and the
+        -- socket's descriptor denies the write to that group before it
+        -- allows SYSTEM — so the send is refused however the service is
+        -- configured.
+        vm:run("svctl start pt-broker"):assert_ok()
+        local sent = wait_until(function()
+            local ok, text = pcall(function() return vm:read_file("/run/pt-broker.log") end)
+            return ok and text:match("step=send%-nocred [^\n]*") or nil
+        end, { timeout = 20, interval = 0.5, desc = "the service's direct send to be attempted" })
+        t:assert(sent:find("rc=-1 errno=13", 1, true),
+            "the service's own send to the log socket was refused with EACCES: " .. sent)
+
+        -- The same send made with peinit's bootstrap token — the one the
+        -- provium agent runs on, SYSTEM without the Service group — is
+        -- admitted. That is the only kind of token that has it, and peinit
+        -- is the only thing that holds one while services run.
+        local agent = vm:run("/usr/bin/pt-notify --socket /run/eventd/log.sock " ..
+            "--log /run/pt-broker-agent.log send-nocred pt-agent-direct")
+        agent:assert_ok()
+        local agent_sent = vm:read_file("/run/pt-broker-agent.log")
+        t:assert(agent_sent:find("step=send%-nocred rc=%d+ errno=0"),
+            "the bootstrap token's send was admitted: " .. agent_sent)
+    end)
+
+test("the log gap while eventd is down is bounded by the pre-eventd buffer",
+    { spec = "peinit *eventd.the-gap-is-bounded-by-the-buffer-size" },
+    function(t)
+        -- Sixteen kilobytes of buffer, re-read on reload (§11.2), against
+        -- about forty kilobytes of output written while eventd is gone.
+        local BUFFER = 16384
+        vm:run([[reg set 'Machine\System\Init' PreEventdBuffer dword:]] .. BUFFER):assert_ok()
+        vm:run("svctl reload-config"):assert_ok()
+
+        local pid = vm:run("svctl status eventd").stdout:match("pid: (%d+)")
+        t:assert(pid, "eventd has a process to kill")
+        vm:run("kill -9 " .. pid):assert_ok()
+        wait_until(function()
+            return not vm:run("svctl status eventd").stdout:find("eventd: active", 1, true)
+        end, { timeout = 10, interval = 0.2, desc = "peinit to see eventd go" })
+
+        -- The whole burst inside the gap: eventd restarts eight seconds
+        -- after the crash, and the burst is over well before that — which
+        -- the state read straight afterwards confirms rather than assumes.
+        vm:run("svctl start pt-gap"):assert_ok()
+        wait_until(function()
+            return vm:run("svctl status pt-gap").stdout:find("pt-gap: completed", 1, true)
+        end, { timeout = 10, interval = 0.2, desc = "the burst to finish" })
+        t:assert(not vm:run("svctl status eventd").stdout:find("eventd: active", 1, true),
+            "and eventd was still gone when it had")
+
+        t:assert(wait_for_eventd(vm), "eventd came back")
+        local records = records_from(vm, "pt-gap", 1)
+        vm:run("sleep 2")
+        records = records_from(vm, "pt-gap", #records)
+        vm:run([[reg set 'Machine\System\Init' PreEventdBuffer dword:1048576]])
+        vm:run("svctl reload-config")
+
+        t:assert(#records > 0, "the end of the gap reached eventd once it was back")
+        t:assert(#records < GAP_LINES,
+            "but not all of it: " .. #records .. " of " .. GAP_LINES .. " lines")
+
+        -- What survives is what the buffer held: the newest lines, and no
+        -- more of them than fit in its capacity by peinit's own accounting
+        -- (the origin, the line, a timestamp, a job id and thirty-two bytes
+        -- of overhead each). Everything older is the gap.
+        local kept, bytes = {}, 0
+        for _, record in ipairs(records) do
+            local index = tonumber(record.message:match("^pt%-gap%-(%d+)%-"))
+            if index then kept[index] = true end
+            bytes = bytes + #"pt-gap" + #record.message + 8 + 16 + 32
+        end
+        t:assert(kept[GAP_LINES - 1], "the last line written survived the gap")
+        t:assert(not kept[0], "the first did not")
+        t:assert(bytes <= BUFFER,
+            "and what survived fits the buffer: " .. bytes .. " of " .. BUFFER .. " bytes")
+        local oldest = GAP_LINES - 1
+        while kept[oldest - 1] do oldest = oldest - 1 end
+        for i = oldest, GAP_LINES - 1 do
+            t:assert(kept[i], "the survivors are one unbroken run up to the newest: missing " .. i)
+        end
     end)
 
 test("a pre-eventd backlog larger than one datagram is still delivered",
@@ -385,7 +539,7 @@ test("a pre-eventd backlog larger than one datagram is still delivered",
         -- Not the flood's own output: another service's, produced after
         -- eventd was serving, which has nothing to do with the batch that
         -- failed and should not be affected by it.
-        other:run("svctl restart pnpd")
+        restart_when_active(other, "pnpd")
         -- Ten seconds rather than the usual wait: this case is expected to
         -- fail, and a known-bug that spends a minute failing is a minute
         -- off every run of the file.
