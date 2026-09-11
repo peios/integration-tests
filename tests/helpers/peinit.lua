@@ -322,4 +322,59 @@ function M.started_services(log)
     return names
 end
 
+--- A self-relative security descriptor granting SYSTEM `mask`, hex
+--- encoded for `reg set … hex:`.
+---
+--- `ServiceSecurity` and `ControlSecurity` are REG_BINARY values and the
+--- registry has no SDDL form of either, so a test that wants to say
+--- "SYSTEM may only query this" has to say it in bytes. The layout is
+--- MS-DTYP's, which KACS uses verbatim (pkm/sd.h): a twenty-byte header
+--- of revision, control and four offsets, then the owner and group SIDs,
+--- then an ACL of one allow-ACE.
+---
+--- SYSTEM rather than a parameter because SYSTEM is the caller in every
+--- test that uses this. The agent runs on peinit's own token, so a
+--- descriptor naming SYSTEM is a descriptor about the caller — which is
+--- what makes the whole rights surface reachable from a profile with one
+--- principal on it. A second principal is not needed to observe a
+--- denial; a descriptor that refuses the one we have is enough.
+function M.system_descriptor_hex(mask)
+    local sid = string.pack("BB", 1, 1) .. string.pack(">I2>I4", 0, 5)
+        .. string.pack("<I4", 18)
+    local ace = string.pack("<BBI2I4", 0, 0, 8 + #sid, mask) .. sid
+    local acl = string.pack("<BBI2I2I2", 2, 0, 8 + #ace, 1, 0) .. ace
+    -- DACL_PRESENT | SELF_RELATIVE.
+    local header = string.pack("<BBI2I4I4I4I4", 1, 0, 0x8004,
+        20, 20 + #sid, 0, 20 + 2 * #sid)
+    return ((header .. sid .. sid .. acl):gsub(".",
+        function(byte) return string.format("%02x", byte:byte()) end))
+end
+
+--- Whether an `svctl` result was a denial: `"denied"` or `"allowed"`.
+---
+--- ACCESS_DENIED is peinit's answer to a failed check; any other answer
+--- is the command running and succeeding or failing on its own merits.
+--- The distinction matters: `reload` on an inactive Oneshot fails for a
+--- reason that has nothing to do with the descriptor, and a test that
+--- only read the exit code could not tell the two apart.
+---
+--- "Any other answer" has to be an answer, though, and this raises when
+--- it is not one. svctl exits 0 on success and 1 when peinit answered
+--- with an error; 69 means it never reached the socket and 127 that
+--- there was no svctl to run. Reading those as "allowed" makes every
+--- allowed-side assertion pass on a machine where peinit was never asked
+--- anything — which is how control-rights.test.lua first went seven for
+--- seven against an image that shipped no svctl (PEI-1071), and how the
+--- chapter-4 descriptor files would have passed their "allowed" rows
+--- against the same image without noticing.
+function M.verdict(result)
+    local out = result.stdout .. (result.stderr or "")
+    if out:find("ACCESS_DENIED", 1, true) then
+        return "denied"
+    end
+    assert(result.exit_code == 0 or result.exit_code == 1,
+        "svctl got no answer from peinit (exit " .. tostring(result.exit_code) .. "): " .. out)
+    return "allowed"
+end
+
 return M

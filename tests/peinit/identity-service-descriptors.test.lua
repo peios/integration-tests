@@ -15,31 +15,12 @@
 local peinit = require("helpers.peinit")
 peinit.claim(1)
 
--- A self-relative security descriptor, hex-encoded for `reg set`.
---
--- Built here rather than read from anywhere: `ServiceSecurity` is a
--- REG_BINARY value and there is no SDDL form of it in the registry, so a
--- test that wants to say "SYSTEM may only query" has to say it in bytes.
--- The layout is MS-DTYP's, which KACS uses verbatim (pkm/sd.h): a
--- twenty-byte header of revision, control and four offsets, then the
--- owner and group SIDs, then an ACL of allow-ACEs.
-local function sid_bytes(authority, subs)
-    local out = string.pack("BB", 1, #subs) .. string.pack(">I2>I4", 0, authority)
-    for _, sub in ipairs(subs) do out = out .. string.pack("<I4", sub) end
-    return out
-end
-
-local SYSTEM_SID = sid_bytes(5, { 18 })
-
-local function descriptor_hex(mask)
-    local ace = string.pack("<BBI2I4", 0, 0, 8 + #SYSTEM_SID, mask) .. SYSTEM_SID
-    local acl = string.pack("<BBI2I2I2", 2, 0, 8 + #ace, 1, 0) .. ace
-    -- DACL_PRESENT | SELF_RELATIVE.
-    local header = string.pack("<BBI2I4I4I4I4", 1, 0, 0x8004,
-        20, 20 + #SYSTEM_SID, 0, 20 + 2 * #SYSTEM_SID)
-    return ((header .. SYSTEM_SID .. SYSTEM_SID .. acl):gsub(".",
-        function(byte) return string.format("%02x", byte:byte()) end))
-end
+-- A self-relative security descriptor granting SYSTEM one mask,
+-- hex-encoded for `reg set`. `ServiceSecurity` is a REG_BINARY value and
+-- there is no SDDL form of it in the registry, so a test that wants to
+-- say "SYSTEM may only query" has to say it in bytes; the bytes are
+-- assembled in `helpers.peinit`, which three files now need.
+local descriptor_hex = peinit.system_descriptor_hex
 
 local TARGET = [[Machine\System\Services\pt-svcsd]]
 local SERVICES = [[Machine\System\Services]]
@@ -61,17 +42,11 @@ local vm = peinit.boot({
     }),
 })
 
--- ACCESS_DENIED is peinit's answer to a failed check; anything else is
+-- ACCESS_DENIED is peinit's answer to a failed check; any other answer is
 -- the command running and succeeding or failing on its own merits. The
--- distinction matters: `reload` on an inactive Oneshot fails for a
--- reason that has nothing to do with the descriptor, and a test that
--- only looked at the exit code could not tell the two apart.
-local function verdict(result)
-    if (result.stdout .. result.stderr):find("ACCESS_DENIED", 1, true) then
-        return "denied"
-    end
-    return "allowed"
-end
+-- helper raises when svctl got no answer at all, so the "allowed" half of
+-- every row can fail.
+local verdict = peinit.verdict
 
 local function run(command, service)
     return verdict(vm:run("svctl " .. command .. " " .. (service or "pt-svcsd")))

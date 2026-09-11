@@ -23,27 +23,13 @@ local CONTROL = [[Machine\System\Init]]
 -- A self-relative security descriptor granting SYSTEM one mask, hex
 -- encoded for `reg set`. `ControlSecurity` is a REG_BINARY value with no
 -- SDDL form in the registry, so a test that wants to say "SYSTEM may
--- only reload" has to say it in bytes. MS-DTYP's layout, which KACS uses
--- verbatim (pkm/sd.h).
-local SYSTEM_SID = string.pack("BB", 1, 1) .. string.pack(">I2>I4", 0, 5)
-    .. string.pack("<I4", 18)
+-- only reload" has to say it in bytes; the bytes are assembled in
+-- `helpers.peinit`, which three files now need.
+local descriptor_hex = peinit.system_descriptor_hex
 
-local function descriptor_hex(mask)
-    local ace = string.pack("<BBI2I4", 0, 0, 8 + #SYSTEM_SID, mask) .. SYSTEM_SID
-    local acl = string.pack("<BBI2I2I2", 2, 0, 8 + #ace, 1, 0) .. ace
-    -- DACL_PRESENT | SELF_RELATIVE.
-    local header = string.pack("<BBI2I4I4I4I4", 1, 0, 0x8004,
-        20, 20 + #SYSTEM_SID, 0, 20 + 2 * #SYSTEM_SID)
-    return ((header .. SYSTEM_SID .. SYSTEM_SID .. acl):gsub(".",
-        function(byte) return string.format("%02x", byte:byte()) end))
-end
-
-local function verdict(result)
-    if (result.stdout .. result.stderr):find("ACCESS_DENIED", 1, true) then
-        return "denied"
-    end
-    return "allowed"
-end
+-- Raises rather than answering "allowed" when svctl got no answer at all,
+-- so the allowed side of every pair below can fail.
+local verdict = peinit.verdict
 
 local function reload_config()
     return verdict(vm:run("svctl reload-config"))
@@ -88,9 +74,18 @@ test("shutdown and reload-config are checked against peinit's own descriptor",
 
 test("the two control rights are separate grants",
     {
+        -- §10.2's rights table states the same two rows from the
+        -- dispatch side, and its other eleven are walked in
+        -- `control-rights.test.lua`. These two are here rather than
+        -- there because proving them means proving a shutdown is
+        -- *refused* without ever proving one is permitted — permitting
+        -- it stops the machine — and that is the trick this file is
+        -- built around.
         spec = {
             "peinit *svcsd.control-shutdown-grants-poweroff-reboot-halt",
             "peinit *svcsd.control-reload-config-grants-a-definition-reread",
+            "peinit *dispatch.right-shutdown",
+            "peinit *dispatch.right-reload-config",
         },
     },
     function(t)

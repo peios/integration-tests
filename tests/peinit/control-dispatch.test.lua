@@ -2,11 +2,10 @@
 -- does anything: the shutdown gate, target resolution, the access check,
 -- and what is filtered rather than denied.
 --
--- Everything reachable here is on the resolution and filtering side. The
--- access check itself needs a caller peinit will refuse, and this
--- profile has one principal — SYSTEM — with every right on everything,
--- so the rights table and the denial path are stated in the manual and
--- left for a suite that can log a second principal on.
+-- Everything here is on the resolution and filtering side. The rights
+-- table and the denial path are `control-rights.test.lua`: a caller
+-- peinit will refuse does not need a second principal on the machine,
+-- only a descriptor that refuses the one there is.
 
 local peinit = require("helpers.peinit")
 peinit.claim(2)
