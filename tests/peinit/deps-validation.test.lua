@@ -332,6 +332,56 @@ test("Safe mode still blocks a hard dependency that is missing or disabled",
         end
     end)
 
+test("a missing target fails a hard dependent and is dropped from a soft one",
+    {
+        spec = {
+            "peinit *validate.a-missing-hard-target-fails-the-dependent-and-a-missing-soft-one-is-dropped",
+            "peinit *rel.a-missing-requires-target-fails-the-dependent-at-validation",
+        },
+    },
+    function(t)
+        -- One service per row of the table, each naming the same service
+        -- nothing defines, in a Full boot. The machine above has cycles in
+        -- its registry and so its own findings; this one has nothing else
+        -- wrong with it, so every outcome is the missing target's.
+        local function edge(kind) return { name = kind, type = "multi", data = { "pt-v-absent" } } end
+        local other = peinit.boot({
+            memory = "800M",
+            name = "missingtargets",
+            files = peinit.seed("zz-pt-missing", {
+                { path = [[Machine\System]] },
+                { path = [[Machine\System\Services]] },
+                oneshot("pt-v-m-requires", { BOOT, edge("Requires") }),
+                oneshot("pt-v-m-bindsto", { BOOT, edge("BindsTo") }),
+                oneshot("pt-v-m-wants", { BOOT, edge("Wants") }),
+                oneshot("pt-v-m-conflicts", { BOOT, edge("Conflicts") }),
+            }),
+        })
+
+        -- The soft rows start, so waiting for their console lines is the
+        -- synchronisation point for everything the boot decided.
+        wait_for_line(other, "peinit: service pt-v-m-wants started")
+        wait_for_line(other, "peinit: service pt-v-m-conflicts started")
+
+        for _, name in ipairs({ "pt-v-m-requires", "pt-v-m-bindsto" }) do
+            local entry = status(other, name)
+            t:assert_eq(entry.state, "failed", name .. " is failed rather than started")
+            t:assert_eq(entry.cause, "dependency_failure",
+                name .. " is failed with DependencyFailure")
+        end
+        -- "Detected at graph validation": the finding is a
+        -- graph.validation_error, not something the start stumbled on.
+        local events = findings(other, "pt%-v%-m%-requires")
+        t:assert(events:find("pt-v-absent", 1, true),
+            "and the finding names the missing target: " .. events)
+
+        for _, name in ipairs({ "pt-v-m-wants", "pt-v-m-conflicts" }) do
+            local entry = status(other, name)
+            t:assert_eq(entry.cause, "clean_exit",
+                name .. "'s missing target was dropped, and it ran to a clean exit")
+        end
+    end)
+
 test("validation runs on every graph build",
     { spec = "peinit *validate.validation-runs-once-per-graph-build" },
     function(t)
