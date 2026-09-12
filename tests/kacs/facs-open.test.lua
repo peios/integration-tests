@@ -521,13 +521,7 @@ test("the unlink happens at final close, not at open",
     end)
 
 test("a pathname already gone at final close is a no-op, not a new error",
-    { spec = "PKM *facs.open.delete-on-close-final-close",
-      tags = { "known-bug" },
-      skip = "known-bug: running this oopses the guest kernel (NULL deref in " ..
-             "ihold via d_delete_notify <- vfs_unlink <- " ..
-             "pkm_kacs_unlink_delete_on_close_file <- security_file_release), " ..
-             "which wedges the whole file, so the body is left unexecuted. " ..
-             "See the report." },
+    { spec = "PKM *facs.open.delete-on-close-final-close" },
     function(t)
         -- §3.9.2: the unlink happens at final close, "and if the
         -- pathname is already gone by then the close path treats it as
