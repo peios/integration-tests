@@ -126,18 +126,14 @@ test("everything else, tmpfs included, defaults to deny-missing",
     end)
 
 test("an NTFS volume is deny-missing too, and an inode with no descriptor there is refused as missing",
-    { spec = "PKM *facs.storage.default-deny-missing", tags = { "known-bug" } }, function(t)
+    { spec = "PKM *facs.storage.default-deny-missing" }, function(t)
         -- ntfs3 is a block-device filesystem with no magic of its own in
         -- the classifier, so it lands with everything else. Its
         -- descriptors are `system.ntfs_security`, and on a volume made
         -- by mkntfs the root has none ntfs3 can read (its descriptor is
-        -- an inline attribute, security id 0), so deny-missing's answer
-        -- for the root is the same as for a descriptor-less tmpfs file:
-        -- EACCES.
-        --
-        -- known-bug PEI-715: ntfs3 reports that inode as ENOENT rather
-        -- than ENODATA and KACS hands the errno up as the verdict, so
-        -- today every path on the volume is ENOENT.
+        -- an inline attribute, security id 0, which the driver reports
+        -- as ENOENT), so deny-missing's answer for the root is the same
+        -- as for a descriptor-less tmpfs file: EACCES.
         if not fx.present(vm, fx.NTFS_IMAGE) then
             t:skip("the profile was built without mkntfs, so there is no NTFS image")
         end
