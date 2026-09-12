@@ -125,11 +125,16 @@ test("bare rd.break opens the shell before the first hook runs",
             "and on exit the boot resumed and ran the whole sequence")
     end)
 
-test("the hook sequence is read before the bare-rd.break breakpoint, so a broken sequence never reaches the shell",
-    { spec = "prelude break.sequence-is-read-before-the-breakpoint" }, function(t)
-        local vm = provium:vm("seqfirst", "prelude")
+test("the bare-rd.break breakpoint comes before the sequence is read, so a broken sequence still reaches the shell",
+    { spec = "prelude break.bare-stops-before-the-sequence-is-read" }, function(t)
+        local vm = provium:vm("seqbreak", "prelude")
         -- The case an operator would most want a shell for: an image
-        -- whose sequence prelude cannot parse.
+        -- whose sequence prelude cannot parse. Bare rd.break means "the
+        -- kernel virtual filesystems are up and nothing
+        -- deployment-specific has happened yet", and reading the manifest
+        -- is not deployment-specific work — so the breakpoint fires
+        -- first, and the manifest is a file the operator could rewrite
+        -- by hand from the shell it opens.
         local err = prelude.boot_halts(t, vm, {
             kernel_cmdline_append = "rd.break",
             files = with_rescue_sh(prelude.files({
@@ -138,16 +143,25 @@ test("the hook sequence is read before the bare-rd.break breakpoint, so a broken
             })),
         })
 
-        t:assert(err:find("hookseq", 1, true),
-            "prelude refused the sequence on its marker: " .. err:sub(-400))
-        t:assert(not err:find("rd.break: stopping before any hooks", 1, true),
-            "the rd.break breakpoint never fired — read_hook_seq() runs before it, "
-            .. "so a sequence prelude cannot read halts the boot without ever opening the shell")
-        -- The shell that did open is the failure one, after the diagnosis.
-        local diag = err:find("boot failed:", 1, true)
+        local brk = err:find("rd.break: stopping before any hooks (exit to continue)", 1, true)
+        t:assert(brk,
+            "the breakpoint fired even though the sequence is unreadable: " ..
+            err:sub(-500))
+        local diag = err:find("hookseq", 1, true)
+        t:assert(diag, "prelude then refused the sequence on its marker")
+        t:assert(brk < diag,
+            "and did so only after the breakpoint, not instead of it")
+        -- Two shells on this boot: the breakpoint's, which resumed, and
+        -- the failure's, which halts. The first is the one at issue.
         local shell = err:find("pt|rescue|", 1, true)
-        t:assert(diag and shell and diag < shell,
-            "the only shell on this boot came after the failure, not before the hooks")
+        t:assert(shell and shell < diag,
+            "the shell the operator asked for opened before the diagnosis, " ..
+            "not after it: a breakpoint resumes on exit where a failure " ..
+            "shell halts, and a manifest is exactly the thing you would " ..
+            "want to repair and carry on from")
+        t:assert_eq(#rescues(err), 2,
+            "the breakpoint shell, then the failure shell — the sequence is " ..
+            "still broken, so the boot still ends")
     end)
 
 test("rd.break=<hook> is comma-separated and repeatable",
@@ -368,6 +382,12 @@ test("a rescue shell prelude cannot exec is logged and the boot carries on",
             "prelude reached the breakpoint")
         t:assert(at(log, "prelude: rescue: exec /usr/bin/sh failed:"),
             "and reported that it could not exec a shell there")
+        t:assert(not at(log, "prelude: rescue shell exited"),
+            "and did not then claim a shell exited: the child left with 127 " ..
+            "without ever being one, and saying otherwise reads as though " ..
+            "the operator had been given a shell and walked out of it")
+        t:assert(at(log, "prelude: rescue: no shell was started"),
+            "it says what actually happened instead")
         t:assert(at(log, "prelude: hook: " .. HOOKS .. "mount-root.sh"),
             "the boot carried on into the hooks regardless")
         t:assert_eq(vm:read_file("/proc/1/comm"):gsub("%s+$", ""), "peinit2",
