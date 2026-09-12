@@ -127,11 +127,13 @@ local SERVICES = {
         { name = "WorkingDirectory", type = "sz", data = "/pt-not-here" },
     } },
     -- No token can be minted for this identity, so step 4 fails and no
-    -- child is ever created.
+    -- child is ever created. Started by its test rather than at boot: a
+    -- non-SYSTEM identity carries a derived Requires on authd, and a boot
+    -- start on a loaded host can fail on authd's state first, as a
+    -- DependencyFailure, before a token is ever asked for.
     { path = [[Machine\System\Services\pt-badidentity]], values = {
         { name = "ImagePath", type = "sz", data = "/bin/sleep" },
         { name = "Arguments", type = "multi", data = { "3600" } },
-        { name = "Triggers", type = "multi", data = { "boot" } },
         { name = "Identity", type = "sz", data = "pt-no-such-principal" },
         { name = "Readiness", type = "dword", data = 1 },
         { name = "RestartPolicy", type = "dword", data = 0 },
@@ -168,8 +170,14 @@ local SERVICES = {
     } },
 }
 
+-- `peios.quiet=0`, because pt-badidentity is started after the boot and
+-- its test reads the console line peinit prints for the failed launch.
+-- At the default level peinit stays out of a terminal a service owns, and
+-- by then the login service owns /dev/console, so the line would be
+-- dropped.
 local vm = peinit.boot({
     name = "preexec",
+    append = "peios.quiet=0",
     files = peinit.merge(FILES, peinit.seed("pt-preexec", SERVICES)),
 })
 
@@ -331,9 +339,14 @@ test("a token that cannot be materialised fails the start before there is a chil
         -- child in existence, and its failure has a classification of
         -- its own for exactly that reason: nothing was forked, so this
         -- is not a child setup failure.
+        --
+        -- authd settled first, so the start reaches step 4 at all.
+        peinit.settle(vm)
+        vm:run("svctl --no-wait start pt-badidentity")
         local status = settled_status("pt-badidentity")
         t:assert_eq(status.cause, "parent_setup_failure",
-            "the failure is classified as the parent's: " .. status.text)
+            "the failure is classified as the parent's: " .. status.text ..
+            " (authd: " .. vm:run("svctl status authd").stdout:gsub("\n", " ") .. ")")
         t:assert(not status.text:find("pid:"), "and there is no process to speak of")
 
         t:assert(vm:console():read_log():find(
