@@ -330,7 +330,7 @@ test("once written back the descriptor is ordinary and no longer generation-tagg
     end)
 
 test("an ancestor synthesised for a descendant persists when it is next accessed itself",
-    { spec = "PKM *facs.storage.ancestor-also-persists", tags = { "known-bug" } },
+    { spec = "PKM *facs.storage.ancestor-also-persists" },
     function(t)
         -- cgroup2 is the reachable case: kernfs never stamps an inode, so
         -- `a` and `a/b` below are genuinely missing, and kernfs stores
