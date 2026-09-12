@@ -103,24 +103,21 @@ test("a disabled service is loaded into the model but excluded from the boot gra
     end)
 
 test("an undecodable definition fails only itself, and the boot proceeds",
-    {
-        spec = "peinit *phase2.an-undecodable-definition-fails-only-that-service",
-        -- PEI-812: the planner blocks the undecodable service with
-        -- ValidationError, but the service table has no entry for it,
-        -- so applying the block fails with UnknownService and the
-        -- whole boot goes to recovery.
-        tags = { "known-bug" },
-    },
+    { spec = "peinit *phase2.an-undecodable-definition-fails-only-that-service" },
     function(t)
-        -- This used to take the machine to the recovery console; the
-        -- failure-summary table said so long after the code stopped
-        -- doing it (PEI-798). An unclosed quote in a command is one of
-        -- the decode failures the manual lists — in a *command* field.
-        -- ImagePath is a path and is not command-parsed at all: a quote
-        -- in it is taken literally, the exec fails with ENOENT at
-        -- launch, and the service goes to Backoff. That is a different
-        -- failure from the one this test is about, and an earlier
-        -- version of this test asserted on it by mistake.
+        -- An unclosed quote in a command is one of the decode failures
+        -- the manual lists — in a *command* field. ImagePath is a path
+        -- and is not command-parsed at all: a quote in it is taken
+        -- literally, the exec fails with ENOENT at launch, and the
+        -- service goes to Backoff. That is a different failure from the
+        -- one this test is about, and an earlier version of this test
+        -- asserted on it by mistake.
+        --
+        -- Until PEI-812 the planner blocked the undecodable service with
+        -- ValidationError but the service table had no entry for it, so
+        -- applying the block failed with UnknownService and the whole
+        -- boot went to recovery. The blocked name now gets a placeholder
+        -- entry, already Failed, which is what status reports below.
         local other = peinit.boot({
             name = "undecodable",
             files = peinit.seed("pt-bad", {
@@ -147,6 +144,12 @@ test("an undecodable definition fails only itself, and the boot proceeds",
             "the broken one is Failed: " .. status)
         t:assert(status:find('"cause":"validation_error"', 1, true),
             "with cause ValidationError: " .. status)
+        -- peinit holds no definition for it, and says so.
+        t:assert(status:find('"definition_removed":true', 1, true),
+            "and is reported definition-removed, as there is nothing to start from: " .. status)
+        local start = other:run("svctl --json start pt-broken")
+        t:assert(start.stdout:find("UNKNOWN_SERVICE", 1, true),
+            "a start is refused with UNKNOWN_SERVICE: " .. start.stdout)
     end)
 
 test("a missing Requires target blocks its dependent, and the block propagates",

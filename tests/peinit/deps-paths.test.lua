@@ -154,9 +154,9 @@ test("a definition that does not parse is caught when the registry is read, and 
         --
         -- The boot half of this bullet — a decode failure at boot
         -- failing that service and letting the rest continue — is
-        -- PEI-812 and is covered, failing, by phase2.test.lua. What is
-        -- reachable is the reload half, where the consequence is the
-        -- opposite: one undecodable key rejects the entire transaction.
+        -- covered by phase2.test.lua. This is the reload half, where
+        -- the consequence is the opposite: one undecodable key rejects
+        -- the entire transaction.
         local other = peinit.boot({
             memory = "800M",
             name = "decode",

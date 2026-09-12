@@ -9,13 +9,9 @@
 --
 -- The probe is reload-config rather than a boot, for two reasons. The
 -- cheap one is that a boot per rule would be a hundred and fifty boots.
--- The load-bearing one is that the boot reader is currently broken for
--- exactly this input: an undecodable key takes the whole machine to the
--- recovery console instead of failing that one service (PEI-812, and
--- `phase2.test.lua` records it), so a boot cannot be used to ask what a
--- *particular* definition does. reload-config is the reader that works,
--- and it is also sharper: it distinguishes the two ways a definition can
--- be refused.
+-- The sharper one is that reload-config distinguishes the two ways a
+-- definition can be refused, where a boot folds both into a Failed
+-- service (the boot half is `phase2.test.lua`'s).
 --
 --   accepted    the read succeeded and the service is in the model
 --   decode      the read was refused with INTERNAL_ERROR -- the key
