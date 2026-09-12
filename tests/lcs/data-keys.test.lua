@@ -236,8 +236,10 @@ test("the generator is the kernel's UUIDv4",
             local c = lcs.create_key(s, w, { parent_fd = parent, path = "Uuid" .. i })
             t:assert(c.ret >= 0, "create: " .. sys.errname(c.errno or 0))
             local guid = assert(lcs.created_guid(s, mark))
-            t:assert_eq(guid:byte(7) >> 4, 4,
-                "RFC 4122 version 4 in the version nibble")
+            -- PCDS layout: Data3 is little-endian in bytes 6-7, so the
+            -- version nibble is the high nibble of byte 7 (Lua byte 8).
+            t:assert_eq(guid:byte(8) >> 4, 4,
+                "version 4 in the version nibble of Data3")
             t:assert_eq(guid:byte(9) >> 6, 2,
                 "RFC 4122 variant bits (10x) in the variant octet")
             t:assert(not seen[guid], "and random bytes elsewhere: no repeats")

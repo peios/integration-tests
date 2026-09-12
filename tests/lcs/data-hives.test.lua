@@ -727,7 +727,7 @@ test("nothing in the kernel generates a scope GUID",
         -- kernel's UUIDv4 generator sets. LCS takes it verbatim from
         -- userspace at registration and compares it verbatim on a token.
         local chosen = string.rep("\xab", 16)
-        t:assert(chosen:byte(7) >> 4 ~= 4, "the chosen value is not UUIDv4-shaped")
+        t:assert(chosen:byte(8) >> 4 ~= 4, "the chosen value is not UUIDv4-shaped")
         local src = lcs.source(vm, { hives = {
             { name = "Chosen", private = true, scope = chosen },
         } })

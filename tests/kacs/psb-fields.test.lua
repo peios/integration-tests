@@ -94,10 +94,13 @@ test("every process gets a fresh process GUID at fork; it is not copied and neve
             t:assert_neq(bb, agent, "nor is its sibling's")
             t:assert_neq(a1, bb, "and the two children differ from each other")
             t:assert_eq(a1, a2, "a process keeps one GUID for its lifetime")
-            -- UUID v4: version nibble 4, variant 10xx (PKM §3.A).
-            t:assert_eq((a1:byte(7) & 0xF0) >> 4, 4,
-                "the GUID is a version-4 UUID: " .. psb.guid_hex(a1))
-            t:assert_eq((a1:byte(9) & 0xC0), 0x80, "carrying the RFC 4122 variant")
+            -- A version-4 GUID in the PCDS layout: Data3 is little-endian
+            -- in bytes 6-7, so the version nibble is the high nibble of
+            -- byte 7 (Lua byte 8); Data4 is raw, so the variant bits sit
+            -- in byte 8 (Lua byte 9). Byte 6 is random.
+            t:assert_eq((a1:byte(8) & 0xF0) >> 4, 4,
+                "the GUID is a version-4 GUID: " .. psb.guid_hex(a1))
+            t:assert_eq((a1:byte(9) & 0xC0), 0x80, "carrying the variant bits")
         end)
         a:kill(); a:join(); b:kill(); b:join()
         if not ok then error(err, 0) end
