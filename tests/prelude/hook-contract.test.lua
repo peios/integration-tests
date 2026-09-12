@@ -204,23 +204,55 @@ test("a hook killed by a signal is a failure naming the signal",
             "and read no exit code from it: a signalled child never exited")
     end)
 
--- C19. `wait_failure` has an arm for a stopped child — status low bits
--- 0x7f — that reports `stopped` and is fatal like any other wait
--- failure. No guest can reach it: `spawn_and_wait` calls
--- `waitpid(pid, &mut status, 0)` with no WUNTRACED, so a hook that stops
--- itself is never reported at all and prelude blocks in waitpid until
--- the VM's boot timeout takes the machine away. A live test would assert
--- a hang, and would assert the absence of the very message the claim is
--- about.
+-- C19. A hook that takes a job-control stop is a failure, not a pause.
+-- `spawn_and_wait` waits with WUNTRACED, so a stop is a wait event like
+-- any other: `wait_failure` decodes the 0x7f in the low seven bits as
+-- `stopped`, prelude refuses the boot naming the hook, and the machine
+-- halts.
+--
+-- The hook is written out in full rather than driven through
+-- `pt-hook.sh`, because what is being tested is a process that never
+-- returns from the middle of itself: the line after the stop must not
+-- print, and that is only legible if the whole script is here.
+--
+-- Nothing in an initramfs can resume it — no job control, no shell, no
+-- other process — so prelude kills the stopped child before it returns.
+-- That is asserted only through the halt: a process table is not
+-- reachable from a boot that ends here.
 test("a hook stopped by a signal is a failure",
-    { spec = "prelude hook.stopped-is-a-failure",
-      covered_by = "cargo:prelude::tests::signal_termination_is_reported",
-      skip = "unreachable from a guest: spawn_and_wait's waitpid passes no " ..
-             "WUNTRACED, so a stopped hook hangs the boot instead of being " ..
-             "reported; wait_failure's decoding is exercised by " ..
-             "prelude::tests::signal_termination_is_reported, which covers " ..
-             "the sibling signal arm — the `stopped` arm itself has no test" },
-    function(t) end)
+    { spec = "prelude hook.stopped-is-a-failure" }, function(t)
+        local path = prelude.HOOK_DIR .. "/pt-stop.sh"
+        local vm = provium:vm("stopped", "prelude")
+        local out = prelude.boot_halts(t, vm, {
+            files = prelude.files({
+                seq = "hookseq 2\nhook " .. path .. "\n",
+                extra = { {
+                    path = path,
+                    content = table.concat({
+                        "#!/usr/bin/sh",
+                        "echo 'pt|stopper|outcome=stopping' >&2",
+                        "kill -STOP $$",
+                        "echo 'pt|stopper|outcome=resumed' >&2",
+                        "exit 0",
+                        "",
+                    }, "\n"),
+                    mode = 0x1ed,
+                } },
+            }),
+        })
+
+        t:assert(out:find("pt|stopper|outcome=stopping", 1, true),
+            "the hook reached the point of stopping itself: " .. out:sub(-400))
+        t:assert(out:find("hook " .. path .. ": stopped", 1, true),
+            "prelude reported the hook stopped, naming it: " .. out:sub(-400))
+        t:assert(not out:find("pt|stopper|outcome=resumed", 1, true),
+            "and never resumed it: a stop is a failure, not a pause")
+        t:assert(not out:find(path .. ": exited with status", 1, true),
+            "no exit code was read from it — the status word holds the " ..
+            "stopping signal where an exit code would be")
+        t:assert(out:find("halting system", 1, true),
+            "and the machine halted rather than blocking in waitpid forever")
+    end)
 
 -- C20. When `execve` fails, the child is already forked: it logs and
 -- `_exit(127)`, so the parent sees an ordinary exit status of 127 and
