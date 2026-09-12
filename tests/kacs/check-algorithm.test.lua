@@ -551,14 +551,46 @@ test("privilege_granted is narrowed by what survived, so confinement shrinks the
             .. confined.ret .. " " .. sys.errname(confined.errno or 0))
     end)
 
-test("in result-list mode a scalar staged delta sets the mismatch flag even when no node differs",
+test("in result-list mode a staged DACL granting less sets the mismatch flag through the scalar totals",
     { spec = "PKM *check.algorithm.scalar-delta-sets-flag" }, function(t)
-        -- Both the effective and the staged rule DACL fail to evaluate.
-        -- The effective error path contributes privilege_granted to both
-        -- the scalar total and every node; the staged one contributes
-        -- zero to the scalar total and privilege_granted to every node.
-        -- The per-node lists therefore agree and the scalar totals do not.
+        -- The effective rule DACL grants the request; the staged one, an
+        -- empty ACL, grants nothing. The staged scalar total therefore
+        -- falls below the effective one, and the diagnostic reports the
+        -- two scalar totals alongside the per-node view — the comparison
+        -- is not mode-branched, so the scalar delta is what the flag
+        -- reflects in this mode as in the scalar one.
         local sid = set_policy(t, 9403,
+            { { effective_dacl = access.acl({ grant(READ, E) }), staged_dacl = access.acl({}) } })
+        local sd = access.simple({ grant(READ, E) },
+            { sacl = access.acl({ scoped_ace(sid) }) })
+        local r
+        local events = recording(function()
+            r = as_subject_list({}, sd, READ, FLAT)
+        end)
+        drop(sid)
+        local diags = of(events, "caap-policy-diagnostic")
+        t:log(string.format("ret=%d sm=%d nodes 0x%x/0x%x/0x%x diagnostics=%d",
+            r.ret, r.staging_mismatch, r.nodes[1].granted, r.nodes[2].granted,
+            r.nodes[3].granted, #diags))
+        for i = 1, 3 do
+            t:assert_eq(r.nodes[i].granted, READ,
+                "node " .. i .. " is granted by the effective rule")
+        end
+        t:assert_eq(#diags, 1, "one staging diagnostic")
+        t:assert_eq(diags[1].payload.effective_granted_access, READ,
+            "the effective scalar total holds the right")
+        t:assert_eq(diags[1].payload.staged_granted_access, 0,
+            "and the staged scalar total does not")
+        t:assert_eq(r.staging_mismatch, 1, "so the flag is set")
+    end)
+
+test("a rule whose staged DACL errors preserves the same privilege-granted bits as an effective one",
+    { spec = "PKM *check.cap.rule-error-denies-except-privileges" }, function(t)
+        -- Both the effective and the staged rule DACL fail to evaluate.
+        -- One rule governs both evaluations: each contributes exactly the
+        -- privilege-granted bits, to the scalar total and to every node
+        -- alike, so the two totals agree and nothing is staged-different.
+        local sid = set_policy(t, 9404,
             { { effective_dacl = OVERSIZE_ACL, staged_dacl = OVERSIZE_ACL } })
         local sd = access.simple({ grant(STD.GENERIC_ALL, E) },
             { sacl = access.acl({ scoped_ace(sid) }) })
@@ -576,14 +608,9 @@ test("in result-list mode a scalar staged delta sets the mismatch flag even when
             t:assert_eq(r.nodes[i].granted, STD.ACCESS_SYSTEM_SECURITY,
                 "node " .. i .. " keeps the privilege-granted right")
         end
-        t:assert_eq(#diags, 1, "one staging diagnostic")
-        t:assert_eq(diags[1].payload.object_results_differ, false,
-            "reporting that no per-node result differs")
-        t:assert_eq(diags[1].payload.effective_granted_access, STD.ACCESS_SYSTEM_SECURITY,
-            "while the effective scalar total holds the right")
-        t:assert_eq(diags[1].payload.staged_granted_access, 0, "and the staged scalar total is empty")
-        t:assert_eq(r.staging_mismatch, 1,
-            "the comparison is not mode-branched, so the scalar delta alone sets the flag")
+        t:assert_eq(r.staging_mismatch, 0,
+            "the staged error path preserves the scalar privilege-granted bits too")
+        t:assert_eq(#diags, 0, "and there is no staging diagnostic to raise")
     end)
 
 test("privilege-use folds across nodes: success on any node, failure only on none",
