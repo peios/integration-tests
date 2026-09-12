@@ -80,10 +80,39 @@ test("a sequence newer than prelude understands, beside a usable one, is a warni
             "and says it is newer than this prelude supports")
         t:assert(log:find("using " .. prelude.SEQ_V2, 1, true),
             "and names the one it fell back on")
+        t:assert(log:find(
+            "[ WARN ] prelude: /system/prelude/hooks.seq.3 is version 3", 1, true),
+            "it is tagged as a warning, not as progress: " .. log:sub(-800))
         t:assert(log:find(chose(prelude.SEQ_V2), 1, true),
             "the boot continued on the highest supported sequence")
         t:assert(log:find("root mounted at /mnt/rootfs", 1, true),
             "a newer sequence beside a usable one is survivable, not fatal")
+    end)
+
+-- The same warning under the console blackout. `peios.quiet=2` removes
+-- progress and success, and a warning is neither: the image is not
+-- running the manifest it considers authoritative, and a preference
+-- about noise is not an instruction to hide that. Production images boot
+-- quiet, so this is the case in which the warning actually has to arrive.
+test("the newer-sequence warning survives peios.quiet=2",
+    { spec = "prelude seq.newer-beside-usable-is-a-warning" },
+    function(t)
+        local vm = provium:vm("newer-quiet", "prelude")
+        vm:boot({
+            kernel_cmdline_append = "peios.quiet=2",
+            files = prelude.files({
+                version = 3,
+                seq = "hookseq 3\nhook /usr/libexec/prelude/hooks.d/from-the-future.sh\n",
+            }),
+        })
+
+        local log = vm:console():read_log()
+        t:assert(log:find(
+            "[ WARN ] prelude: /system/prelude/hooks.seq.3 is version 3", 1, true),
+            "the warning is on the console despite the blackout: " .. log:sub(-800))
+        t:assert(not log:find("prelude: hook sequence: ", 1, true),
+            "while the progress line naming the chosen sequence is gone, " ..
+            "which is what says the blackout was in force")
     end)
 
 test("a hooks.seq suffix that is not a number is not a candidate at all",
