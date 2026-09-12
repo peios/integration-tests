@@ -209,12 +209,12 @@ test("a POSIX ACL xattr write by pathname is denied with EOPNOTSUPP",
     end)
 
 test("a POSIX ACL xattr write through a descriptor is denied with EOPNOTSUPP",
-    { spec = "PKM *facs.use.posix-acl-write-eopnotsupp", tags = { "known-bug" } },
+    { spec = "PKM *facs.use.posix-acl-write-eopnotsupp" },
     function(t)
         -- §3.9.4 names fsetxattr and fremovexattr in the same row as the
         -- pathname forms and says the POSIX ACL refusal is EOPNOTSUPP
         -- "rather than EACCES so that probe-then-tolerate callers behave
-        -- sensibly". The descriptor hook answers EACCES.
+        -- sensibly".
         local p = file("posixacl-fd")
         with(t, p, R.READ_DATA | R.WRITE_DATA | R.WRITE_EA | R.READ_EA, function(fd)
             local set = facs.fsetxattr(vm, fd, "system.posix_acl_access", POSIX_ACL)
