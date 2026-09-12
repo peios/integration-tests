@@ -356,21 +356,16 @@ test("a stop in Backoff clears the service and cancels the restart that was pend
     end)
 
 test("a restart in Backoff cancels the automatic restart and queues an administrator's",
-    {
-        spec = "peinit *dispatch.backoff-restart-replaces-the-automatic-one",
-        tags = { "known-bug" },
-    },
+    { spec = "peinit *dispatch.backoff-restart-replaces-the-automatic-one" },
     function(t)
-        -- This is the cell that does not work. peinit admits the command
-        -- and answers it, and then tears down its own runtime: the
-        -- control and jobs sockets are unlinked and the system is left
-        -- with no way to administer it, with nothing on the console to
-        -- say why.
-        --
-        -- A restart from Backoff is dispatched as a restart of a running
-        -- service, and in Backoff there is no running main job to
-        -- restart — nor a Backoff -> Stopping transition for the stop
-        -- half to make. The assertions below state the manual.
+        -- A restart in Backoff is deferred, like a start is: the
+        -- administrator's Restart operation is queued Pending, honours
+        -- the remaining delay, and is what the backoff deadline
+        -- executes in place of the automatic restart. Nothing goes to
+        -- the control boundary, because there is no process for it to
+        -- act on. Until PEI-803 the command was dispatched as a restart
+        -- of a running service; the boundary found no main job, that
+        -- error ended the runtime loop, and both sockets were unlinked.
         local vm = boot("backoff-restart")
         t:assert_eq(state_of(vm, "pt-backoff"), "backoff", "the service is in Backoff")
 
@@ -378,16 +373,23 @@ test("a restart in Backoff cancels the automatic restart and queues an administr
         t:assert(r.operation, "the restart was accepted and named an operation: " .. r.raw)
 
         -- The system is still administrable afterwards. Everything below
-        -- depends on this, and it is the assertion that fails.
+        -- depends on this.
         local after = vm:run("svctl --json status pt-backoff")
         t:assert(after.exit_code ~= 69,
             "the control socket is still there after the restart: " ..
             tostring(after.stderr))
+        t:assert_eq(after.stdout:match('"state":"([^"]+)"'), "backoff",
+            "and the service is still in Backoff, waiting out its delay: " .. after.stdout)
 
         -- And the queued restart is the administrator's, replacing the
-        -- automatic one rather than sitting behind it.
+        -- automatic one rather than sitting behind it — the very
+        -- operation the caller was handed, and a Restart, not a Start.
         t:assert(after.stdout:find('"source":"admin"', 1, true),
             "the pending operation is the administrator's: " .. after.stdout)
+        t:assert(after.stdout:find('"id":"' .. r.operation .. '"', 1, true),
+            "and it is the operation the caller holds: " .. after.stdout)
+        t:assert(after.stdout:find('"type":"restart"', 1, true),
+            "and it keeps its type: " .. after.stdout)
     end)
 
 test("start clears Skipped first and then re-evaluates the conditions from scratch",
@@ -492,18 +494,17 @@ test("a service whose definition is gone refuses to start and still answers a qu
     end)
 
 test("a service whose definition is gone still accepts a stop",
-    {
-        spec = "peinit *dispatch.a-definition-removed-service-accepts-only-stop-and-status",
-        tags = { "known-bug" },
-    },
+    { spec = "peinit *dispatch.a-definition-removed-service-accepts-only-stop-and-status" },
     function(t)
-        -- The other half of the same rule, and the half that does not
-        -- hold: stop is the one lifecycle command a definition-removed
-        -- service is supposed to accept — it is how an administrator
-        -- gets rid of the process a removed definition left running —
-        -- and sending it takes peinit's whole control interface down.
-        -- The connection is dropped mid-answer and both sockets are
-        -- gone afterwards, with nothing on the console.
+        -- The other half of the same rule: stop is the one lifecycle
+        -- command a definition-removed service accepts — it is how an
+        -- administrator gets rid of the process a removed definition
+        -- left running. The exit that ends the drain also discards the
+        -- entry (§3.8), and the waiting caller is answered after the
+        -- discard with the state the service last had. Until PEI-803
+        -- that answer looked the entry up, found nothing, and the
+        -- lookup error ended the runtime loop: the connection was
+        -- dropped mid-answer and both sockets were gone afterwards.
         local vm = boot("defremoved-stop")
         vm:run([[reg del 'Machine\System\Services\pt-active' --recursive]]):assert_ok()
         vm:run("svctl --json reload-config"):assert_ok()
@@ -518,5 +519,15 @@ test("a service whose definition is gone still accepts a stop",
             tostring(stop.stderr))
         t:assert(stop.exit_code == 0,
             "the stop was accepted: " .. stop.stdout .. " / " .. tostring(stop.stderr))
-        t:assert_eq(state_of(vm, "pt-active"), "inactive", "and the service stopped")
+        t:assert_eq(stop.stdout:match('"state":"([^"]+)"'), "inactive",
+            "and the answer reports the state the service last had: " .. stop.stdout)
+
+        -- The drained entry took the ordinary removal discard, so the
+        -- service is now one peinit does not know — and peinit is still
+        -- there to say so.
+        local after = vm:run("svctl --json status pt-active")
+        t:assert(after.exit_code ~= 69,
+            "the control socket is still there after the stop: " .. tostring(after.stderr))
+        t:assert(after.stdout:find("UNKNOWN_SERVICE", 1, true),
+            "and the entry was discarded once its instance exited: " .. after.stdout)
     end)
