@@ -1,14 +1,13 @@
 -- seed-sd's command line: claims A1–A9 of the seed-sd inventory.
 --
--- seed-sd parses its own arguments in nine lines of `match`, and the
--- shape that falls out of them is not the shape a getopt would give.
--- There is no `--`, no clustering, no "flags must come first", and —
--- the sharp end — no such thing as an unrecognised flag: the first
--- argument the match arms do not claim becomes the path, whatever it
--- looks like. `seed-sd --bogus` therefore seeds a file called
--- `--bogus`, and it is only the *second* unclaimed argument that is an
--- error. That is asserted here against a file genuinely named
--- `--bogus`, because nothing else demonstrates it.
+-- seed-sd parses its own arguments in a short `match`, and the shape
+-- that falls out of it is not quite the shape a getopt would give.
+-- There is no clustering and no "flags must come first": the first
+-- argument the match arms do not claim is the path, wherever it sits.
+-- What it does have is the two things that stop a typo becoming a
+-- silent no-op — an argument beginning with `-` that no arm claims is
+-- refused rather than taken as a filename, and `--` ends flag parsing
+-- so a path that genuinely begins with a dash can still be named.
 --
 -- Every case here is about the argument vector, so each one runs the
 -- real binary the prelude package ships (`/bin/seed-sd`, staged into
@@ -29,7 +28,19 @@ local vm = provium:vm("cli", "prelude"):boot()
 -- The binary, and the one line it prints when the parse gives up. The
 -- program name in it is argv[0], which is the path the agent exec'd.
 local SEED = "/bin/seed-sd"
-local USAGE = "usage: " .. SEED .. " [-r|--recursive] [--sddl <descriptor>] <path>\n"
+local USAGE = "usage: " .. SEED .. " [-r|--recursive] [--sddl <descriptor>] [--] <path>\n"
+
+--- Everything seed-sd prints when it refuses a command line: the
+--- mistake, then the grammar.
+---
+--- Naming the mistake is the whole point of the first line. The usage
+--- line is identical for all four ways of getting one — no path, two
+--- paths, `--sddl` with nothing after it, an unknown flag — so on its
+--- own it asks the reader of a boot log to spot the difference between
+--- what they typed and a grammar.
+local function refusal(problem)
+    return "seed-sd: " .. problem .. "\n" .. USAGE
+end
 
 local ALL = kacs.SI.OWNER | kacs.SI.GROUP | kacs.SI.DACL
 local CREATOR_OWNER = token.sid(3, 0)
@@ -129,7 +140,8 @@ test("--sddl with nothing after it is a usage error, not a fall back to the defa
 
         local r = vm:run(SEED, { path, "--sddl" })
         t:assert_eq(r.exit_code, 2, "a missing --sddl value is a usage error: " .. r.stderr)
-        t:assert_eq(r.stderr, USAGE, "and prints the usage line")
+        t:assert_eq(r.stderr, refusal("--sddl needs a descriptor after it"),
+            "naming this mistake rather than the grammar")
         t:assert(untouched(path),
             "silently seeding the built-in default when the caller asked for " ..
             "something else is the failure this flag exists to make impossible")
@@ -160,7 +172,8 @@ test("a second non-flag argument is a usage error",
 
         local r = vm:run(SEED, { first, second })
         t:assert_eq(r.exit_code, 2, "two paths is a usage error: " .. r.stderr)
-        t:assert_eq(r.stderr, USAGE, "and prints the usage line")
+        t:assert_eq(r.stderr, refusal('more than one path, at "' .. second .. '"'),
+            "naming the argument that was one too many")
         t:assert(untouched(first), "the first path was not seeded")
         t:assert(untouched(second), "nor the second: the parse fails before anything is stamped")
     end)
@@ -169,20 +182,21 @@ test("no path at all is a usage error",
     { spec = "seed-sd cli.no-path-is-a-usage-error" }, function(t)
         local bare = vm:run(SEED, {})
         t:assert_eq(bare.exit_code, 2, "no arguments at all is a usage error: " .. bare.stderr)
-        t:assert_eq(bare.stderr, USAGE, "and prints the usage line")
+        t:assert_eq(bare.stderr, refusal("no path given"), "saying which mistake it was")
 
         -- A flag is not a path: `-r` is claimed by its match arm and
         -- leaves the path unset.
         local flag_only = vm:run(SEED, { "-r" })
         t:assert_eq(flag_only.exit_code, 2, "and so is a flag with no path: " .. flag_only.stderr)
-        t:assert_eq(flag_only.stderr, USAGE, "with the same usage line")
+        t:assert_eq(flag_only.stderr, refusal("no path given"), "with the same message")
     end)
 
 test("the usage line goes to stderr and exits 2, distinct from 1 for an operational failure",
     { spec = "seed-sd cli.usage-goes-to-stderr-and-exits-two" }, function(t)
         local usage = vm:run(SEED, {})
         t:assert_eq(usage.exit_code, 2, "a usage error exits 2")
-        t:assert_eq(usage.stderr, USAGE, "with the usage line on stderr")
+        t:assert_eq(usage.stderr, refusal("no path given"),
+            "with the mistake and the usage line on stderr")
         t:assert_eq(usage.stdout, "", "and nothing at all on stdout")
 
         -- An operational failure: the path parses fine and cannot be
@@ -216,27 +230,74 @@ test("flags may appear after the path",
             "and still took its value: the trailing flag was honoured")
     end)
 
-test("an unrecognised flag is taken as the path when no path has been seen yet",
-    { spec = "seed-sd cli.an-unknown-flag-is-taken-as-the-path" }, function(t)
-        -- There is no such thing as an unrecognised flag: the catch-all
-        -- arm is `_ if path.is_none()`, so the first argument the named
-        -- arms do not claim becomes the path whatever it looks like.
-        -- `--bogus` is therefore a filename, and this is a file called
-        -- `--bogus`. It has to be named relatively — an absolute path
-        -- would not look like a flag at all.
+test("an unrecognised flag is a usage error, not a path",
+    { spec = "seed-sd cli.an-unknown-flag-is-a-usage-error" }, function(t)
+        -- The mistake this refusal exists for. Taken as a path, a typo
+        -- like `--recursiv` made seed-sd report an ENOENT about a file
+        -- named after the flag, exit 1 rather than the usage 2, and
+        -- leave the tree it was asked to seed untouched — an unseeded
+        -- tree is MISSING descriptors, which under KACS denies
+        -- everything to everyone, somewhere else and later.
+        --
+        -- The file is named relatively: an absolute path would not look
+        -- like a flag at all, and the flag is what is being refused.
         local dir = workspace("unknown-flag")
         local bogus = marked(dir .. "/--bogus")
 
         local r = vm:run(SEED, { args = { "--bogus" }, cwd = dir })
-        t:assert_eq(r.exit_code, 0, "`seed-sd --bogus` succeeded: " .. r.stderr)
-        t:assert_eq(r.stderr, "", "with no complaint about an unknown flag")
-        t:assert(seeded(bogus), "it seeded a file called --bogus")
+        t:assert_eq(r.exit_code, 2,
+            "`seed-sd --bogus` is refused, not obeyed: " .. r.stderr)
+        t:assert_eq(r.stderr,
+            refusal('unknown flag "--bogus" (put -- before a path that begins with a dash)'),
+            "naming the flag and how to mean it as a path")
+        t:assert(untouched(bogus),
+            "and nothing was stamped: a file called --bogus is still marked")
 
-        -- Only a *second* unmatched argument is an error, and it is the
-        -- ordinary two-paths one.
+        -- The real-world shape: a mistyped flag in front of the path
+        -- the caller actually meant. The refusal comes before any
+        -- stamping, so the target is untouched and the status says
+        -- "usage" rather than "this node could not be seeded".
+        local target = marked(dir .. "/target", true)
+        local typo = vm:run(SEED, { "--recursiv", target })
+        t:assert_eq(typo.exit_code, 2, "the typo is a usage error: " .. typo.stderr)
+        t:assert(typo.stderr:find('unknown flag "--recursiv"', 1, true),
+            "naming what was not understood, rather than an ENOENT about a " ..
+            "file named after it: " .. typo.stderr)
+        t:assert(untouched(target),
+            "the path it was given is untouched, which is why this has to be " ..
+            "an error rather than a best effort")
+    end)
+
+test("-- ends flag parsing, so a path may begin with a dash",
+    { spec = "seed-sd cli.double-dash-ends-flag-parsing" }, function(t)
+        -- The escape hatch the refusal above makes necessary. Without
+        -- it there would be no way to name a file whose name begins
+        -- with a dash.
+        local dir = workspace("end-of-flags")
+        local bogus = marked(dir .. "/--bogus")
+
+        local r = vm:run(SEED, { args = { "--", "--bogus" }, cwd = dir })
+        t:assert_eq(r.exit_code, 0, "`seed-sd -- --bogus` succeeded: " .. r.stderr)
+        t:assert_eq(r.stderr, "", "with nothing to say about it")
+        t:assert(seeded(bogus), "it seeded the file called --bogus")
+
+        -- Flags before the terminator still count; after it, nothing
+        -- does — so a second argument is the ordinary two-paths error
+        -- rather than a flag.
+        local sub = marked(dir .. "/-r-dir", true)
+        local child = marked(dir .. "/-r-dir/child")
+        local rec = vm:run(SEED, { args = { "-r", "--", "-r-dir" }, cwd = dir })
+        t:assert_eq(rec.exit_code, 0, "-r before -- was still the flag: " .. rec.stderr)
+        t:assert(seeded(child),
+            "it recursed into the directory named -r-dir, so -r was read as " ..
+            "the flag and -r-dir as the path")
+        t:assert(seeded(sub), "and stamped the directory itself")
+
         marked(dir .. "/--other")
-        local two = vm:run(SEED, { args = { "--bogus", "--other" }, cwd = dir })
-        t:assert_eq(two.exit_code, 2, "a second unmatched argument is a usage error: " .. two.stderr)
-        t:assert_eq(two.stderr, USAGE, "and prints the usage line")
+        local two = vm:run(SEED, { args = { "--", "--bogus", "--other" }, cwd = dir })
+        t:assert_eq(two.exit_code, 2,
+            "a second argument after -- is a second path, not a flag: " .. two.stderr)
+        t:assert_eq(two.stderr, refusal('more than one path, at "--other"'),
+            "and is reported as one")
         t:assert(untouched(dir .. "/--other"), "having stamped neither")
     end)
