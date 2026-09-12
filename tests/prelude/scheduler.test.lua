@@ -167,7 +167,13 @@ test("the stuck diagnosis names every outstanding hook and why each is stuck",
         -- declaration produced it.
         local cases = {
             { "needs-declined.sh", "declined-cap", "every provider declined it" },
-            { "needs-stalled.sh",  "stalled-cap",  "not achieved" },
+            -- One capability in one state, described once. `requires`
+            -- used to call this "not achieved", which is equally true of
+            -- the declined case above and so told the two apart not at
+            -- all — while `after`, in the very same state, already said
+            -- the precise thing. They agree now; the parenthetical is
+            -- the only difference, and it says why the wait is not over.
+            { "needs-stalled.sh",  "stalled-cap",  "not settled (a supplier has not finished)" },
             { "after-stalled.sh",  "stalled-cap",  "not settled" },
             { "staller.sh",        nil,            "deferred with nothing left to wait for" },
         }

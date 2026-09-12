@@ -98,29 +98,40 @@ test("an after on a capability nothing supplies delays nothing",
             "and the boot completed in one pass, two invocations")
     end)
 
-test("a requires on a capability nothing supplies is achieved vacuously too",
-    { spec = { "prelude sched.unsupplied-capability-is-settled-vacuously",
-               "prelude sched.achieved-needs-a-satisfied-provider" } },
+test("a requires on a capability nothing supplies refuses the boot at parse time",
+    { spec = "prelude seq.v2-unsupplied-requires-refuses-the-boot" },
     function(t)
-        -- The `nothing provides it` branch of achieved, reached through an
-        -- empty supplier set. mkirf refuses to BUILD an image with an
-        -- unsupplied `requires`, but prelude's scheduler does not re-check
-        -- it: fed such a sequence directly, it runs the hook immediately
-        -- rather than refusing the boot.
-        local vm = provium:vm("cap-req-vacuous", "prelude")
-        vm:boot({ files = prelude.files({
-            hooks = { hopeful = { requires = { "nothing-supplies-this-either" } } },
-            keep = { "pt-mount-root.sh" },
-        }) })
+        -- The asymmetry with `after` above, and the point of having two
+        -- keys. An unsupplied `after` is settled vacuously and holds
+        -- nobody back; an unsupplied `requires` is a manifest that cannot
+        -- mean what it says.
+        --
+        -- mkirf refuses to BUILD such an image, but hooks.seq is a
+        -- cross-package format — mkirf is a peiosutils applet, prelude
+        -- ships in its own package — so prelude checks the file it was
+        -- given rather than trusting a build it did not run. Fed one
+        -- directly, as here, it refuses before running anything: left
+        -- unchecked the hook would be vacuously ready and would run on
+        -- the first pass with no diagnostic at all.
+        local vm = provium:vm("cap-req-unsupplied", "prelude")
+        local err = prelude.boot_halts(t, vm, {
+            files = prelude.files({
+                hooks = { hopeful = { requires = { "nothing-supplies-this-either" } } },
+                keep = { "pt-mount-root.sh" },
+            }),
+        })
 
-        local log = vm:console():read_log()
-        local ran = prelude.ran(log)
-        t:assert_eq(ran[1], "hopeful.sh",
-            "prelude ran the hook rather than refusing the boot: with no " ..
-            "supplier at all the capability is settled, nothing provides " ..
-            "it, and so it counts as achieved")
-        t:assert(log:find("pt|hopeful|outcome=satisfied", 1, true),
-            "the hook ran to completion")
+        t:assert(err:find(
+            "hook `" .. prelude.HOOK_DIR .. "/hopeful.sh` requires capability " ..
+            "`nothing-supplies-this-either`, which no hook provides", 1, true),
+            "prelude named the hook and the capability, in the same words " ..
+            "mkirf uses when it catches this at build time: " .. err:sub(-600))
+        t:assert(err:find(prelude.SEQ_V2, 1, true),
+            "and named the sequence the requirement came from")
+        t:assert(not err:find("pt|hopeful|", 1, true),
+            "the hook never ran: the refusal is at parse time, before any " ..
+            "hook is scheduled")
+        t:assert(err:find("halting system", 1, true), "and the machine halted")
     end)
 
 test("one satisfied provider achieves the capability though another alternative declined",
