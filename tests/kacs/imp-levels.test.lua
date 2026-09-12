@@ -109,9 +109,10 @@ test("an Identification-level token is barred from AccessCheck",
             t:assert_eq(token.impersonate(w, client).ret, 0, "the server impersonates it")
             t:assert_eq(assert(token.effective(vm, w)).level, L.IDENTIFICATION, "at Identification")
             local got, errno = sys.open(w, path, sys.O.RDONLY)
-            -- §3.5.1 names no errno for the bar, only that the check
-            -- fails; the kernel reports it as EINVAL rather than EACCES.
+            -- §3.5.1: the bar is a refusal of the check, reported as one.
             t:assert(not got, "and the open simply fails the check: " .. sys.errname(errno or 0))
+            t:assert_eq(errno, sys.E.ACCES, "with EACCES, as the syscall form reports it: " ..
+                sys.errname(errno or 0))
             token.revert(w)
             t:assert(sys.open(w, path, sys.O.RDONLY), "the same open works again after reverting")
             sys.close(w, client)
