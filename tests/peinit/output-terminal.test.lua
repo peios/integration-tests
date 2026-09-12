@@ -12,10 +12,11 @@
 --
 -- One arrangement is kept away from every other test in this file, on
 -- its own boot: two services that want the same terminal from the boot
--- plan. That case does not skip the loser, and the machine does not
--- survive it — see the known-bug case at the end. Everywhere else the
+-- plan. Until PEI-808 that case did not skip the loser and the machine
+-- did not survive it, and a boot of its own is still the right shape
+-- for a claim about what the boot plan does. Everywhere else the
 -- contention is arranged through demand starts and handovers, which are
--- start paths §11.6 covers just as squarely and which work.
+-- start paths §11.6 covers just as squarely.
 
 local peinit = require("helpers.peinit")
 peinit.claim(4) -- three boots at file scope, and the boot-plan test adds one
@@ -495,21 +496,20 @@ test("two services wanting one terminal from the boot plan: the loser is skipped
             "peinit *terminal.a-held-terminal-skips-the-start-with-ttyunavailable",
             "peinit *terminal.the-boot-plan-orders-by-the-graph-not-precedence",
         },
-        tags = { "known-bug" },
     },
     function(t)
-        -- The arrangement §11.6 exists to describe, and the one start path
-        -- on which it does not work. Two boot-triggered services name one
-        -- terminal; both are admitted by the boot plan, so the loser is
-        -- exec'd rather than skipped and dies in TIOCSCTTY with EPERM
-        -- because the terminal already has a session.
+        -- The arrangement §11.6 exists to describe. Two boot-triggered
+        -- services name one terminal; the boot plan admits both, and its
+        -- pre-start check runs for both before either has moved, so both
+        -- pass it. The terminal is asked about again at the moment each
+        -- one would transition into Starting, and by then the first has
+        -- taken it: the second is skipped with TtyUnavailable, exactly as
+        -- a demand start would be.
         --
-        -- Its default RestartPolicy is OnFailure, so it goes to Backoff,
-        -- and the restart attempt does reach the terminal check — which
-        -- returns Skipped with cause TtyUnavailable. `Backoff -> Skipped`
-        -- is not an allowed transition, the runtime loop returns
-        -- InvalidTransition, and peinit enters recovery. A machine with two
-        -- definitions naming one TTYPath loses PID 1 seconds into the boot.
+        -- Until PEI-808 the loser was exec'd instead and died in TIOCSCTTY
+        -- with EPERM; its restart's correct skip was then a `Backoff ->
+        -- Skipped` the state machine did not permit, and that
+        -- InvalidTransition took PID 1 to recovery seconds into the boot.
         local other = peinit.boot({
             memory = MEM, cpus = CPUS,
             name = "terminal-contend",
