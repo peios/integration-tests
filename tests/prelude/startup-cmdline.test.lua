@@ -181,24 +181,40 @@ test("an init= with an empty value is ignored, so the fallback chain runs",
             "and the fallback chain found the init")
     end)
 
-test("init= takes the FIRST occurrence on the command line",
-    { spec = "prelude cmdline.init-takes-the-first-occurrence" }, function(t)
-        -- TENSION. Every other knob prelude reads takes the LAST
-        -- occurrence — peios.quiet and TERM both use `next_back()`, and
-        -- the kernel's own convention for a repeated parameter is the
-        -- same — but `cmdline_init` returns on the first match. This test
-        -- pins what the code does, not what it should do.
+test("init= takes the LAST occurrence on the command line",
+    { spec = "prelude cmdline.init-takes-the-last-occurrence" }, function(t)
+        -- The kernel's own rule for a repeated parameter, and the rule
+        -- every other knob prelude reads already follows — peios.quiet
+        -- and TERM both use `next_back()`. It is what makes appending an
+        -- override work, which is how a recovery boot is asked for.
         --
         -- Neither candidate exists, so the boot goes on down the fallback
         -- chain and the console says which one prelude picked.
-        local vm = provium:vm("firstinit", "prelude")
+        local vm = provium:vm("lastinit", "prelude")
         vm:boot({ kernel_cmdline_append = "init=/bin/pt-first init=/bin/pt-second" })
         local log = vm:console():read_log()
 
-        t:assert(log:find("prelude: target init from cmdline: /bin/pt-first", 1, true),
-            "prelude took the first init=, not the last: " .. log:sub(-800))
-        t:assert(log:find("prelude: skip /bin/pt-first: not present", 1, true),
+        t:assert(log:find("prelude: target init from cmdline: /bin/pt-second", 1, true),
+            "prelude took the last init=, not the first: " .. log:sub(-800))
+        t:assert(log:find("prelude: skip /bin/pt-second: not present", 1, true),
             "and tried it before the chain")
-        t:assert(not log:find("pt-second", 1, true),
-            "the second init= was never looked at")
+        t:assert(not log:find("pt-first", 1, true),
+            "the earlier init= was overridden, not merely outranked: it is " ..
+            "never mentioned")
+    end)
+
+-- The empty-value rule and last-wins compose in the one order that keeps
+-- both meaningful: empties are dropped BEFORE the last is taken, so a
+-- trailing `init=` cannot erase a real value earlier on the line.
+test("a trailing empty init= does not erase the value before it",
+    { spec = "prelude cmdline.init-takes-the-last-occurrence" }, function(t)
+        local vm = provium:vm("emptylast", "prelude")
+        vm:boot({ kernel_cmdline_append = "init=/bin/pt-named init=" })
+        local log = vm:console():read_log()
+
+        t:assert(log:find("prelude: target init from cmdline: /bin/pt-named", 1, true),
+            "the named value survived the empty one after it: " .. log:sub(-800))
+        t:assert(not log:find(
+            "prelude: no init= on cmdline; will try fallback chain", 1, true),
+            "prelude did not fall back as though nothing had been named")
     end)
