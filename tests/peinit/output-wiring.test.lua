@@ -387,33 +387,25 @@ test("the sink closes after the job's last line, at once on a failed write, and 
     end)
 
 test("a submitted job's output is recorded whether or not a sink was attached",
-    {
-        spec = "peinit *output.a-submitted-jobs-output-is-recorded-unconditionally",
-        tags = { "known-bug" },
-    },
+    { spec = "peinit *output.a-submitted-jobs-output-is-recorded-unconditionally" },
     function(t)
-        -- The copy is optional; the record is not. peinit's half of this
-        -- works — a submitted job is launched with capture pipes on both
-        -- streams, the same as a service, and PID 1 holds the read ends
-        -- (the same evidence the first test in this file reads for a
-        -- service) — but nothing the job wrote is queryable afterwards.
+        -- The copy is optional; the record is not. A submitted job is
+        -- launched with capture pipes on both streams, the same as a
+        -- service, and PID 1 holds the read ends (the same evidence the
+        -- first test in this file reads for a service) — so what it
+        -- wrote is queryable afterwards with no sink involved.
         --
-        -- The reason is eventd's, not peinit's: its log ingestion drops
-        -- any record whose `origin` is not a bare identifier, and a
-        -- submitted job's origin is `jobs/<guid>`. The same rule silently
-        -- discards every hook and health-check line, whose origins carry
-        -- a `/` too. This case states the manual and is expected to fail
-        -- until that is settled.
+        -- The origin is the part worth asserting: a submitted job has no
+        -- service, so it is tagged `jobs/<guid>` rather than a service
+        -- name, and eventd's log ingestion accepts that two-component
+        -- form (eventd TRM §4.2).
         local submitted = vm:run(
             [[svctl job submit --wait /bin/printf 'pt-record-only-marker\n']])
         submitted:assert_ok()
         local job = submitted.stdout:match("job ([%x-]+):")
         t:assert(job, "svctl reported the job's identifier")
 
-        -- Eight seconds rather than twenty: this case is expected to
-        -- fail, and a known-bug that spends its whole budget failing
-        -- costs every run of the file.
-        local records = logged(vm, "pt-record-only-marker", 8)
+        local records = logged(vm, "pt-record-only-marker")
         local origin
         for line in records:gmatch("[^\r\n]+") do
             if line:find("pt-record-only-marker", 1, true) then
