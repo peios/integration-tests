@@ -191,14 +191,14 @@ test("a failure is reported as a failure, naming what went wrong",
             err:sub(-700))
     end)
 
-test("rd.shell is honoured, though nothing before the failure ever looked for it",
-    { spec = { "prelude halt.cmdline-is-reread-for-the-debug-knobs",
+test("rd.shell opens a shell when the boot fails",
+    { spec = { "prelude halt.debug-knobs-are-banked-at-the-cmdline-read",
                "prelude halt.rd-shell-opens-a-shell-first" } }, function(t)
-        -- prelude reads /proc/cmdline once during the boot, for quiet,
-        -- colour, init= and rd.break. `rd.shell` is not among them: the
-        -- only code that looks for that token runs after the failure, on
-        -- a fresh read. So a shell opening here is the re-read, observed.
-        local vm = provium:vm("reread", "prelude")
+        -- prelude reads /proc/cmdline once, at the end of phase 1, and
+        -- banks the answer to "open a shell if this fails?" there —
+        -- alongside quiet, colour, init= and rd.break — rather than
+        -- going back to the file after the failure. The next case is why.
+        local vm = provium:vm("shellknob", "prelude")
         local err = prelude.boot_halts(t, vm,
             { kernel_cmdline_append = "pt.mount-root=fail rd.shell" })
 
@@ -211,14 +211,15 @@ test("rd.shell is honoured, though nothing before the failure ever looked for it
             "and the shell is really running — the boot is paused in it, not halted")
     end)
 
-test("the re-read cannot reach /proc once the kernel filesystems have moved, so rd.shell is inert there",
-    { spec = "prelude halt.cmdline-is-reread-for-the-debug-knobs" }, function(t)
-        -- The re-read is a plain open of /proc/cmdline, and by phase 5
-        -- prelude has already moved /proc out of the root it is still
-        -- standing in. The read fails, the cmdline reads as empty, and
-        -- every debug knob silently stops working for exactly the
-        -- failures — the handoff ones — that are hardest to reproduce.
-        local vm = provium:vm("reread-late", "prelude")
+test("rd.shell still opens after the kernel filesystems have moved out of the old root",
+    { spec = "prelude halt.debug-knobs-are-banked-at-the-cmdline-read" }, function(t)
+        -- The failure window the knob is banked for. By phase 5 prelude
+        -- has mount-moved /proc into the new root while still standing in
+        -- the old one, so /proc/cmdline is no longer at that path: a
+        -- debug knob read here would find nothing, and would find nothing
+        -- for exactly the failures — the handoff ones — that are hardest
+        -- to reproduce and leave the machine most half-built.
+        local vm = provium:vm("shellknob-late", "prelude")
         local err = prelude.boot_halts(t, vm, {
             kernel_cmdline_append = "rd.shell",
             files = prelude.files({
@@ -230,10 +231,14 @@ test("the re-read cannot reach /proc once the kernel filesystems have moved, so 
             "/proc had already been moved out of the old root: " .. err:sub(-700))
         t:assert(err:find("boot failed: mount-move /sys:", 1, true),
             "and the boot then failed")
-        t:assert(not err:find("rd.shell:", 1, true),
-            "rd.shell was on the command line but no shell opened: the re-read found nothing")
-        t:assert(err:find("halting system", 1, true),
-            "the machine halted instead")
+        t:assert(err:find("rd.shell: boot failed: mount-move /sys:", 1, true),
+            "and the shell opened anyway, quoting the handoff failure: " ..
+            err:sub(-700))
+        t:assert(err:find("can't access tty", 1, true),
+            "the shell is really running — the boot is paused in it, not halted")
+        t:assert(not err:find("/proc/cmdline unreadable", 1, true),
+            "and prelude never went back to /proc/cmdline for the answer: it " ..
+            "had banked it in phase 1")
     end)
 
 test("a refused boot ends by halting the machine",
