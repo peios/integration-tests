@@ -140,14 +140,16 @@ test("a kernel filesystem that cannot be mounted ends the boot",
     { spec = "prelude mount.failure-ends-the-boot" }, function(t)
         -- A regular file where /sys should be: the kernel's initramfs
         -- unpacker replaces the empty directory with it, and mounting
-        -- sysfs onto a file is ENOTDIR. prelude's `do_mount(...)?` gives
-        -- the error straight back to main, which halts.
+        -- sysfs onto a file is ENOTDIR. prelude wraps the error with the
+        -- target it was mounting and gives it back to main, which halts.
         local vm = provium:vm("mountfail", "prelude")
         local out = prelude.boot_halts(t, vm, {
             files = { { path = "/sys", content = "not a directory\n" } },
         })
-        t:assert(out:find("prelude: boot failed: Not a directory", 1, true),
-            "the failed sysfs mount ended the boot: " .. out:sub(-400))
+        t:assert(out:find("prelude: boot failed: mount /sys: Not a directory", 1, true),
+            "the message names which of the three mounts failed, and that a " ..
+            "mount is what failed — an errno on its own is the whole of what " ..
+            "an operator has this early: " .. out:sub(-400))
         t:assert(not out:find("seeded /dev", 1, true),
             "and it ended there: /dev is mounted after /sys, so the seed " ..
             "line prelude prints next never appeared")
@@ -182,7 +184,17 @@ test("seed-sd exiting non-zero is logged and the boot carries on",
             "prelude: seed-sd -r /dev exited with status 3; /dev stays " ..
             "SYSTEM-only for nodes it could not stamp", 1, true),
             "prelude named the status and what it costs: " .. log:sub(1, 600))
-        t:assert(log:find("FAILED", 1, true), "logged at FAILED, never suppressed")
+        -- Coloured, like every line prelude prints in phase 1: the seed
+        -- runs before the command line has been read, so TERM=dumb has
+        -- not taken effect yet and the tag still carries its SGR bytes.
+        t:assert(log:find(
+            "[ \27[1;33mWARN\27[0m ] prelude: seed-sd -r /dev exited with status 3",
+            1, true),
+            "tagged WARN, not FAILED: the boot goes on to complete, and " ..
+            "FAILED on a boot that succeeded is what teaches an operator to " ..
+            "stop reading the tag: " .. log:sub(1, 600))
+        t:assert(not log:find("FAILED", 1, true),
+            "nothing on this boot is tagged FAILED")
         t:assert_eq(vm:read_file("/proc/1/comm"):gsub("%s+$", ""), "peinit2",
             "and the boot completed anyway: a SYSTEM-only /dev is a degraded " ..
             "system, not an unbootable one")
