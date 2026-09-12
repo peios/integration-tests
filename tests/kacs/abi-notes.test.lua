@@ -226,12 +226,10 @@ test("a SID array is a count followed by length-prefixed entries",
     end)
 
 test("a claims array is a count followed by length-prefixed entries",
-    { spec = "PKM *abi-notes.claims-array-shape",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *abi-notes.claims-array-shape" }, function(t)
         -- §3.D: "[count:u32le] followed by count entries of
-        -- [entry_len:u32le][entry_bytes]". write_claim_array_query in
-        -- token_runtime.rs writes the entries alone, with no count —
-        -- unlike write_sid_array_query beside it, which does.
+        -- [entry_len:u32le][entry_bytes]" — the same shape family as a
+        -- SID array.
         local one = claim_entry("Alpha", 1)
         local two = claim_entry("Beta", 2)
         local fd = mint({ user_claims = claims_input(one, two) })
