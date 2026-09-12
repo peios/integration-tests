@@ -74,15 +74,13 @@ test("under deny-missing a missing descriptor denies everything",
     end)
 
 test("an O_PATH open plus set_sd with AT_EMPTY_PATH is the repair route",
-    { spec = "PKM *facs.storage.missing-repair-route", tags = { "known-bug" } },
+    { spec = "PKM *facs.storage.missing-repair-route" },
     function(t)
         -- §3.9.5: "open(path, O_PATH) then kacs_set_sd with AT_EMPTY_PATH
         -- under SeRestorePrivilege". The O_PATH open works — the open hook
-        -- is bypassed entirely — but kacs_set_sd refuses the descriptor:
-        -- its first resolution step is the token-descriptor one, which
-        -- calls fdget(), and fdget() rejects FMODE_PATH files, so the
-        -- syscall returns EBADF before the file target is ever tried. The
-        -- documented repair route is therefore unreachable.
+        -- is bypassed entirely — and kacs_set_sd's token-descriptor
+        -- resolution step passes an O_PATH file on to the file target
+        -- (it is not a token, not a bad descriptor).
         local at = mounted(t, "repair", nil)
         local pfd = sys.open(vm, at, sys.O.PATH)
         t:assert(pfd, "O_PATH opens a descriptor-less object")
@@ -341,10 +339,8 @@ test("an ancestor synthesised for a descendant persists when it is next accessed
         -- Resolving `anc/b/c` synthesises `anc` and `anc/b` on the way and
         -- marks them pending — the write-back is queued only for the
         -- object the syscall named. Accessing `anc` in its own right
-        -- afterwards finds a *current* cache entry, so
-        -- pkm_kacs_inode_ensure_effective_cache returns before the
-        -- pending-source branch that queues the persist, and the ancestor
-        -- stays pending for ever.
+        -- afterwards finds a current entry that is still pending, and
+        -- that is what queues its own write-back.
         local at, fd = mounted(t, "ancestor", nil, "cgroup2")
         for _, p in ipairs({ "/anc", "/anc/b", "/anc/b/c" }) do
             t:assert_eq(sys.mkdir(vm, at .. p).ret, 0, "mkdir " .. p)

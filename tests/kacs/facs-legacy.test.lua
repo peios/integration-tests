@@ -323,11 +323,11 @@ test("execveat on an O_PATH handle is enforced live in the bprm hook",
     end)
 
 test("kacs_get_sd and kacs_set_sd with AT_EMPTY_PATH run live on an O_PATH anchor",
-    { spec = "PKM *facs.legacy.o-path-live-checks", tags = { "known-bug" } }, function(t)
+    { spec = "PKM *facs.legacy.o-path-live-checks" }, function(t)
         -- §3.9.3: "kacs_get_sd and kacs_set_sd with AT_EMPTY_PATH
         -- likewise run live", and "the descriptor itself *is*
         -- protected: kacs_get_sd on an O_PATH handle performs a live
-        -- check". The kernel refuses the call outright instead.
+        -- check".
         local p = at("opath-sd")
         facs.file(vm, p, "anchored")
         local function get_sd(who, fd)
