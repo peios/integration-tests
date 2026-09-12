@@ -526,3 +526,52 @@ test("an audit event is emitted when the file's SACL carries a matching audit AC
         t:assert_eq(#kmes.of_type(silent, "access-audit"), 0,
             "with no SACL there is nothing to match and no event")
     end)
+
+-- ---- read-only mounts -----------------------------------------------------
+
+test("a read-only mount refuses the write with EROFS, after the access check",
+    { spec = "PKM *facs.set-sd.read-only-mount-erofs" }, function(t)
+        -- The mount flag, not the superblock: the same object stays
+        -- writable through its original path throughout, and the
+        -- read-only view withholds the write along *that* path whatever
+        -- the descriptor grants.
+        local src = B .. "/ro-src"
+        local view = B .. "/ro-view"
+        vm:mkdir(src, { parents = true })
+        vm:mkdir(view, { parents = true })
+        for _, d in ipairs({ src, view }) do
+            assert(kacs.set_sd(vm, d, kacs.grant(kacs.ALL_RIGHTS)).ret == 0, "authoring " .. d)
+        end
+        local open = file_granting("ro-src/open", kacs.ALL_RIGHTS)
+        -- WRITE_DAC withheld from everyone but the owner (SYSTEM).
+        file_granting("ro-src/locked", ALL_BUT(access.STD.WRITE_DAC))
+        local bind = sys.bind_ro(vm, src, view)
+        t:assert_eq(bind.ret, 0, "read-only bind: " .. sys.errname(bind.errno))
+
+        local new_dacl = access.sd({
+            dacl = access.acl({ access.ace(access.ACE.ALLOWED, kacs.ALL_RIGHTS,
+                token.SID.EVERYONE) }),
+        })
+        local by_path = kacs.set_sd(vm, view .. "/open", new_dacl, SI.DACL)
+        t:assert_neq(by_path.ret, 0, "the write through the read-only view is refused")
+        t:assert_eq(by_path.errno, sys.E.ROFS, "with EROFS: " .. sys.errname(by_path.errno))
+        local anchor = assert(sys.open(vm, view .. "/open", sys.O.PATH))
+        local by_fd = kacs.set_sd_fd(vm, anchor, new_dacl, SI.DACL)
+        t:assert_eq(by_fd.errno, sys.E.ROFS,
+            "and so is the descriptor form: " .. sys.errname(by_fd.errno))
+        sys.close(vm, anchor)
+
+        -- The check runs first: a caller the DACL refuses sees the
+        -- denial, not a read-only error that would leak the object.
+        as_user(t, 0, function(w)
+            local denied = kacs.set_sd(w, view .. "/locked", new_dacl, SI.DACL)
+            t:assert_eq(denied.errno, sys.E.ACCES,
+                "an unauthorised caller is still denied: " .. sys.errname(denied.errno))
+        end)
+
+        t:assert_eq(kacs.set_sd(vm, open, new_dacl, SI.DACL).ret, 0,
+            "the same write lands through the writable path")
+        t:assert_eq(kacs.get_sd(vm, view .. "/open", SI.DACL), kacs.get_sd(vm, open, SI.DACL),
+            "and is visible through the read-only view")
+        sys.umount(vm, view, 0)
+    end)
