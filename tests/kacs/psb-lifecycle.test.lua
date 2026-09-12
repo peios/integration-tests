@@ -46,7 +46,9 @@ test("the child's process GUID is kernel-generated, not copied from the parent",
             t:assert_neq(kid, parent, "the child's GUID is not the parent's: "
                 .. psb.guid_hex(kid) .. " vs " .. psb.guid_hex(parent))
             t:assert_neq(kid, kmes.NULL_GUID, "and it is not the null GUID")
-            t:assert_eq((kid:byte(7) & 0xF0) >> 4, 4, "it is a fresh version-4 UUID")
+            -- PCDS layout: the version nibble is the high nibble of byte
+            -- 7 (Lua byte 8), Data3 being little-endian in bytes 6-7.
+            t:assert_eq((kid:byte(8) & 0xF0) >> 4, 4, "it is a fresh version-4 GUID")
         end)
         child:kill(); child:join()
         if not ok then error(err, 0) end
