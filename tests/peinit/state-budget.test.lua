@@ -384,15 +384,14 @@ test("the backoff delay saturates at the cap rather than wrapping",
 test("a reload across the window boundary defers the budget reset to the return to Active",
     {
         spec = "peinit *restart.a-reload-across-the-window-boundary-defers-the-reset",
-        -- PEI-1079: the transition into
-        -- Reloading clears the RestartWindow stamp
-        -- (service/runtime/transition.rs:56-57, because
-        -- `satisfies_dependents` excludes Reloading), and no route from
-        -- Reloading back to Active sets it again, while the reset
-        -- deadline is only computed from that stamp
-        -- (service/table/activation/restart.rs:79-100). The reset is not
-        -- deferred to the return: it never happens, for as long as that
-        -- activation lives.
+        -- PEI-1079: fixed in peinit 2c2d1bb. Before it, the transition
+        -- into Reloading cleared the RestartWindow stamp, because
+        -- `satisfies_dependents` excluded Reloading, and no route from
+        -- Reloading back to Active set it again. So the reset was not
+        -- deferred to the return: it never happened, for as long as that
+        -- activation lived. The image under test still carries a peinit
+        -- from before the fix (0.0.2-1); drop the tag once a package built
+        -- from 2c2d1bb or later is in the image.
         tags = { "known-bug" },
     },
     function(t)

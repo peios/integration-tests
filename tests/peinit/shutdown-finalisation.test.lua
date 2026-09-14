@@ -434,15 +434,8 @@ test("a mount point already gone by the time step 7 reaches it is a successful n
             "the step went straight on to the next mount: " .. next_call.name)
     end)
 
-test("/proc goes before /run and /sys, and their gone-checks then cannot read the mount table",
-    {
-        spec = "peinit *final.unmounting-proc-first-makes-the-later-mount-checks-fail",
-        -- PEI-1089: the note's premise is false on this
-        -- arrangement. The gone-check runs only after ENOENT or EINVAL;
-        -- /sys unmounts cleanly and /run answers EBUSY, so it never runs
-        -- for either and there is no mountinfo read to fail.
-        tags = { "known-bug" },
-    },
+test("/proc goes before /run and /sys, and neither of those sends the step to its gone-check",
+    { spec = "peinit *final.proc-is-unmounted-before-run-and-sys" },
     function(t)
         local record = observed().record
         local proc, iproc = find_call(record,
@@ -454,17 +447,15 @@ test("/proc goes before /run and /sys, and their gone-checks then cannot read th
         t:assert(proc and proc.ret == 0 and iproc < irun and iproc < isys,
             "/proc was unmounted before /run and /sys were attempted")
 
-        -- The note's mechanism: each of the two answers ENOENT or EINVAL,
-        -- the "is it really gone?" check tries to read mountinfo out of
-        -- the /proc that has just gone, fails, and the failure is
-        -- recorded and followed by a pointless read-only remount.
+        -- Why the ordering is a latent hazard and not a live one: the
+        -- "is it really gone?" check that would re-read mountinfo runs
+        -- only after ENOENT or EINVAL, and neither mount answers that.
+        -- /sys unmounts; /run here is busy, because the agent keeps its
+        -- log open under it. Neither answer sends the step to the check.
         for _, call in ipairs({ run, sys }) do
-            t:assert(call.ret == shutdown.ENOENT or call.ret == shutdown.EINVAL,
-                call.path .. "'s unmount answered ENOENT or EINVAL, which is what sends it "
-                .. "to the gone-check: " .. tostring(call.ret))
-            local following = record.calls[(call == run and irun or isys) + 1]
-            t:assert(following and following.name == "mount" and following.path == call.path,
-                "and a read-only remount of " .. call.path .. " followed the failed check")
+            t:assert(call.ret ~= shutdown.ENOENT and call.ret ~= shutdown.EINVAL,
+                call.path .. "'s unmount did not answer ENOENT or EINVAL, so its gone-check "
+                .. "never ran: " .. tostring(call.ret))
         end
     end)
 

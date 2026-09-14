@@ -116,6 +116,11 @@ local SEED = {
     -- must add nothing beside either.
     oneshot("pt-d-plainauth", { LOCAL_SERVICE, requires("pt-d-authority") }),
     oneshot("pt-d-levelauth", { LOCAL_SERVICE, requires("pt-d-authority:ready") }),
+    -- Needs the authority too, and binds to the staged provider rather
+    -- than requiring it. BindsTo requires its target as well, so this is
+    -- the edge already there and nothing may be derived beside it.
+    oneshot("pt-d-bindsauth", { LOCAL_SERVICE,
+        { name = "BindsTo", type = "multi", data = { "pt-d-authority" } } }),
     -- The instrument's control: a SYSTEM service, so nothing is derived
     -- for it, declaring two edges to the same provider. The hard-dependent
     -- enumeration names a dependent once per edge, which is what makes a
@@ -233,6 +238,32 @@ test("an edge already declared is not added again, including one carrying a leve
         -- its own to the provider gained one.
         t:assert_eq(count["pt-d-token"], 1,
             "the derived edge is there where nothing was declared: " .. dependents)
+    end)
+
+test("a declared BindsTo already orders against the provider, so no Requires is derived beside it",
+    {
+        spec = "peinit *derived.an-already-declared-edge-is-not-added-again",
+        -- PEI-1081: fixed in peinit 4fc55cb, which counts a declared
+        -- BindsTo as the edge already there. The image under test still
+        -- carries a peinit from before it (0.0.2-1), which derives a
+        -- Requires beside the BindsTo, so pt-d-bindsauth is listed twice.
+        -- Drop the tag once a package built from 4fc55cb or later is in
+        -- the image.
+        tags = { "known-bug" },
+    },
+    function(t)
+        local dependents, raw = hard_dependents_of(vm, "pt-d-authority")
+        t:assert(dependents,
+            "peinit knows something depends hard on the staged authority: " .. tostring(raw))
+        local count = {}
+        for name in (dependents .. ","):gmatch("%s*([^,]+),") do
+            count[name] = (count[name] or 0) + 1
+        end
+        -- The enumeration counts BindsTo edges as well as Requires ones
+        -- (service/dependency.rs hard_dependencies), so a BindsTo with a
+        -- derived Requires beside it would be listed twice.
+        t:assert_eq(count["pt-d-bindsauth"], 1,
+            "a declared BindsTo is not doubled by a derived Requires: " .. dependents)
     end)
 
 test("every provider of the role becomes its own Requires, so a start is ordered after all of them",

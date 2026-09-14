@@ -403,28 +403,24 @@ test("during a shutdown an extension is held to the global deadline when that is
     },
     function(t) end)
 
-test("an extension sent during a shutdown, before the service's stop wave, is remembered for it",
-    {
-        spec = "peinit *wdog.an-extension-before-the-services-stop-wave-is-remembered",
-        -- PEI-1090: an Active service's
-        -- EXTEND_TIMEOUT_USEC during a shutdown, before its wave has a
-        -- deadline, is dropped: the shutdown path finds no stop deadline
-        -- and returns, and the transition path finds a non-transitional
-        -- state and returns (supervisor/notify/shutdown_timeout.rs:30-38,
-        -- supervisor/notify/timeout_extension.rs:59-67). Its wave then
-        -- starts it on a fresh StopTimeout.
-        tags = { "known-bug" },
-    },
+test("before its stop wave an Active service has no deadline to extend, so its request is ignored",
+    { spec = "peinit *wdog.before-its-stop-wave-an-active-service-has-no-deadline-to-extend" },
     function(t)
+        -- An Active service's EXTEND_TIMEOUT_USEC during a shutdown,
+        -- before its wave has a deadline, finds nothing to move: the
+        -- shutdown path finds no stop deadline, and the transition path
+        -- a non-transitional state (supervisor/notify/shutdown_timeout.rs,
+        -- supervisor/notify/timeout_extension.rs). Its wave then stops it
+        -- on its plain StopTimeout.
         local r = extension_boot()
         t:assert(r.late_sent and r.late_sent_before_wave,
             "pt-late sent its three 60-second requests after the shutdown began and "
             .. "before its own wave did")
         t:assert(r.late_wave, "pt-late's wave began: " .. r.log:sub(-2000))
         local from = r.log:find("peinit: shutdown stopping pt-late", 1, true)
-        t:assert(not r.late_early,
-            "ten seconds into its wave pt-late — StopTimeout 5, and 60 seconds asked for "
-            .. "before the wave began — had not been killed: the request was remembered "
-            .. "and applied, up to its fourfold cap. From its wave on:\n"
+        t:assert(r.late_early,
+            "pt-late — StopTimeout 5, with 60 seconds asked for before its wave began — "
+            .. "was killed within ten seconds of its wave: the early request extended "
+            .. "nothing. From its wave on:\n"
             .. r.log:sub(from or 1, (from or 1) + 1500))
     end)

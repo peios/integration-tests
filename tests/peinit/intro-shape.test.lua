@@ -260,21 +260,15 @@ local function apply(keys, name)
     vm:run("reg apply " .. file):assert_ok()
 end
 
-test("the registry is read at boot and on an explicit reload, and at no other time",
-    {
-        spec = "peinit *intro.the-registry-is-read-at-boot-and-on-reload",
-        -- PEI-1084: §1.1 says peinit reads the registry synchronously
-        -- only at boot and on an explicit reload,
-        -- but every drained registry watch event runs the same full,
-        -- synchronous reload (runtime/turn/registry_watch.rs, and §10.4
-        -- says so), so a definition written with no reload is read anyway.
-        tags = { "known-bug" },
-    },
+test("the registry is read at boot and whenever peinit reloads, including a reload a registry change sets off",
+    { spec = "peinit *intro.the-registry-is-read-at-boot-and-on-reload" },
     function(t)
-        -- The boot's read is every other test in this file. What is left
-        -- is the claim's other edge: between boot and an explicit reload,
-        -- nothing is read. A whole definition, written with no reload
-        -- asked for, is the probe.
+        -- The boot's read is every other test in this file. The rest of
+        -- the claim is when else peinit reads: when it reloads, and a
+        -- registry change notification is itself a reload (§10.4). A
+        -- whole definition written with no reload asked for is the probe.
+        -- Nothing here runs `svctl reload-config`, so if peinit comes to
+        -- know the service, the notification's reload is what read it.
         apply({
             { path = [[Machine\System\Services\pt-intro-unannounced]], values = {
                 { name = "ImagePath", type = "sz", data = "/bin/true" },
@@ -282,21 +276,14 @@ test("the registry is read at boot and on an explicit reload, and at no other ti
                 { name = "Identity", type = "sz", data = "SYSTEM" },
             } },
         }, "intro-unannounced")
-        vm:clock():sleep("3s")
-        local before = vm:run("svctl --json status pt-intro-unannounced")
-        local unknown_before = before.stdout:find("UNKNOWN_SERVICE", 1, true) ~= nil
-
-        -- An explicit reload reads it — the half of the claim that holds,
-        -- checked first so that the failure below is about the other half.
-        vm:run("svctl reload-config"):assert_ok()
-        local after = vm:run("svctl --json status pt-intro-unannounced")
-        after:assert_ok()
-        t:assert(after.stdout:find('"service":"pt-intro-unannounced"', 1, true),
-            "an explicit reload read the new definition: " .. after.stdout)
-
-        t:assert(unknown_before,
-            "and before the reload peinit had not read it, three seconds after it was written: "
-            .. before.stdout .. before.stderr)
+        local read = pcall(wait_until, function()
+            return not vm:run("svctl --json status pt-intro-unannounced").stdout
+                :find("UNKNOWN_SERVICE", 1, true) or nil
+        end, { timeout = 20, interval = 0.5, desc = "the change's reload to read the definition" })
+        local view = vm:run("svctl --json status pt-intro-unannounced")
+        t:assert(read and view.stdout:find('"service":"pt-intro-unannounced"', 1, true),
+            "a definition written with no reload asked for was read, by the reload the "
+            .. "registry change set off: " .. view.stdout .. tostring(view.stderr))
     end)
 
 test("peinit mounts nothing after Phase 1",

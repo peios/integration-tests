@@ -378,20 +378,17 @@ test("an administrative restart detours through Inactive, so a definition pinned
             "the start leg launched the definition released at the Inactive between the legs")
     end)
 
-test("a restarting service is briefly observable as Inactive",
-    {
-        spec = "peinit *trans.an-administrative-restart-detours-through-inactive",
-        -- PEI-1080: the stop leg's end and
-        -- the start leg's beginning happen in the same runtime turn
-        -- (supervisor/restart.rs begin_restart_start_after_stop, and
-        -- cgroup_cleanup/stop_main.rs begin_restart_start_after_post_kill,
-        -- both call begin_restart_start_leg right after the transition
-        -- to Inactive), and PID 1 answers no control request inside a
-        -- turn — so no query can ever see the Inactive the TRM says is
-        -- briefly observable.
-        tags = { "known-bug" },
-    },
+test("a restarting service is never observed Inactive between its legs",
+    { spec = "peinit *trans.a-restarts-pass-through-inactive-is-not-observable" },
     function(t)
+        -- The stop leg's end and the start leg's beginning happen in the
+        -- same runtime turn (supervisor/restart.rs
+        -- begin_restart_start_after_stop, and cgroup_cleanup/stop_main.rs
+        -- begin_restart_start_after_post_kill, both call
+        -- begin_restart_start_leg right after the transition to
+        -- Inactive), and PID 1 answers no control request inside a turn.
+        -- So a status query in a tight loop across the whole restart
+        -- sees Active, then the legs, and never the Inactive between.
         settle("pt-tr-slowcycle", "active", "pt-tr-slowcycle to be up")
         -- A status query in a tight loop for fifteen seconds, across the
         -- whole restart. The loop is bounded by the clock, and its output
@@ -428,6 +425,6 @@ test("a restarting service is briefly observable as Inactive",
         -- began.
         t:assert(seen["active"] and seen["starting"],
             "the loop spanned the hand-over between the legs: " .. rendered)
-        t:assert(seen["inactive"],
-            "a status query caught the service Inactive between the legs: " .. rendered)
+        t:assert(not seen["inactive"],
+            "no status query caught the service Inactive between the legs: " .. rendered)
     end)

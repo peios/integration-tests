@@ -1,5 +1,5 @@
 -- peinit TRM §6.1 — the states: which of the ten a service can be in, and
--- which three of them let a dependent start.
+-- which four of them let a dependent start.
 --
 -- Dependent satisfaction is the only part of §6.1 with a shape a test can
 -- see from outside, and it is seen the same way each time: a target
@@ -100,6 +100,22 @@ local SERVICES = {
         { name = "Arguments", type = "multi", data = { "3600" } },
         { name = "Identity", type = "sz", data = "LocalService" },
     }),
+
+    -- Reloading: a resident whose reload command takes twenty seconds,
+    -- so it can be held in Reloading while a dependent is started, and a
+    -- dependent with no boot trigger for the test to start then.
+    service("pt-st-reloader", {
+        { name = "ImagePath", type = "sz", data = "/bin/sleep" },
+        { name = "Arguments", type = "multi", data = { "3600" } },
+        { name = "ExecReload", type = "sz", data = "/bin/sleep 20" },
+    }),
+    { path = [[Machine\System\Services\pt-st-after-reloading]], values = {
+        { name = "ImagePath", type = "sz", data = "/bin/true" },
+        { name = "Type", type = "dword", data = 1 },
+        { name = "Identity", type = "sz", data = "SYSTEM" },
+        { name = "Readiness", type = "dword", data = 1 },
+        { name = "Requires", type = "multi", data = { "pt-st-reloader" } },
+    } },
 }
 
 local vm = peinit.boot({
@@ -166,7 +182,7 @@ test("every service is in exactly one state, and it is one of the ten",
 test("Active, Completed and Skipped satisfy dependents; Failed and Backoff do not",
     {
         spec = {
-            "peinit *state.only-active-completed-and-skipped-satisfy-dependents",
+            "peinit *state.only-active-reloading-completed-and-skipped-satisfy-dependents",
             "peinit *state.a-dependent-on-an-unsatisfied-requires-target-does-not-start",
         },
     },
@@ -191,6 +207,64 @@ test("Active, Completed and Skipped satisfy dependents; Failed and Backoff do no
         -- image's graph has already demonstrated; assert it here on a
         -- target this file controls.
         settle("pt-st-resident", "active", "the resident service to be Active")
+    end)
+
+test("a Reloading target satisfies its dependents",
+    {
+        spec = "peinit *state.only-active-reloading-completed-and-skipped-satisfy-dependents",
+        -- PEI-1079: fixed in peinit 2c2d1bb, which makes Reloading satisfy
+        -- dependents as §6.1's table always said. The image under test
+        -- still carries a peinit from before it (0.0.2-1), which does not
+        -- merely make the dependent wait out the reload: it refuses the
+        -- start outright — INTERNAL_ERROR, "control request failed" — and
+        -- the dependent stays Inactive. Drop the tag once a package built
+        -- from 2c2d1bb or later is in the image.
+        tags = { "known-bug" },
+    },
+    function(t)
+        -- pt-st-reloader's reload command takes twenty seconds, and the
+        -- dependent is started a moment into it. If Reloading satisfies,
+        -- the dependent runs while its target is still Reloading; if not,
+        -- it waits for the reload to finish. svctl rather than the
+        -- console is the oracle here: this boot is at the default quiet
+        -- level, and after the boot a login owns the console, so peinit's
+        -- "started" lines no longer reach it.
+        settle("pt-st-reloader", "active", "the reloadable target to be Active")
+
+        --- Every console line naming `service`, for a failure message.
+        local function said(service_name)
+            local out = {}
+            for _, line in ipairs(peinit.lines(vm:console():read_log())) do
+                if line:find(service_name, 1, true) then out[#out + 1] = line end
+            end
+            return table.concat(out, " | ")
+        end
+
+        --- Run an svctl command and report what it answered if it failed,
+        --- rather than leaving a bare assert_ok with no answer in it.
+        local function answered(command, service_name)
+            local r = vm:run("svctl --json " .. command)
+            t:assert(r:ok(), "`svctl " .. command .. "` was accepted: " .. r.stdout ..
+                tostring(r.stderr) .. "; console: " .. said(service_name))
+            return r
+        end
+
+        answered("--no-wait reload pt-st-reloader", "pt-st-reloader")
+        settle("pt-st-reloader", "reloading", "the target to be Reloading")
+        -- The start's answer is evidence, not a precondition. A peinit in
+        -- which Reloading does not satisfy dependents refuses this start
+        -- outright — INTERNAL_ERROR, control request failed — so asserting
+        -- on it would fail the test before it could state its claim.
+        local start = vm:run("svctl --json --no-wait start pt-st-after-reloading")
+        local ran = pcall(wait_until, function()
+            return status("pt-st-after-reloading").cause == "clean_exit" or nil
+        end, { timeout = 10, interval = 0.3, desc = "the dependent to run" })
+        local target = status("pt-st-reloader").state
+        t:assert(ran and target == "reloading",
+            "the dependent ran while its Requires target was still Reloading: the start "
+            .. "answered " .. (start.stdout .. tostring(start.stderr)):gsub("[\r\n]+", " ")
+            .. "; dependent " .. json.encode(status("pt-st-after-reloading"))
+            .. ", target " .. tostring(target))
     end)
 
 test("a Oneshot without RemainAfterExit passes through Completed rather than skipping it",
