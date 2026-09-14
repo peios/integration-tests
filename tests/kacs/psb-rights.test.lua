@@ -11,8 +11,9 @@
 -- decides on credential comparison can be mistaken for the descriptor
 -- deciding.
 --
--- Four cases here are tagged known-bug: the rights that gate the
--- ptrace-mode surfaces do not gate them from the guest. See the report.
+-- One case here is tagged known-bug: /proc/<pid>/fd opens without
+-- PROCESS_VM_READ (PEI-689, fix queued for the next kernel). The other
+-- ptrace-mode surfaces gate correctly since kernel 0.20.1-rc13-6.
 
 local sys = require("helpers.sys")
 local kacs = require("helpers.kacs")
@@ -182,7 +183,9 @@ test("cgroup sits in the PROCESS_QUERY_LIMITED set, not the detailed one",
 -- The ptrace-mode surfaces -------------------------------------------------
 
 test("PROCESS_VM_READ is what reading another process's memory needs",
-    { spec = "PKM *psb.right.vm-read", tags = { "known-bug" } }, function(t)
+    { spec = "PKM *psb.right.vm-read" }, function(t)
+        -- Red until kernel 0.20.1-rc13-6: mm_access let a perfmon-capable
+        -- caller past the hook's denial (PEI-689).
         against(t, R.VM_READ, function(w, pid)
             local fd, errno = sys.open(w, "/proc/" .. pid .. "/mem", sys.O.RDONLY)
             t:assert(fd, "with it /proc/<pid>/mem opens for reading: "
@@ -198,7 +201,9 @@ test("PROCESS_VM_READ is what reading another process's memory needs",
     end)
 
 test("PROCESS_VM_WRITE is what writing another process's memory needs",
-    { spec = "PKM *psb.right.vm-write", tags = { "known-bug" } }, function(t)
+    { spec = "PKM *psb.right.vm-write" }, function(t)
+        -- Red until kernel 0.20.1-rc13-6: Yama's relational scope answered
+        -- every attach to a non-descendant ahead of KACS (PEI-689).
         against(t, psb.ALL_RIGHTS, function(w, pid)
             local fd, errno = sys.open(w, "/proc/" .. pid .. "/mem", sys.O.RDWR)
             t:assert(fd, "with every process right granted /proc/<pid>/mem "
@@ -214,7 +219,9 @@ test("PROCESS_VM_WRITE is what writing another process's memory needs",
     end)
 
 test("PROCESS_DUP_HANDLE is what extracting a descriptor through pidfd_getfd needs",
-    { spec = "PKM *psb.right.dup-handle", tags = { "known-bug" } }, function(t)
+    { spec = "PKM *psb.right.dup-handle" }, function(t)
+        -- Red until kernel 0.20.1-rc13-6, for the same Yama reason as
+        -- *psb.right.vm-write (PEI-689).
         psb.with_target(vm, function(target, pidfd)
             local victim = sys.pipe(target)
             t:assert(victim, "the target holds a descriptor to extract")
@@ -242,6 +249,11 @@ test("PROCESS_DUP_HANDLE is what extracting a descriptor through pidfd_getfd nee
 test("maps, fd and environ keep their PTRACE_MODE_READ gating, which is PROCESS_VM_READ",
     { spec = "PKM *psb.proc.maps-fd-environ-are-vm-read", tags = { "known-bug" } },
     function(t)
+        -- maps and environ gate since kernel 0.20.1-rc13-6. The fd
+        -- directory still opens: its permission handler returns on the
+        -- mode check before the ptrace gate, and every process of a
+        -- principal shares the projected uid the mode check compares
+        -- (PEI-689; the corrected patch ships with the next kernel).
         against(t, psb.ALL_RIGHTS & ~R.VM_READ, function(w, pid)
             for _, name in ipairs({ "maps", "environ" }) do
                 t:assert_eq(proc_read(w, pid, name), "open:EACCES (13)",

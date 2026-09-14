@@ -310,7 +310,9 @@ test("a rebind by the same user SID is permitted",
     end)
 
 test("a rebind by a holder of SeTcbPrivilege is permitted",
-    { spec = "PKM *net.port.rebind-same-sid-or-tcb", tags = { "known-bug" } }, function(t)
+    { spec = "PKM *net.port.rebind-same-sid-or-tcb" }, function(t)
+        -- Red until kernel 0.20.1-rc13-6: only the same-uid half of the
+        -- rule existed in the bind-conflict code (PEI-1115).
         with_principals(t, { { user_sid = USER1, projected_uid = 8301 },
                              { user_sid = USER2, projected_uid = 8302,
                                privs_present = TCB, privs_enabled = TCB } },

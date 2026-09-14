@@ -30,11 +30,9 @@ local signing = require("helpers.signing")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
--- Yama's default ptrace scope restricts attach to descendants, which
--- would mask KACS's answer with EPERM before the LSM is consulted. The
--- cases below are about KACS's answer, so the native restriction is
--- lifted for the file.
-vm:write_file("/proc/sys/kernel/yama/ptrace_scope", "0")
+-- Yama is not built into the Peios kernel (PEI-689): its relational
+-- ptrace scope used to answer every attach to a non-descendant with
+-- EPERM before KACS was consulted. Nothing here needs lifting.
 
 local EV = "kacs/kacs_process_access"
 
@@ -101,14 +99,11 @@ test("a caller PIP refuses is denied ptrace in the attach, pidfd and query modes
     end)
 
 test("a caller PIP refuses is denied ptrace in read mode too",
-    { spec = "PKM *pip.ptrace.all-modes", tags = { "known-bug" } }, function(t)
+    { spec = "PKM *pip.ptrace.all-modes" }, function(t)
         -- The remaining mode. §3.7 says a non-dominant caller is refused
-        -- "whatever the mode". The hook *is* reached on this path and it
-        -- *does* deny — `kacs_process_access` records
-        -- `reason=debug-denied desired=0x10 ret=-13` for each of these
-        -- opens — but the syscall proceeds anyway, so the LSM's answer is
-        -- computed and discarded. Same divergence
-        -- tests/kacs/psb-rights.test.lua records for *psb.right.vm-read.
+        -- "whatever the mode". Red until kernel 0.20.1-rc13-6: the hook
+        -- denied, and mm_access then let a perfmon-capable caller
+        -- through anyway (PEI-689).
         pip_denied(t, function(w, pid)
             t:assert_eq(pip.proc_read(w, pid, "maps"),
                 "open:" .. sys.errname(sys.E.ACCES),
@@ -142,22 +137,19 @@ test("the LSM's answer is final: a root caller with every capability is still re
     end)
 
 test("the direct memory-access vectors route through the same check",
-    { spec = "PKM *pip.ptrace.covers-memory-vectors", tags = { "known-bug" } },
+    { spec = "PKM *pip.ptrace.covers-memory-vectors" },
     function(t)
         -- §3.7: "/proc/<pid>/mem, process_vm_readv and process_vm_writev
         -- route through the same check, so one hook covers every
-        -- memory-access vector." Against a descriptor granting nothing
-        -- the hook runs and denies — one `kacs_process_access` verdict
-        -- per call, `reason=debug-denied desired=0x10 ret=-13` — and the
-        -- calls succeed regardless: process_vm_readv returns the bytes
-        -- and /proc/<pid>/mem opens. The answer is reached and then
-        -- ignored, which is the same divergence
-        -- tests/kacs/psb-rights.test.lua records for *psb.right.vm-read.
+        -- memory-access vector." Red until kernel 0.20.1-rc13-6, whose
+        -- mm_access let a perfmon-capable caller past the hook's denial
+        -- (PEI-689). process_vm_readv reports the denial as EPERM: Linux
+        -- maps mm_access's EACCES to it, as its man page promises.
         granting(t, 0, function(w, pid, _, target)
             local remote = assert(psb.anon(target, psb.PROT.READ | psb.PROT.WRITE),
                 "the target has a page to read")
             local r = pip.vm_readv(w, pid, remote)
-            t:assert_eq(r.errno, sys.E.ACCES,
+            t:assert_eq(r.errno, sys.E.PERM,
                 "process_vm_readv is refused by a descriptor granting " ..
                 "nothing (it read " .. r.ret .. " bytes)")
             local fd, errno = sys.open(w, "/proc/" .. pid .. "/mem", sys.O.RDONLY)

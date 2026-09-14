@@ -684,12 +684,12 @@ test("backup and restore intent grant read and write regardless of the DACL",
     end)
 
 test("FACS passes the backup intent of a native open into AccessCheck",
-    { spec = "PKM *token.bootstrap.backup-restore-intent-bypasses-dacl", tags = { "known-bug" } }, function(t)
+    { spec = "PKM *token.bootstrap.backup-restore-intent-bypasses-dacl" }, function(t)
         -- <pkm/file.h> defines KACS_BACKUP_INTENT / KACS_RESTORE_INTENT for
         -- kacs_open_how.flags, and §3.2.3 says FACS passes the intent into
-        -- AccessCheck. kacs_open accepts only the AT_* bits in flags and
-        -- refuses the intent bits with EINVAL; the open path passes no
-        -- intent at all.
+        -- AccessCheck. Red until kernel 0.20.1-rc13-6, whose kacs_open
+        -- refused the intent bits with EINVAL and passed no intent to
+        -- the open path's checks (PEI-687).
         local mount = "/mnt/pit-intent"
         assert(kacs.new_mount(vm, "tmpfs", mount, kacs.MOUNT_POLICY.SYNTHESIZE_EPHEMERAL))
         local f = assert(sys.open(vm, mount .. "/f", sys.O.WRONLY | sys.O.CREAT, 420)); sys.close(vm, f)

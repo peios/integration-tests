@@ -486,11 +486,12 @@ test("the create options are DIRECTORY 1 and DELETE_ON_CLOSE 2",
     end)
 
 test("KACS_BACKUP_INTENT and KACS_RESTORE_INTENT are the kacs_open_how flags",
-    { spec = "PKM *kacs-abi.open-how-flags", tags = { "known-bug" } },
+    { spec = "PKM *kacs-abi.open-how-flags" },
     function(t)
         -- §3.A publishes both as `kacs_open_how.flags` bits, so both
-        -- must be accepted values of the field. The kernel refuses them
-        -- outright (PEI-687): the flags validator admits only zero.
+        -- must be accepted values of the field. Red until kernel
+        -- 0.20.1-rc13-6, whose flags validator admitted only the AT_*
+        -- bit (PEI-687).
         local p = facs.file(vm, B .. "/intents", "i")
         local mask = R.READ_DATA | R.READ_ATTRIBUTES
         local fd, e = facs.open(vm, p, { access = mask, flags = 0x1 })
