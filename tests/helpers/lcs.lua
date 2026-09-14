@@ -242,6 +242,14 @@ function M.source(vm, opts)
     opts = opts or {}
     local self = setmetatable({}, Source)
     self.vm = vm
+    -- The worker that will hold the device open. Normally `register`
+    -- spawns one, and provium scopes a worker to wherever it was
+    -- spawned: inside a test() body it is closed when that test ends,
+    -- whatever still references it. A source that is built lazily from
+    -- inside its first test but serves the whole file must therefore
+    -- be handed a worker spawned at file scope: `{ worker = W }`.
+    self.worker = opts.worker
+    self.owns_worker = false
     self.store = new_store()
     self.seq = 0
     self.log = {}
@@ -784,10 +792,21 @@ end
 --- `o.max_sequence` overrides what the seeds imply; `o.who` supplies
 --- the worker (a principal, say) instead of a fresh SYSTEM one.
 --- Returns true, or nil and a message; the errno is in `self.errno`.
+---
+--- The worker outlives the connection: `disconnect` closes the device
+--- and `resume` reopens it on the same worker, so a source that drops
+--- and comes back inside a test does not pick up a worker scoped to
+--- that test (see `M.source`). Only `close` retires the worker.
 function Source:register(o)
     o = o or {}
-    self.worker = o.who or self.vm:spawn_worker()
-    self.owns_worker = o.who == nil
+    if o.who then
+        if self.worker and self.owns_worker and self.worker ~= o.who then
+            self.worker:kill(); self.worker:join()
+        end
+        self.worker, self.owns_worker = o.who, false
+    elseif not self.worker then
+        self.worker, self.owns_worker = self.vm:spawn_worker(), true
+    end
     local fd, errno = sys.open(self.worker, M.DEVICE, sys.O.RDWR | O_NONBLOCK)
     if not fd then
         self.errno = errno
@@ -956,11 +975,12 @@ function Source:mark() return #self.log + 1 end
 
 --- Close the device fd (the slot goes Down) but keep the store, so
 --- the same hive set can be registered again with `resume`.
+--- Drop the connection: close the device, keep the worker. To the
+--- kernel this is the source going away; `resume` registers again on
+--- the same worker, so a source that drops and comes back inside a
+--- test is not left holding a worker scoped to that test.
 function Source:disconnect()
     if self.fd then sys.close(self.worker, self.fd); self.fd = nil end
-    if self.worker and self.owns_worker then
-        self.worker:kill(); self.worker:join(); self.worker = nil
-    end
     self.registered = false
     self.eof, self.hup = nil, nil
 end
@@ -971,8 +991,13 @@ function Source:resume(o)
     return self:register(o)
 end
 
+--- Disconnect and retire the worker this source spawned for itself.
 function Source:close()
     self:disconnect()
+    if self.worker and self.owns_worker then
+        self.worker:kill(); self.worker:join()
+        self.worker, self.owns_worker = nil, false
+    end
 end
 
 --- The commonest fixture: a Machine hive with `Machine\Software\Test`

@@ -12,12 +12,18 @@ local token = require("helpers.token")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
+-- The workers the file's two sources register on. Spawned here rather
+-- than inside fixture() because provium closes a worker with the test
+-- that spawned it, and the sources serve every test in the file.
+local SRC_WORKER = vm:spawn_worker()
+local OTHER_WORKER = vm:spawn_worker()
+
 local TEST = "Machine\\Software\\Test"
 
 local main, other, test_key, only_layer_key, sd_key
 local function fixture()
     if main then return main end
-    local s = lcs.source(vm)
+    local s = lcs.source(vm, { worker = SRC_WORKER })
     s:key(lcs.LAYERS_PATH .. "\\base", { sd = lcs.permissive_sd() })
     s:seed_layer("Alt", { precedence = 10, enabled = true })
     s:seed_layer("Only", { precedence = 20, enabled = true })
@@ -66,7 +72,7 @@ local function fixture()
     -- The cross-source case: an entry in `Cross` on each of two sources.
     lcs.seed_key_in_layer(s, test_key, "CrossHere", "Cross")
 
-    local o = lcs.source(vm, { hives = { { name = "Other" } } })
+    local o = lcs.source(vm, { worker = OTHER_WORKER, hives = { { name = "Other" } } })
     local oroot = o.hives[1].root
     lcs.seed_key_in_layer(o, oroot, "CrossThere", "Cross")
 

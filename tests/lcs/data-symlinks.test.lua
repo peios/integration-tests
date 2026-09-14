@@ -10,6 +10,11 @@ local kacs = require("helpers.kacs")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
+-- The worker the file's source registers on. Spawned here rather than
+-- inside fixture() because provium closes a worker with the test that
+-- spawned it, and the source serves every test in the file.
+local SRC_WORKER = vm:spawn_worker()
+
 local TEST = "Machine\\Software\\Test"
 local P = token.PRIV
 local TCB = token.bit(P.TCB)
@@ -20,7 +25,8 @@ local function fixture()
     if src then return src end
     -- `Sub` is a hive of the fixture source's own, so the
     -- relative-looking-target case needs no second source to pump.
-    local s = lcs.source(vm, { hives = { { name = "Machine" }, { name = "Sub" } } })
+    local s = lcs.source(vm, { worker = SRC_WORKER,
+        hives = { { name = "Machine" }, { name = "Sub" } } })
     -- Writing into a layer is authorised against the layer's metadata
     -- key (§5.3.4); without a permissive one on `base`, no principal but
     -- SYSTEM could create a key at all.

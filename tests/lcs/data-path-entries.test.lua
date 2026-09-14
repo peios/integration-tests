@@ -7,12 +7,17 @@ local lcs = require("helpers.lcs")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
+-- The worker the file's source registers on. Spawned here rather than
+-- inside fixture() because provium closes a worker with the test that
+-- spawned it, and the source serves every test in the file.
+local SRC_WORKER = vm:spawn_worker()
+
 local TEST = "Machine\\Software\\Test"
 
 local src, test_key, base_masked, policy_masked, tie_parent
 local function fixture()
     if src then return src end
-    local s = lcs.source(vm)
+    local s = lcs.source(vm, { worker = SRC_WORKER })
     s:key(lcs.LAYERS_PATH .. "\\base", { sd = lcs.permissive_sd() })
     s:seed_layer("Policy", { precedence = 10, enabled = true })
     s:seed_layer("Hider", { precedence = 20, enabled = true })

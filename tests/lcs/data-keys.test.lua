@@ -12,13 +12,18 @@ local kacs = require("helpers.kacs")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
+-- The worker the file's source registers on. Spawned here rather than
+-- inside fixture() because provium closes a worker with the test that
+-- spawned it, and the source serves every test in the file.
+local SRC_WORKER = vm:spawn_worker()
+
 local TEST = "Machine\\Software\\Test"
 local INHERIT_SID = kacs.SID.AUTHENTICATED_USERS
 
 local src, test_key, layer_dual_base, layer_dual_policy, wrong_name_key
 local function fixture()
     if src then return src end
-    local s = lcs.source(vm)
+    local s = lcs.source(vm, { worker = SRC_WORKER })
     s:seed_layer("Policy", { precedence = 10 })
     test_key = s:key(TEST)
 

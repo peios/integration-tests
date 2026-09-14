@@ -17,6 +17,11 @@ local token = require("helpers.token")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
+-- The worker the shared source registers on. Spawned here rather than
+-- inside main() because provium closes a worker with the test that
+-- spawned it, and the source serves every test in the file.
+local MAIN_WORKER = vm:spawn_worker()
+
 local SCOPE_A, SCOPE_B = lcs.guid(), lcs.guid()
 local USER_SID = token.sid_string(token.SID.TEST_USER)
 
@@ -26,7 +31,7 @@ local USER_SID = token.sid_string(token.SID.TEST_USER)
 local main_src
 local function main()
     if main_src then return main_src end
-    local src = lcs.source(vm, { hives = {
+    local src = lcs.source(vm, { worker = MAIN_WORKER, hives = {
         { name = "Alpha" },
         { name = "Users" },
         { name = "Beta" },

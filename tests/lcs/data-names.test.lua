@@ -13,6 +13,11 @@ local token = require("helpers.token")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
+-- The worker the file's source registers on. Spawned here rather than
+-- inside fixture() because provium closes a worker with the test that
+-- spawned it, and the source serves every test in the file.
+local SRC_WORKER = vm:spawn_worker()
+
 local TEST = "Machine\\Software\\Test"
 local SIGMA_UPPER, SIGMA_LOWER = "\u{03A3}igma", "\u{03C3}igma"
 local CAFE_NFC, CAFE_NFD = "Caf\u{00E9}", "Cafe\u{0301}"
@@ -24,7 +29,7 @@ local GARAY_UPPER, GARAY_LOWER = "\u{10D50}garay", "\u{10D70}garay"
 local src, test_key
 local function fixture()
     if src then return src end
-    local s = lcs.source(vm, { hives = {
+    local s = lcs.source(vm, { worker = SRC_WORKER, hives = {
         { name = "Machine" },
         { name = SIGMA_UPPER },
         { name = CAFE_NFC }, { name = CAFE_NFD },

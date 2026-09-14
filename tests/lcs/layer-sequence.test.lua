@@ -9,6 +9,12 @@ local lcs = require("helpers.lcs")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
+-- Both workers the file shares are spawned here rather than inside
+-- machine() and w(): provium closes a worker with the test that spawned
+-- it, and these serve every test in the file.
+local SRC_WORKER = vm:spawn_worker()
+local worker = vm:spawn_worker()
+
 -- One Machine source for the file: a Down slot keeps its hive identity,
 -- so a second `Machine` registration would be ESTALE (§5.8.2). Cases
 -- that need another source register a hive name of their own.
@@ -16,7 +22,7 @@ local BASELINE = 5000
 local src, test_key
 local function machine()
     if src then return src end
-    src = lcs.source(vm)
+    src = lcs.source(vm, { worker = SRC_WORKER })
     test_key = src:key("Machine\\Software\\Test")
     src:seed_layer("base")
     src:seed_layer("alt")
@@ -27,11 +33,7 @@ local function machine()
     return src
 end
 
-local worker
-local function w()
-    if not worker then worker = vm:spawn_worker() end
-    return worker
-end
+local function w() return worker end
 
 --- A fresh subkey of Machine\Software\Test, so cases do not share values.
 local function subkey(t, name)
