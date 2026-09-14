@@ -612,18 +612,14 @@ test("the reserved name base is matched like every other layer name",
     end)
 
 test("the reserved name base is recognised with Unicode Simple Case Folding, the same table as every other layer name",
-    { spec = "PKM *layer.base.name-matched-by-case-folding",
-      tags = { "known-bug" } },
+    { spec = "PKM *layer.base.name-matched-by-case-folding" },
     function(t)
         -- §5.3.2 says the second, ASCII-only comparator beside the
         -- folding one is gone, and that the length pre-check which made
         -- a non-ASCII case pair fail before folding could matter went
-        -- with it.
-        --
-        -- KERNEL: `ba<U+017F>e` folds to `base` — U+017F LATIN SMALL
-        -- LETTER LONG S folds to `s` — and is still not recognised as
-        -- the reserved name. It is not treated as an absent layer
-        -- either: the write fails EIO rather than ENOENT.
+        -- with it. `ba<U+017F>e` folds to `base` — U+017F LATIN SMALL
+        -- LETTER LONG S folds to `s` — so it names the reserved layer.
+        -- Red until pkm e0d0ce5 reached the image; green since.
         local fd = subkey(t, "BaseFoldedUnicode")
         local s = lcs.set_value(src, w, fd, "V", lcs.TYPE.DWORD, lcs.dword(1),
             { layer = "ba" .. LONG_S .. "e" })

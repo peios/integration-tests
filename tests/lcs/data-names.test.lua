@@ -432,25 +432,26 @@ test("identity is the folded name: a duplicate is a folded-equal duplicate",
         done(w)
     end)
 
-test("two comparisons in the kernel are ASCII-only rather than folded",
-    { spec = "PKM *name.case.two-comparisons-are-ascii-only" }, function(t)
+test("KACS's private-layer duplicate check folds the way LCS does",
+    { spec = "PKM *name.case.every-comparison-folds" }, function(t)
         local w = worker()
-        -- KACS's duplicate check when parsing private layer names into a
-        -- token compares ASCII case only. Two names that differ only in
-        -- ASCII case are caught ...
+        -- KACS deduplicates the private layer names it parses into a
+        -- token with the same folding routine and table as LCS (pkm
+        -- e0d0ce5). An ASCII case pair is a duplicate ...
         local ascii, ascii_errno = token.mint(w, {
             lcs_credentials = lcs.lcs_credentials({}, { "RoleA", "rolea" }),
         })
         t:assert(ascii == nil, "an ASCII-case duplicate is rejected")
         t:assert_eq(ascii_errno, sys.E.INVAL, "with EINVAL: " .. sys.errname(ascii_errno or 0))
 
-        -- ... while two that are folded-equal beyond ASCII are not, so
-        -- the token carries one layer under two names.
-        local folded = token.mint(w, {
+        -- ... and so is a pair that is folded-equal only beyond ASCII,
+        -- which an ASCII-only comparison let onto the token as one
+        -- layer under two names.
+        local folded, folded_errno = token.mint(w, {
             lcs_credentials = lcs.lcs_credentials({}, { "\u{03A3}", "\u{03C3}" }),
         })
-        t:assert(folded ~= nil,
-            "a folded-equal duplicate outside ASCII is not caught by that check")
+        t:assert(folded == nil, "a folded-equal duplicate outside ASCII is rejected too")
+        t:assert_eq(folded_errno, sys.E.INVAL, "with EINVAL: " .. sys.errname(folded_errno or 0))
         if folded then sys.close(w, folded) end
         done(w)
     end)
