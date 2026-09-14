@@ -266,16 +266,16 @@ test("the scope of recovery delivery is the source, not the hive",
         sys.close(w, layer_fd); sys.close(w, other); sys.close(w, machine)
     end)
 
--- Kernel bug: recovery bumps the generation counter of every hive the
--- source backs, not only the affected one. Ordinary mutations keep the
--- counters independent — a write in `Machine` leaves `Other`'s alone —
--- so this is specific to the recovery path, and it defeats the point of
--- the generation number, which is to let a watcher that received an
--- OVERFLOW decide whether anything in *its* hive actually changed.
-test("recovery increments only the affected hive's generation, though it delivers " ..
-     "to every watch on the source",
-    { spec = "PKM *watch.dispatch.recovery-scope-is-the-source-not-the-hive",
-      tags = { "known-bug" } }, function(t)
+-- Recovery bumps the generation counter of every hive the source backs,
+-- deliberately (§5.6.3, PEI-276 as decided 2026-09-14): the kernel
+-- cannot tell which hives a layer operation touched — the source's
+-- answer names only orphaned keys, and hiding or masked entries change
+-- effective state without orphaning anything — so it bumps them all
+-- rather than let a watcher skip a re-read its hive needed. Ordinary
+-- writes keep the counters independent.
+test("recovery increments every hive's generation on the source, not only the " ..
+     "affected one",
+    { spec = "PKM *watch.dispatch.recovery-generation-bump-is-source-wide" }, function(t)
         local machine = open_nb(ROOT .. "\\Recovery")
         local other = open_nb("Other\\Thing")
         arm(t, other)
@@ -286,8 +286,8 @@ test("recovery increments only the affected hive's generation, though it deliver
         t:assert_eq(k.ret, 0, "deleting a Machine-hive layer: " .. sys.errname(k.errno or 0))
         t:assert_eq(count_of(lcs.drain_events(w, other), lcs.WATCH.OVERFLOW), 1,
             "the other hive's watch is told, because delivery is per source")
-        t:assert_eq(generation(other), before,
-            "but the generation counters are per hive, and that hive was not affected")
+        t:assert_eq(generation(other), before + 1,
+            "and its generation is bumped too: the kernel cannot know the hive was untouched")
         sys.close(w, layer_fd); sys.close(w, other); sys.close(w, machine)
     end)
 
