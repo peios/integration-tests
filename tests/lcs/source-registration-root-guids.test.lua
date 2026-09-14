@@ -1,32 +1,20 @@
--- §5.8.2: "Root GUIDs are checked for uniqueness within one request,
--- and the already-registered state is checked for consistency, but an
--- incoming request's root GUIDs are not compared against those of
--- existing slots."
+-- §5.8.2: root GUIDs are checked for uniqueness within one request, and
+-- against every existing slot: a request whose root GUID is already the
+-- root of a differently-named hive is refused EEXIST.
 --
--- Its own file because the kernel disagrees in a way that takes the
--- whole VM with it: the second registration is admitted, and from then
--- on the slot table fails its own consistency check, so every later
--- registration and every hive route returns EINVAL. Nothing can follow
--- it here.
+-- Its own file because the kernel used to disagree in a way that took
+-- the whole VM with it (PEI-769): the second registration was admitted,
+-- and from then on the slot table failed its own consistency check, so
+-- every later registration and every hive route returned EINVAL. Kept
+-- separate so a regression cannot take the rest of the testset down.
 
 local sys = require("helpers.sys")
 local lcs = require("helpers.lcs")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
-test("two slots may hold the same hive root GUID, and the registry keeps working",
-    { spec = "PKM *source.register.root-guids-not-compared-across-slots",
-      tags = { "known-bug" } }, function(t)
-        -- KERNEL BUG. The registration below is admitted, exactly as
-        -- the manual says it should be. But the slot table it leaves
-        -- behind is then rejected by validate_existing_source_slots
-        -- (lcs-core source.rs, reached from validate_source_registration
-        -- and for_each_source_slot_hive), so afterwards *every*
-        -- registration fails EINVAL and *every* path walk fails EINVAL:
-        -- the registry is unusable until reboot. Admitting a
-        -- registration that makes the table permanently invalid is the
-        -- contradiction — either the admission check should compare
-        -- roots across slots, or the consistency check should not.
+test("a root GUID already held by another slot is refused, and the registry keeps working",
+    { spec = "PKM *source.register.root-guids-compared-across-slots" }, function(t)
         local machine = lcs.source(vm)
         machine:key("Machine\\Software\\Test")
         assert(machine:register())
@@ -37,12 +25,14 @@ test("two slots may hold the same hive root GUID, and the registry keeps working
         local a = lcs.source(vm, { hives = { { name = "RootShareA", root = shared } } })
         t:assert(a:register(), "the first source registers the root")
         local b = lcs.source(vm, { hives = { { name = "RootShareB", root = shared } } })
-        t:assert(b:register(),
-            "and a second slot may reuse it: an incoming request's roots are not " ..
+        t:assert(not b:register(),
+            "a second slot may not reuse it: an incoming request's roots are " ..
             "compared against existing slots")
+        t:assert_eq(b.errno, sys.E.EXIST,
+            "refused as a collision: " .. sys.errname(b.errno or 0))
 
-        -- The manual says nothing else changed, so nothing else should
-        -- have. Observed: EINVAL from both.
+        -- Refused at admission, nothing was admitted, so nothing else
+        -- changed: the table stays consistent.
         local later = lcs.source(vm, { hives = { { name = "RootShareC" } } })
         t:assert(later:register(),
             "an unrelated source still registers afterwards: " ..

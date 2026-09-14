@@ -1426,13 +1426,25 @@ function M.create_layer(src, who, name, o)
     })
     if r.ret < 0 then sys.close(who, txn); return nil, r.errno end
     local fd = r.ret
+    -- A refused metadata write (the precedence gate, §5.3.4, fires on
+    -- `Precedence` inside this transaction) is the creation failing:
+    -- report it the way a refused create_key is reported.
     local function set(vname, vtype, data)
         local w = M.set_value(src, who, fd, vname, vtype, data, { txn_fd = txn })
-        if w.ret ~= 0 then error("set " .. vname .. ": " .. sys.errname(w.errno)) end
+        if w.ret ~= 0 then
+            sys.close(who, txn); sys.close(who, fd)
+            return nil, w.errno
+        end
+        return true
     end
-    set("Precedence", M.TYPE.DWORD, M.dword(o.precedence or 0))
-    set("Enabled", M.TYPE.DWORD, M.dword(o.enabled == false and 0 or 1))
-    if o.owner then set("Owner", M.TYPE.BINARY, o.owner) end
+    local ok, e = set("Precedence", M.TYPE.DWORD, M.dword(o.precedence or 0))
+    if not ok then return nil, e end
+    ok, e = set("Enabled", M.TYPE.DWORD, M.dword(o.enabled == false and 0 or 1))
+    if not ok then return nil, e end
+    if o.owner then
+        ok, e = set("Owner", M.TYPE.BINARY, o.owner)
+        if not ok then return nil, e end
+    end
     local c = M.commit(src, who, txn)
     sys.close(who, txn)
     if c.ret ~= 0 then sys.close(who, fd); return nil, c.errno end

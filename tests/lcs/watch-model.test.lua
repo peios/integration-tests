@@ -443,16 +443,11 @@ test("events are computed by diffing effective state, so a masked deletion is si
         sys.close(w, fd)
     end)
 
--- Kernel bug: REG_IOC_SET_VALUE dispatches VALUE_SET unconditionally on
--- the written name — key_fd.c sets `late_effect.event_type =
--- REG_WATCH_VALUE_SET` before the round trip and never compares
--- effective state before against after, unlike REG_IOC_DELETE_VALUE,
--- which derives the type from a snapshot diff
--- (pkm_lcs_key_fd_delete_value_watch_event_type). Observed: VALUE_SET
--- for a write that a higher-precedence layer completely masks.
+-- REG_IOC_SET_VALUE derives its event from a before/after snapshot diff
+-- like REG_IOC_DELETE_VALUE (PEI-756; red until kernel 0.20.1-rc13-7,
+-- which dispatched VALUE_SET unconditionally).
 test("a write that changes no effective state dispatches nothing",
-    { spec = "PKM *watch.model.computed-by-diffing-effective-state",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *watch.model.computed-by-diffing-effective-state" }, function(t)
         local fd = open_seeded("Diff")
         lcs.set_value(src, w, fd, "Masked", lcs.TYPE.DWORD, lcs.dword(9),
             { layer = "high" })
@@ -513,13 +508,11 @@ test("VALUE_DELETED fires when the last entry goes and when a blanket masks the 
         sys.close(w, fd)
     end)
 
--- Kernel bug: writing REG_TOMBSTONE over a lower-precedence value makes
--- the value unreadable (query answers ENOENT) but dispatches VALUE_SET
--- rather than VALUE_DELETED. The diff appears to be taken over the
--- layer's own entry rather than over effective state.
+-- Writing REG_TOMBSTONE over a lower-precedence value makes the value
+-- unreadable, and the effective-state diff reports that as
+-- VALUE_DELETED (PEI-756; red until kernel 0.20.1-rc13-7).
 test("VALUE_DELETED fires when a tombstone masks every entry",
-    { spec = "PKM *watch.model.value-deleted-fires-on-last-entry-gone-or-masked",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *watch.model.value-deleted-fires-on-last-entry-gone-or-masked" }, function(t)
         local fd = fresh("TombstoneMasks")
         lcs.set_value(src, w, fd, "Answer", lcs.TYPE.DWORD, lcs.dword(1))
         arm(t, fd, lcs.NOTIFY.ALL)
@@ -552,17 +545,13 @@ test("subkey events cover a path entry appearing and being removed",
         sys.close(w, c.ret); sys.close(w, fd)
     end)
 
--- Kernel bug: creating the hiding entry dispatches SUBKEY_DELETED, but
--- removing it dispatches nothing at all, even though the concealed key
--- is enumerable again immediately afterwards. Half of the "both halves
--- of the naming model" claim is missing. In
--- pkm_lcs_key_fd_delete_key_from_args_for_token the visibility events
--- are published only when `!post_lookup.target_still_named` — when the
--- *fd's own* GUID stopped being named at the path. Removing a hiding
--- entry leaves the fd's key named, so the branch is skipped.
+-- Removing a hiding entry is the other half of the naming model: the
+-- deletion's events come from which entry wins the name before against
+-- after, so the concealed key reappearing is SUBKEY_CREATED (PEI-757;
+-- red until kernel 0.20.1-rc13-7, which published visibility events
+-- only when the fd's own GUID stopped being named).
 test("removing a hiding entry that concealed a key fires SUBKEY_CREATED",
-    { spec = "PKM *watch.model.subkey-events-cover-path-and-hiding-entries",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *watch.model.subkey-events-cover-path-and-hiding-entries" }, function(t)
         local fd = fresh("HidingEntries")
         local c = lcs.create_key(src, w, { parent_fd = fd, path = "Child" })
         arm(t, fd, lcs.NOTIFY.SUBKEY)

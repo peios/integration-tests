@@ -148,8 +148,13 @@ test("the burst OVERFLOW is queued ahead of the batch",
         local over = open_nb(ROOT .. "\\Burst")
         arm(t, over)
         -- Something already queued before the transaction, to fix where
-        -- the batch starts in this watcher's queue.
-        lcs.set_value(src, w, over, "Earlier", lcs.TYPE.DWORD, lcs.dword(1))
+        -- the batch starts in this watcher's queue. Not a value: the
+        -- blanket the previous case left in `high` masks every value
+        -- name on this key, so a value write here is an empty diff and
+        -- dispatches nothing (§5.6.1). A subkey appearing is effective.
+        local earlier = lcs.create_key(src, w, { parent_fd = over, path = "Earlier" })
+        t:assert(earlier.ret >= 0, "a subkey to queue first: " .. sys.errname(earlier.errno or 0))
+        sys.close(w, earlier.ret)
         local txn = assert(lcs.begin_transaction(w))
         lcs.blanket_tombstone(src, w, over, "high", false, { txn_fd = txn })
         local cm = lcs.commit(src, w, txn)

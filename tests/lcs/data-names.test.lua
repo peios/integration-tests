@@ -127,18 +127,36 @@ test("null bytes are rejected in every string",
 -- ENOENT, the errno for a layer that is not in the table — so a null
 -- byte reaches layer lookup instead of being refused as an invalid
 -- string.
-test("a null byte in reg_create_key's layer name is rejected as an invalid string",
-    { spec = "PKM *name.utf8.null-bytes-rejected-in-every-string",
-      tags = { "known-bug" } }, function(t)
+test("a null byte in reg_create_key's layer name terminates it, as in every C string",
+    { spec = "PKM *name.utf8.null-bytes-rejected-in-every-string" }, function(t)
+        -- reg_create_key's layer_ptr is a C string (§5.5.2), so a null
+        -- byte cannot be *carried* by it: the kernel copies up to the
+        -- terminator (strnlen_user in
+        -- pkm_lcs_create_layer_target_copy_from_user) and never sees the
+        -- bytes after it. What it validates is `bad`, a well-formed name
+        -- of no layer, so the answer is ENOENT — not EINVAL, which is
+        -- what the length-delimited ioctl strings above answer, because
+        -- there the null byte is inside the counted length. The one
+        -- thing to hold the kernel to is that nothing after the
+        -- terminator is read: a layer that does exist (`base`, the
+        -- only one this fixture has), followed by a null byte and
+        -- junk, names that layer.
         local s = fixture()
         local w = worker()
         local fd = open(t, w, TEST)
         local cname = lcs.create_key(s, w, {
             parent_fd = fd, path = "NulLayerChild", layer = "bad\0layer",
         })
-        t:assert_eq(cname.errno, sys.E.INVAL,
-            "a layer name carrying a null byte is invalid: "
+        t:assert_eq(cname.errno, sys.E.NOENT,
+            "the name ends at the null byte, and `bad` is not a layer: "
             .. sys.errname(cname.errno or 0))
+        local good = lcs.create_key(s, w, {
+            parent_fd = fd, path = "NulLayerChild", layer = "base\0junk",
+        })
+        t:assert(good.ret >= 0,
+            "the name ends at the null byte, and `base` is a layer: "
+            .. sys.errname(good.errno or 0))
+        if good.ret >= 0 then sys.close(w, good.ret) end
         sys.close(w, fd)
         done(w)
     end)

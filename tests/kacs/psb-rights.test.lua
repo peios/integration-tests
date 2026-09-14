@@ -11,9 +11,9 @@
 -- decides on credential comparison can be mistaken for the descriptor
 -- deciding.
 --
--- One case here is tagged known-bug: /proc/<pid>/fd opens without
--- PROCESS_VM_READ (PEI-689, fix queued for the next kernel). The other
--- ptrace-mode surfaces gate correctly since kernel 0.20.1-rc13-6.
+-- Every ptrace-mode surface gates correctly since kernel 0.20.1-rc13-7;
+-- maps and environ did from -6, and /proc/<pid>/fd's directory gate
+-- (PEI-689) landed a revision later.
 
 local sys = require("helpers.sys")
 local kacs = require("helpers.kacs")
@@ -247,13 +247,13 @@ test("PROCESS_DUP_HANDLE is what extracting a descriptor through pidfd_getfd nee
     end)
 
 test("maps, fd and environ keep their PTRACE_MODE_READ gating, which is PROCESS_VM_READ",
-    { spec = "PKM *psb.proc.maps-fd-environ-are-vm-read", tags = { "known-bug" } },
+    { spec = "PKM *psb.proc.maps-fd-environ-are-vm-read" },
     function(t)
-        -- maps and environ gate since kernel 0.20.1-rc13-6. The fd
-        -- directory still opens: its permission handler returns on the
-        -- mode check before the ptrace gate, and every process of a
-        -- principal shares the projected uid the mode check compares
-        -- (PEI-689; the corrected patch ships with the next kernel).
+        -- maps and environ gate since kernel 0.20.1-rc13-6; the fd
+        -- directory since -7, when its permission handler stopped
+        -- returning on the mode check (which every process of a
+        -- principal passes, sharing the projected uid) before the
+        -- ptrace gate ran (PEI-689).
         against(t, psb.ALL_RIGHTS & ~R.VM_READ, function(w, pid)
             for _, name in ipairs({ "maps", "environ" }) do
                 t:assert_eq(proc_read(w, pid, name), "open:EACCES (13)",

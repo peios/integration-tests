@@ -211,15 +211,13 @@ test("a stratum the caller cannot resolve gives EACCES, not an oracle",
         end)
     end)
 
--- PEI-579. The specified ordering is stack-wide: entitlement for every
--- stratum, then the validity conditions. The strata are checked in one
--- loop instead — resolve, stat, type-test, compare — so stratum 0 is
--- fully judged before stratum 1 is resolved, and its errno reaches a
--- caller who was never entitled to name stratum 1. §4.2.3 records this
--- as a defect; the test states the specified behaviour.
+-- PEI-263 (red until kernel 0.20.1-rc13-8). The specified ordering is
+-- stack-wide: entitlement for every stratum, then the validity
+-- conditions. Admission runs in two passes, so an EACCES on stratum 1
+-- wins over stratum 0's ENOTDIR or ENOENT, while the validity
+-- conditions themselves stay in stratum order.
 test("entitlement is decided for the whole stack before any validity condition",
-    { spec = "PKM *mount.admission-evaluation-order",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *mount.admission-evaluation-order" }, function(t)
         local shut = barrier(t)
         local file = base.root .. "/a-regular-file"
         vm:write_file(file, "x")

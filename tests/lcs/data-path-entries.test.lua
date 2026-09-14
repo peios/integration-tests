@@ -268,17 +268,13 @@ test("an entry that already exists is retried as an open",
         done(w)
     end)
 
--- KNOWN BUG. §5.2.5: "If a different layer already has a key at that
--- path, the new layer gets its own distinct GUID. Each layer has its own
--- key object." reg_create_key resolves the path first (across every
--- enabled layer, via pkm_lcs_create_existing_*_for_token in
--- lcs/source_create.c) and returns REG_OPENED_EXISTING on the *other*
--- layer's key, so a layer can never author its own entry at a path some
--- lower layer already names — which is also what §5.2.5's hide-and-
--- replace pattern needs.
+-- §5.2.5: "If a different layer already has a key at that path, the new
+-- layer gets its own distinct GUID. Each layer has its own key object."
+-- A create naming a layer creates that layer's own entry rather than
+-- opening whichever layer's key currently wins the path (PEI-765; red
+-- until kernel 0.20.1-rc13-7).
 test("a different layer gets its own distinct GUID at the same path",
-    { spec = "PKM *path-entry.create.other-layer-gets-a-distinct-guid",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *path-entry.create.other-layer-gets-a-distinct-guid" }, function(t)
         local s = fixture()
         local w = worker()
         local parent = open(t, w, TEST)
@@ -361,15 +357,13 @@ test("no API exposes GUID sharing: the namespace is a tree, not a graph",
         done(w)
     end)
 
--- KNOWN BUG. §5.2.5: "Every key has exactly one canonical parent and
--- name, and LCS validates that a source is not reporting otherwise."
--- lcs-core has the validator — validate_key_canonical_path_locations in
--- crates/lcs-core/src/key.rs — but nothing in pkm/lcs calls it, so a
--- source that names one GUID under two parents is served: both paths
--- open, and REG_IOC_QUERY_KEY_INFO answers on both.
+-- §5.2.5: "Every key has exactly one canonical parent and name, and LCS
+-- validates that a source is not reporting otherwise." The key record's
+-- parent must be the parent the fd reached the key through;
+-- REG_IOC_QUERY_KEY_INFO refuses a record that says otherwise as
+-- malformed key metadata (PEI-766; red until kernel 0.20.1-rc13-7).
 test("LCS validates that a source reports one canonical parent and name",
-    { spec = "PKM *path-entry.no-hard-links.one-canonical-parent-and-name",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *path-entry.no-hard-links.one-canonical-parent-and-name" }, function(t)
         local s = fixture()
         local w = worker()
         -- `CanonB\Real` is made to point at the key whose record says its

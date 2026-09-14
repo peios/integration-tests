@@ -313,8 +313,7 @@ test("a missing token is EACCES, because that one is an access decision",
     function(t) end)
 
 test("KACS matches the private layer names it parses by the same folding LCS resolves them by",
-    { spec = "PKM *layer.private.kacs-dedupes-names-by-case-folding",
-      tags = { "known-bug" } },
+    { spec = "PKM *layer.private.kacs-dedupes-names-by-case-folding" },
     function(t)
         local w = vm:spawn_worker()
         -- An ASCII case pair is one identity to KACS: it will not let
@@ -323,22 +322,22 @@ test("KACS matches the private layer names it parses by the same folding LCS res
             { user_sid = token.SID.LOCAL_SYSTEM }))
         t:assert(not ascii, "`Alpha` and `ALPHA` are one name")
         t:assert_eq(e, sys.E.INVAL, "and cannot both sit on one token")
+        -- `ROLEs` and `ROLEſ` fold equal by the same table, so they are
+        -- one name to KACS too and are refused the same way (§5.3.5;
+        -- the ASCII-only comparator went in pkm e0d0ce5). Sixteen
+        -- distinct names, one of the pair among them, are sixteen
+        -- layers, within MaxPrivateLayersPerToken, and resolve.
+        local folded, e2 = token.mint(w, creds({ "ROLEs", "ROLE" .. LONG_S }, {},
+            { user_sid = token.SID.LOCAL_SYSTEM }))
+        t:assert(not folded, "`ROLEs` and `ROLE" .. LONG_S .. "` are one name")
+        t:assert_eq(e2, sys.E.INVAL, "and cannot both sit on one token either")
         w:kill(); w:join()
-        -- `ROLEs` and `ROLEſ` fold equal too, so seventeen names of
-        -- which two are that pair are sixteen layers, within
-        -- MaxPrivateLayersPerToken, and every operation must work.
-        --
-        -- KERNEL: kacs/token_runtime.rs parse_lcs_credential_extension
-        -- still compares with eq_ignore_ascii_case, so both spellings
-        -- sit on the token, the raw count LCS reads is seventeen, and
-        -- every operation fails E2BIG — exactly the divergence §5.3.5
-        -- describes as gone.
-        local names = { "ROLEs", "ROLE" .. LONG_S }
+        local names = { "ROLE" .. LONG_S }
         for i = 1, 15 do names[#names + 1] = "n" .. i end
         token.as_principal(t, vm, creds(names), function(w2)
             local r = lcs.open_key(src, w2, -1, TEST_PATH, lcs.RIGHT.KEY_READ)
             t:assert(r.ret >= 0,
-                "a name LCS treats as one layer is one layer to KACS too: " ..
+                "sixteen names that fold distinct are sixteen layers: " ..
                 sys.errname(r.errno or 0))
             if r.ret >= 0 then sys.close(w2, r.ret) end
         end)

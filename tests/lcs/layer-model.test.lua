@@ -665,18 +665,14 @@ test("a MaxTotalLayers below 1024 binds",
     end)
 
 test("creating a layer when the table is full returns ENOSPC",
-    { spec = "PKM *layer.model.layer-table-full-is-enospc",
-      tags = { "known-bug" } },
+    { spec = "PKM *layer.model.layer-table-full-is-enospc" },
     function(t)
-        -- KERNEL: MaxTotalLayers is meant to bound the whole table —
-        -- 1023 dynamic entries plus the base layer for the default 1024
-        -- (§5.3.1). The admission check counts only the dynamic entries,
-        -- so with the cap at N a further dynamic layer is admitted past
-        -- the point where base needs its slot; the snapshot the next
-        -- operation asks for then needs N+1 slots in buffers sized for
-        -- N, and from there every registry operation on every hive fails
-        -- EINVAL rather than the creation failing ENOSPC. This case is
-        -- last in the file because the fill leaves the registry so.
+        -- MaxTotalLayers bounds the whole table, base included (§5.3.1):
+        -- the creation that would exceed it is refused ENOSPC at the
+        -- metadata key, before anything reaches the source (PEI-759; red
+        -- until kernel 0.20.1-rc13-7, when the admission counted only
+        -- the dynamic entries and the snapshot buffers overflowed). Last
+        -- in the file because the fill reconfigures the table.
         t:assert(fill_stop, "the fill in the preceding case reached the cap")
         t:assert_eq(fill_errno, sys.E.NOSPC,
             "the creation that would exceed the table is refused with ENOSPC, not " ..

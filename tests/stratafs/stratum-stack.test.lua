@@ -274,8 +274,7 @@ test("the create stratum takes creations and copy-ups wherever it sits",
 -- CI runs `--no-tag known-bug`; a local run leaves it red so it stays
 -- visible to whoever is working in the area.
 test("each term of the accepts-modification predicate refuses on its own",
-    { spec = "PKM *strata.ro-is-independent-of-filesystem",
-      tags = { "known-bug" } }, function(t) -- PEI-574
+    { spec = "PKM *strata.ro-is-independent-of-filesystem" }, function(t)
         -- Three terms: the `ro` flag, the provider's mount being
         -- read-only, and the provider's inode being immutable. Any one
         -- of them makes the stratum decline the modification, which
@@ -342,14 +341,18 @@ test("each term of the accepts-modification predicate refuses on its own",
                 "an immutable provider inode: leaving the provider unmodified")
 
             -- The note again, from the other end: mode bits route
-            -- nothing. The open is refused for want of write
-            -- permission, and nothing is copied up.
+            -- nothing. Nor do they refuse anything — KACS decides access
+            -- from the descriptor and DAC is neutralised (Kernel TRM
+            -- §3.10.2) — so a 0444 provider in a stratum that accepts
+            -- modification is written in place like any other, and
+            -- nothing is copied up on the mode's account.
             local ok2, errno, stage = stratafs.try_write(vm, s:join("by_mode"), "modified")
-            t:assert(not ok2, "an unwritable mode is refused")
-            t:assert_eq(errno, sys.E.ACCES,
-                "for want of permission at " .. stage .. ", not " .. sys.errname(errno))
+            t:assert(ok2, "an unwritable mode refuses nothing: " ..
+                sys.errname(errno or 0) .. " at " .. tostring(stage))
+            t:assert_eq(vm:read_file(s:in_stratum("plain", "by_mode")), "modified",
+                "the write lands in the providing stratum")
             t:assert(sys.stat(vm, s:in_stratum("dest", "by_mode")) == nil,
-                "so nothing was copied up on its account")
+                "and nothing was copied up on its account")
         end)
         stratafs.umount(vm, s.at)
         sys.set_immutable(vm, s:in_stratum("plain", "by_inode"), false)

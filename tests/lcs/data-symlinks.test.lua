@@ -203,17 +203,14 @@ test("a higher-precedence layer can redirect a symlink, and removing it reverts"
         done(w)
     end)
 
--- KNOWN BUG. §5.2.4 says a higher-precedence layer redirects a symlink
--- "by writing a different REG_LINK default value". No REG_LINK value can
--- be written at all: pkm_lcs_key_fd_set_value_symlink_target_gate
--- (lcs/key_fd.c) hands the length-delimited value data to
--- validate_syscall_path_c_string, which demands a NUL terminator, so
--- every REG_IOC_SET_VALUE of type REG_LINK fails EINVAL. Appending a
--- NUL makes the write succeed and stores a target that resolution then
--- rejects, because §5.2.4 permits no trailing null.
+-- §5.2.4: a higher-precedence layer redirects a symlink "by writing a
+-- different REG_LINK default value", and reverts it by removing that
+-- entry again. The write-time gate routes the target's first component
+-- (PEI-764; red until kernel 0.20.1-rc13-7, when the gate demanded a NUL
+-- no length-delimited value could carry). The fixture is shared with
+-- the resolution cases below, so the redirect is reverted here.
 test("a layer redirects a symlink by writing a REG_LINK default value",
-    { spec = "PKM *symlink.target.layer-can-redirect-and-revert",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *symlink.target.layer-can-redirect-and-revert" }, function(t)
         local s = fixture()
         local w = worker()
         local link = open(t, w, TEST .. "\\Link", lcs.KEY_ALL_ACCESS, lcs.OPEN_LINK)
@@ -222,6 +219,18 @@ test("a layer redirects a symlink by writing a REG_LINK default value",
         t:assert_eq(sv.ret, 0,
             "writing a REG_LINK default value into a layer is how a redirect is authored: "
             .. sys.errname(sv.errno or 0))
+        local redirected = open(t, w, TEST .. "\\Link")
+        t:assert_eq(lcs.query_key_info(s, w, redirected).name, "Other",
+            "the layer's target wins resolution")
+        sys.close(w, redirected)
+
+        local dv = lcs.delete_value(s, w, link, "", { layer = "Redirect2" })
+        t:assert_eq(dv.ret, 0,
+            "removing the layer's entry reverts the redirect: " .. sys.errname(dv.errno or 0))
+        local reverted = open(t, w, TEST .. "\\Link")
+        t:assert_eq(lcs.query_key_info(s, w, reverted).name, "Target",
+            "and the base target is in force again")
+        sys.close(w, reverted)
         sys.close(w, link)
         done(w)
     end)

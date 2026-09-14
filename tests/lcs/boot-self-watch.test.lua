@@ -367,11 +367,16 @@ test("no source round trip happens while the watch-map or layer-table locks are 
             local ok, err = pcall(function()
                 local reg_guid = src:lookup(lcs.PARAMS_PATH)
                 local reg = open(t, src, w, lcs.PARAMS_PATH)
+                -- A non-transactional SET_VALUE queries the value three
+                -- times on its own account — the per-value layer cap,
+                -- then the effective state before and after the write
+                -- (§5.6.1) — so the self-watch re-read is the fourth
+                -- QUERY_VALUES on this key.
                 local seen = 0
                 src:intercept(lcs.OP.QUERY_VALUES, function(_, req)
                     if req.payload:sub(1, 16) == reg_guid then
                         seen = seen + 1
-                        if seen == 2 then return lcs.HOLD end
+                        if seen == 4 then return lcs.HOLD end
                     end
                     return nil
                 end)

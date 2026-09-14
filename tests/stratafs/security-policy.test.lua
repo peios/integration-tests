@@ -200,14 +200,12 @@ test("a stratafs mount's policy cannot be set to anything",
         end)
     end)
 
--- PEI-586. §4.6.4 says the stratafs-magic test runs before the set path
--- validates its arguments. It does not: `UNMANAGED` — a real class, and
--- the one §4.6.4 spends a paragraph explaining must never apply here —
--- is refused with EINVAL, as are out-of-range values and an oversized
--- argsize. Only values that pass validation reach the EOPNOTSUPP.
+-- PEI-586 (red until kernel 0.20.1-rc13-7). §4.6.4 says the
+-- stratafs-magic test runs before the set path validates its arguments:
+-- `UNMANAGED`, out-of-range values and an oversized argsize all reach
+-- the EOPNOTSUPP, because the syscall resolves the superblock first.
 test("the policy is refused for every class, whatever the argument",
-    { spec = "PKM *security.mount-policy-cannot-be-set",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *security.mount-policy-cannot-be-set" }, function(t)
         stratafs.with(vm, "policy-set-order", {
             { name = "only", flags = { "create" }, entries = { f = "x" } },
         }, function(s)

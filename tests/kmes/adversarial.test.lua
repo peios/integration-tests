@@ -135,17 +135,14 @@ test("the value beside the query sentinel is an ordinary bad index",
             "0xFFFFFFFE is EINVAL — only the exact sentinel queries")
     end)
 
--- PEI-659. The batch reserves for all its events before writing any,
--- walking the tail with the running offset. Once that walk crosses
--- the batch's own starting write_pos, the events it skips are this
--- batch's own, not yet written: it reads the previous lap's stale
--- bytes there, the corruption guard trips, and the tail jumps to the
--- end of the batch. Singles lapping the ring keep ~69 events with only
--- ring-full drops; the same bytes as one batch keep 49 with three
--- tail-resync drops.
+-- PEI-659 (red until kernel 0.20.1-rc13-7). The batch reserves for all
+-- its events before writing any, walking the tail with the running
+-- offset. Once that walk crosses the batch's own starting write_pos,
+-- the events it skips are this batch's own, not yet written, so the
+-- walk steps by the batch's own sizes there instead of reading the
+-- previous lap's stale bytes and tripping the corruption guard.
 test("a batch larger than the ring overwrites itself and stays whole",
-    { spec = "PKM *ring.tail-resync-guard",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *ring.tail-resync-guard" }, function(t)
         -- 256 x 60000 bytes is 15 MB into a 4 MiB ring: the batch laps
         -- its own output inside one syscall. The guard is for corrupt
         -- size fields; a healthy ring lapped by a healthy batch must

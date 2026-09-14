@@ -268,16 +268,30 @@ test("the disposition values are REG_CREATED_NEW (1) and REG_OPENED_EXISTING (2)
         sys.close(w, quiet.ret)
     end)
 
-test("an existing key is opened, the layer parameter ignored, and no path entry created",
+test("an existing key is opened and no path entry created",
     { spec = "PKM *reg-syscall.create-key.existing-key-is-opened" }, function(t)
+        -- Presence is per layer (§5.2.5): "exists" for the base layer is
+        -- the path resolving, and naming a layer asks for that layer's
+        -- entry — so a layer that does not exist is ENOENT here, not
+        -- ignored, and what a named layer creates at an occupied path
+        -- is covered in data-path-entries.
         local mark = src:mark()
-        local r = lcs.create_key(src, w, { path = "Machine\\Software\\Test",
-            layer = "NoSuchLayer" })
+        local r = lcs.create_key(src, w, { path = "Machine\\Software\\Test" })
         t:assert(r.ret >= 0, "the key exists, so it is opened: " .. sys.errname(r.errno or 0))
         t:assert_eq(r.disposition, lcs.OPENED_EXISTING, "as REG_OPENED_EXISTING")
+        sys.close(w, r.ret)
+        local explicit = lcs.create_key(src, w, { path = "Machine\\Software\\Test",
+            layer = "base" })
+        t:assert(explicit.ret >= 0, "naming base is the same: " .. sys.errname(explicit.errno or 0))
+        t:assert_eq(explicit.disposition, lcs.OPENED_EXISTING, "REG_OPENED_EXISTING")
+        sys.close(w, explicit.ret)
         t:assert_eq(#src:served(lcs.OP.CREATE_ENTRY, mark), 0, "nothing was created")
         t:assert_eq(#src:served(lcs.OP.CREATE_KEY, mark), 0, "no key record either")
-        sys.close(w, r.ret)
+        local missing = lcs.create_key(src, w, { path = "Machine\\Software\\Test",
+            layer = "NoSuchLayer" })
+        t:assert_eq(missing.errno, sys.E.NOENT,
+            "a layer that does not exist has no entry to create: " ..
+            sys.errname(missing.errno or 0))
     end)
 
 test("a created key reports REG_CREATED_NEW and is published with the granted mask",

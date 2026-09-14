@@ -310,17 +310,13 @@ test("raising a layer's precedence above 0 requires SeTcbPrivilege, and the deni
     end)
 
 test("establishing a layer above precedence 0 requires SeTcbPrivilege",
-    { spec = "PKM *layer.authz.precedence-above-zero-requires-setcbprivilege",
-      tags = { "known-bug" } },
+    { spec = "PKM *layer.authz.precedence-above-zero-requires-setcbprivilege" },
     function(t)
-        -- KERNEL: the gate fires only when the target key GUID is
-        -- already in the set of known layer metadata keys (§5.3.4). A
-        -- layer created the way §5.3.3 prescribes — the metadata key and
-        -- its three values in one transaction — writes `Precedence`
-        -- before the key has ever been published, so the GUID is not in
-        -- that set, the gate never runs, and the refresh at commit
-        -- publishes the layer at precedence 5. An unprivileged principal
-        -- reaches the Group Policy tier in one transaction.
+        -- The gate keys on the path — a direct child of `Layers\` — so a
+        -- layer created the way §5.3.3 prescribes, `Precedence` written
+        -- inside the transaction that creates the metadata key, is
+        -- refused EPERM before publication (PEI-760; red until kernel
+        -- 0.20.1-rc13-7).
         local note = ""
         unprivileged(t, function(w2)
             local fd, e = lcs.create_layer(src, w2, "escalated", { precedence = 5 })

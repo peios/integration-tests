@@ -416,15 +416,12 @@ test("a path entry's parent must be the restore root or a key already processed 
     end)
 
 test("a GUID-bearing path entry in the root's section is skipped rather than treated as an error",
-    { spec = "PKM *backup.reader-skips-root-path-entries", tags = { "known-bug" } },
+    { spec = "PKM *backup.reader-skips-root-path-entries" },
     function(t)
-        -- KERNEL BUG. §5.9.2 says a reader "tolerates and skips them if
-        -- some other writer produces them", and PSPK §5.2 makes it a
-        -- MUST. Observed: the restore fails EINVAL. A HIDDEN entry in
-        -- the root section is accepted, so it is specifically the
-        -- GUID-bearing one that is rejected rather than discarded —
-        -- and it is rejected whether or not the stream also carries a
-        -- KEY record for the GUID it names.
+        -- §5.9.2 says a reader "tolerates and skips them if some other
+        -- writer produces them", and PSPK §5.2 makes it a MUST
+        -- (PEI-770; red until kernel 0.20.1-rc13-7, which rejected any
+        -- GUID-bearing root-section entry whose child was not the root).
         local fd = target()
         local ghost = lcs.guid()
         local bytes = stream_of({

@@ -240,12 +240,11 @@ test("the caller submap has nine fields and no more",
         end
     end)
 
--- The kernel reports the token's stored impersonation level verbatim
--- (kacs_rust_token_audit_summary), so the agent's primary token — created
--- at Delegation — audits as level 3 rather than the 0 §5.4.4 specifies.
+-- The caller summary normalises a primary token's impersonation level to
+-- the 0 §5.4.4 specifies, whatever the token stores (PEI-755; red until
+-- kernel 0.20.1-rc13-7, which reported the stored level verbatim).
 test("a primary token reports an impersonation level of 0",
-    { spec = "PKM *lcs-audit.primary-token-impersonation-level-zero",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *lcs-audit.primary-token-impersonation-level-zero" }, function(t)
         local events = kmes.recording(t, vm, function()
             local fd = must_open(t, "Machine\\Audit\\Success", R.QUERY_VALUE)
             sys.close(w, fd)

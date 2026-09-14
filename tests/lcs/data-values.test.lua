@@ -35,8 +35,9 @@ local function fixture()
 
     scratch = s:key(TEST .. "\\Scratch")
 
-    -- Every type tag, seeded rather than written: §5.2.4's write-time
-    -- gate refuses REG_LINK, which has its own known-bug case below.
+    -- Every type tag, seeded rather than written: the REG_LINK write
+    -- goes through §5.2.4's write-time routing gate and has its own
+    -- case below.
     typed_key = s:key(TEST .. "\\Typed")
     for code = 0, 11 do
         s:value(typed_key, "T" .. code, code, string.char(code, 0xEE, 0xBB) .. "payload")
@@ -299,18 +300,14 @@ test("LCS stores the type tag and returns it without interpreting the data",
         done(w)
     end)
 
--- KNOWN BUG. §5.2.6: LCS "does not interpret the data. The single
--- exception is REG_LINK read as a symlink key's default value".
--- pkm_lcs_key_fd_set_value_symlink_target_gate (lcs/key_fd.c) fires on
--- *every* REG_LINK write, named values on ordinary keys included, and
--- hands the length-delimited value data to
--- validate_syscall_path_c_string, which requires a NUL terminator. So no
--- REG_LINK value can be written at all: the write is EINVAL, and the
--- only payload it accepts (one with a trailing NUL) is a target
--- §5.2.4 says resolution must reject.
+-- §5.2.6: LCS "does not interpret the data. The single exception is
+-- REG_LINK read as a symlink key's default value". The write-time gate
+-- (§5.2.4) still routes every REG_LINK payload's first component, so
+-- the data here names a hive; it used to demand a NUL no
+-- length-delimited value could carry (PEI-764; red until kernel
+-- 0.20.1-rc13-7).
 test("a named REG_LINK value is stored and returned uninterpreted",
-    { spec = "PKM *value.types.tag-stored-and-returned-uninterpreted",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *value.types.tag-stored-and-returned-uninterpreted" }, function(t)
         local s = fixture()
         local w = worker()
         local fd = open(t, w, TEST .. "\\Scratch")
