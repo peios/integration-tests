@@ -244,12 +244,8 @@ test("a declared BindsTo already orders against the provider, so no Requires is 
     {
         spec = "peinit *derived.an-already-declared-edge-is-not-added-again",
         -- PEI-1081: fixed in peinit 4fc55cb, which counts a declared
-        -- BindsTo as the edge already there. The image under test still
-        -- carries a peinit from before it (0.0.2-1), which derives a
-        -- Requires beside the BindsTo, so pt-d-bindsauth is listed twice.
-        -- Drop the tag once a package built from 4fc55cb or later is in
-        -- the image.
-        tags = { "known-bug" },
+        -- BindsTo as the edge already there. Red against 0.0.2-1, which
+        -- listed pt-d-bindsauth twice; green since 0.0.5-2.
     },
     function(t)
         local dependents, raw = hard_dependents_of(vm, "pt-d-authority")

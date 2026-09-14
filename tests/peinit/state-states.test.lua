@@ -213,13 +213,9 @@ test("a Reloading target satisfies its dependents",
     {
         spec = "peinit *state.only-active-reloading-completed-and-skipped-satisfy-dependents",
         -- PEI-1079: fixed in peinit 2c2d1bb, which makes Reloading satisfy
-        -- dependents as §6.1's table always said. The image under test
-        -- still carries a peinit from before it (0.0.2-1), which does not
-        -- merely make the dependent wait out the reload: it refuses the
-        -- start outright — INTERNAL_ERROR, "control request failed" — and
-        -- the dependent stays Inactive. Drop the tag once a package built
-        -- from 2c2d1bb or later is in the image.
-        tags = { "known-bug" },
+        -- dependents as §6.1's table always said. Against 0.0.2-1 the
+        -- start was refused outright — INTERNAL_ERROR, "control request
+        -- failed" — and the dependent stayed Inactive. Green since 0.0.5-2.
     },
     function(t)
         -- pt-st-reloader's reload command takes twenty seconds, and the

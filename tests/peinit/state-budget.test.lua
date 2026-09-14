@@ -389,10 +389,7 @@ test("a reload across the window boundary defers the budget reset to the return 
         -- `satisfies_dependents` excluded Reloading, and no route from
         -- Reloading back to Active set it again. So the reset was not
         -- deferred to the return: it never happened, for as long as that
-        -- activation lived. The image under test still carries a peinit
-        -- from before the fix (0.0.2-1); drop the tag once a package built
-        -- from 2c2d1bb or later is in the image.
-        tags = { "known-bug" },
+        -- activation lived. Red against 0.0.2-1; green since 0.0.5-2.
     },
     function(t)
         -- pt-bg-reloaded and pt-bg-steady are the same service with a

@@ -309,14 +309,11 @@ test("a stop sent before a start's process has exec'd supersedes it, rather than
             "peinit *conflict.the-cross-type-resolutions",
         },
         -- PEI-1091: the stop is admitted against the running start, and
-        -- then `begin_control_operation` looks for the start's process
+        -- then `begin_control_operation` looked for the start's process
         -- before anything else (execution/control/dispatch.rs). A job
-        -- that has not exec'd has none, so `process_target` answers
-        -- JobNotRunning, and the runtime loop treats that as fatal: PID 1
-        -- enters Recovery. The window is normally milliseconds wide;
-        -- `svctl start` then `svctl stop` hit it twice in twenty tries on
-        -- an unloaded host.
-        tags = { "known-bug" },
+        -- that has not exec'd has none, so `process_target` answered
+        -- JobNotRunning, and the runtime loop treated that as fatal: PID 1
+        -- entered Recovery. Red against 0.0.2-1; green since 0.0.5-2.
     },
     function(t)
         -- The row above, with the start's job held short of exec rather
@@ -648,9 +645,9 @@ test("a restart requested while a stop is draining is queued, not fatal",
             "peinit *conflict.the-cross-type-resolutions",
         },
         -- PEI-824: `Stop (either) | Restart` — the queued restart's stop
-        -- leg transitions a service that is already Stopping, and the
-        -- InvalidTransition ends peinit's runtime loop.
-        tags = { "known-bug" },
+        -- leg transitioned a service that was already Stopping, and the
+        -- InvalidTransition ended peinit's runtime loop. Red against
+        -- 0.0.2-1; green since 0.0.5-2 (the rest of PEI-824 is not).
     },
     function(t)
         local vm = boot("opscx-qr")
@@ -672,8 +669,7 @@ test("a second restart while one is in progress is queued, not fatal",
         },
         -- PEI-824: `Restart (either) | Restart` — the same
         -- InvalidTransition as the row above, reached by the second
-        -- restart's stop leg.
-        tags = { "known-bug" },
+        -- restart's stop leg. Red against 0.0.2-1; green since 0.0.5-2.
     },
     function(t)
         local vm = boot("opscx-rr")

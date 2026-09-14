@@ -207,15 +207,8 @@ test("every SYSTEM token peinit mints carries SYSTEM and Administrators full con
         spec = "peinit *token.the-minted-token-carries-the-system-default-dacl",
         -- PEI-194 item 1. The fix is peinit db515f5 ("set a default DACL
         -- on every minted SYSTEM token", src/boundary/linux_launch/
-        -- system_token.rs), and the image under test does not carry it:
-        -- the only dev.peios.peinit in pkgs/_peipkgRepo_ is 0.0.2-1,
-        -- packaged on 2026-09-10, a day before that commit, and its
-        -- peinit2 carries the error strings either side of the change but
-        -- not the one the change added. On this image every minted SYSTEM
-        -- token has no default DACL at all. Drop the tag once a package
-        -- built from db515f5 or later is published and the image is
-        -- recomposed.
-        tags = { "known-bug" },
+        -- system_token.rs). Red against 0.0.2-1, where every minted
+        -- SYSTEM token had no default DACL at all; green since 0.0.5-2.
     },
     function(t)
         -- The four the bootstrap circle is about must be up and among the
@@ -255,9 +248,8 @@ test("every SYSTEM token peinit mints carries SYSTEM and Administrators full con
 test("an object a SYSTEM service creates with nothing to inherit from gets that DACL, not a null one",
     {
         spec = "peinit *token.the-minted-token-carries-the-system-default-dacl",
-        -- PEI-194 item 1, as above: fixed in peinit db515f5, not yet in
-        -- the image.
-        tags = { "known-bug" },
+        -- PEI-194 item 1, as above: fixed in peinit db515f5, green since
+        -- 0.0.5-2.
     },
     function(t)
         -- What the default DACL is for. A container written without
