@@ -332,10 +332,19 @@ test("a check that exceeds HealthCheckTimeout counts as a failure",
 
         -- The health check is also the only thing that can move this
         -- service at all -- it is `/bin/sleep 3600`, which does not exit
-        -- -- so whatever state the restart policy has taken it to by
-        -- now, the timeout is what put it there.
-        t:assert(status.state ~= "active" or status.cause == "health_check_failure",
-            "and it is being restarted rather than left alone: " ..
+        -- -- so whatever state the restart policy takes it to, the
+        -- timeout is what put it there. With HealthCheckRetries=2 the
+        -- first timeout only marks it unhealthy; the second restarts it,
+        -- and the restart is over quickly enough that `restart_policy`
+        -- on an Active service is as likely to be what is seen as the
+        -- `health_check_failure` leg itself.
+        local moved = wait_until(function()
+            local out = json.decode(vm:run("svctl --json status pt-hc-timeout").stdout)
+            return (out.state ~= "active" or out.cause == "health_check_failure"
+                or out.cause == "restart_policy") and out or nil
+        end, { timeout = 30, interval = 0.25,
+               desc = "pt-hc-timeout to be restarted by the timed-out checks" })
+        t:assert(moved, "and it is being restarted rather than left alone: " ..
             status.state .. "/" .. tostring(status.cause))
     end)
 
