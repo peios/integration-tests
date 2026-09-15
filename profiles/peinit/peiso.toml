@@ -37,6 +37,16 @@ package = "dev.peios.peios-experimental"
 [[package]]
 name = "dev.peios.peinit-svctl"
 
+# TEMPORARY, the same shape. The edition manifest now lists org.iana.tzdata
+# (PEI-832, ruled 2026-09-15) but that recipe is mid-edit in a packaging
+# pass and has not been republished, so the composed image still has no
+# /usr/share/zoneinfo and no OnCalendar timezone suffix can arm.
+#
+# DELETE THIS once the published edition depends on org.iana.tzdata itself,
+# for the reason given above.
+[[package]]
+name = "org.iana.tzdata"
+
 # Cheaper squashfs compression, as dist/release's dev layer uses. The
 # medium is built by a test profile's `build`, read once per boot off a
 # virtio disk, and thrown away — its size buys nothing here, and the
