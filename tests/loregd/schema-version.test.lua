@@ -120,48 +120,41 @@ test("a schema version newer than 1 fails startup", {
     covered_by = "go:loregd internal/hivedb::TestSchemaVersionTooNew",
 }, function() end)
 
--- ---- coverage gaps: no guest route AND no unit test ------------------
+-- ---- version-mismatch branches: unit-homed ---------------------------
 --
--- The remaining mismatch branches are neither guest-reachable (no sqlite3 to
--- construct a below-one / two-row / no-version-table database, and loregd
--- never produces those states itself) NOR covered by any internal/hivedb
--- test. I verified the absence: the only version-guard unit test is
--- TestSchemaVersionTooNew (the version>1 branch). Citing it here would be a
--- citation to a test that does not prove the anchor, which the brief forbids.
--- Each is flagged with a PEI-TBD marker for the coordinator to ticket as a
--- coverage gap, not a code/spec disagreement — the code (schema.go
--- ensureSchema) does implement each of these.
+-- The remaining mismatch branches are not guest-reachable — the image ships no
+-- sqlite3 to construct a below-one / two-row / no-version-table database, and
+-- loregd never produces those states itself. Until this pass the only
+-- version-guard unit test was TestSchemaVersionTooNew (the version>1 branch),
+-- so these had no honest home; the loregd conformance tests added alongside
+-- this suite (internal/hivedb/schema_conformance_test.go, PEI-1121) assert each
+-- one directly, and the stubs below cite them.
 
 test("a schema version below 1 fails startup", {
     spec = "loregd *schema.a-version-below-one-fails-startup",
     skip = true,
-    -- PEI-TBD-loregd-schema-below-one-untested
-    covered_by = "GAP: no guest route (no sqlite3 to build a v<1 database) and "
-        .. "no internal/hivedb test covers the version<schemaVersion branch "
-        .. "(schema.go:275) — PEI-TBD-loregd-schema-below-one-untested",
+    -- No guest route (the image ships no sqlite3 to build a v<1 database, and
+    -- loregd never produces one). Homed on a unit test that drops the version
+    -- to 0 and asserts startup fails reporting migration.
+    covered_by = "go:loregd internal/hivedb::TestSchemaVersionBelowOneRequiresMigration",
 }, function() end)
 
 test("there are no migrations", {
     spec = "loregd *schema.there-are-no-migrations",
     skip = true,
     -- Same code path as below-one: version<schemaVersion is reported as
-    -- "requires migration (no migrations implemented)" (schema.go:276). No
-    -- guest route and no unit test asserts the message or the absence of a
-    -- migration table/step list.
-    -- PEI-TBD-loregd-schema-no-migrations-untested
-    covered_by = "GAP: no guest route and no internal/hivedb test asserts the "
-        .. "no-migrations branch — PEI-TBD-loregd-schema-no-migrations-untested",
+    -- "requires migration (no migrations implemented)" (schema.go:276). The
+    -- unit test asserts the error carries that message.
+    covered_by = "go:loregd internal/hivedb::TestSchemaVersionBelowOneRequiresMigration",
 }, function() end)
 
 test("a second schema_version row is not detected", {
     spec = "loregd *schema.a-second-version-row-is-not-detected",
     skip = true,
     -- Needs a schema_version table with two rows; loregd only ever inserts
-    -- one and there is no sqlite3 to add a second. No unit test exercises the
-    -- "first row read wins" behaviour.
-    -- PEI-TBD-loregd-schema-second-row-untested
-    covered_by = "GAP: no guest route (no sqlite3 to insert a second version "
-        .. "row) and no internal/hivedb test — PEI-TBD-loregd-schema-second-row-untested",
+    -- one and there is no sqlite3 to add a second. The unit test inserts a
+    -- second (future-version) row and asserts the first row read still wins.
+    covered_by = "go:loregd internal/hivedb::TestSchemaVersionSecondRowNotDetected",
 }, function() end)
 
 test("a database without a version table is stamped unvalidated", {
@@ -169,9 +162,8 @@ test("a database without a version table is stamped unvalidated", {
     skip = true,
     -- Needs a database holding the data tables but no schema_version table;
     -- loregd always creates schema_version first, so it never produces this
-    -- state, and no sqlite3 can forge it. No unit test covers the
-    -- IF-NOT-EXISTS stamping of such a database.
-    -- PEI-TBD-loregd-schema-no-version-table-untested
-    covered_by = "GAP: no guest route and no internal/hivedb test — "
-        .. "PEI-TBD-loregd-schema-no-version-table-untested",
+    -- state, and no sqlite3 can forge it. The unit test drops the version
+    -- table, plants a non-conforming table, and asserts loregd re-stamps
+    -- version 1 and leaves the stray table untouched.
+    covered_by = "go:loregd internal/hivedb::TestSchemaVersionMissingTableStampedUnvalidated",
 }, function() end)

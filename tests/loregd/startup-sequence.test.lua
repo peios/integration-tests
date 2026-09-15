@@ -155,15 +155,12 @@ test("each SQL handle is limited to one underlying connection",
     {
         spec = "loregd *startup.each-sql-handle-is-limited-to-one-underlying-connection",
         skip = true,
-        -- NOT guest-observable and, unlike the other pragmas, NOT covered
-        -- by a dedicated unit test: db.SetMaxOpenConns(1) in
-        -- hivedb.openConn is the whole of it, and no test reads
-        -- db.Stats().MaxOpenConnections back. A black-box guest cannot
-        -- distinguish per-handle single-connection serialization from the
-        -- busy_timeout serialization it also has. Homed here on the source
-        -- as the authority; flagged to the coordinator as the one anchor
-        -- lacking an asserting test (candidate for a hivedb Stats() test).
-        covered_by = "src:loregd internal/hivedb/hivedb.go::openConn db.SetMaxOpenConns(1)",
+        -- NOT guest-observable: a black-box guest cannot distinguish
+        -- per-handle single-connection serialization from the busy_timeout
+        -- serialization it also has. Homed on a unit test (added with this
+        -- suite, PEI-1121) that reads db.Stats().MaxOpenConnections == 1 back
+        -- from the write handle, every read-pool handle, and a snapshot handle.
+        covered_by = "go:loregd internal/hivedb::TestEachSQLHandleHasOneConnection",
     }, function() end)
 
 -- ---- Step 3-4: volatile store and schema -----------------------------
