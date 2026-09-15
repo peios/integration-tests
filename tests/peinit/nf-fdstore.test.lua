@@ -429,7 +429,9 @@ test("an unnamed FDSTOREREMOVE alongside an FDSTORE performs neither",
         -- article is about, and the datagram performs *both* halves
         -- instead of neither: the existing `stored` entry is removed and
         -- the new descriptor is stored.
-        tags = { "known-bug" },
+        -- PEI-836: fixed in peinit 51917d8, "fix(notify): let an
+        -- unnamed FDSTOREREMOVE=1 abort a paired FDSTORE=1".
+        -- Green since 0.0.5-4.
     },
     function(t)
         local existing = marker("pt-fs-abort-existing")

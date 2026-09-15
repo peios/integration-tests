@@ -499,7 +499,9 @@ test("a pre-eventd backlog larger than one datagram is still delivered",
             "peinit *eventd.a-batch-is-the-largest-prefix-fitting-the-portable-ceiling",
             "peinit *eventd.a-transport-failure-rebuffers-and-replays",
         },
-        tags = { "known-bug" },
+        -- PEI-807: fixed in peinit 0a95d77, "fix(logging): size
+        -- eventd batches to the socket and stop replaying
+        -- oversized ones". Green since 0.0.5-4.
     },
     function(t)
         -- peinit batches up to the PSPU portable ceiling of 262144

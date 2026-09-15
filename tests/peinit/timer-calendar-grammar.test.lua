@@ -352,7 +352,9 @@ test("a range is accepted in the hour, minute and second fields",
         -- PEI-831: parse_time refuses any time component containing a
         -- '.', which is what `..` is made of, so no range can be
         -- written anywhere in the time. `8..17` is §9.1's own example.
-        tags = { "known-bug" },
+        -- PEI-845 (tagged for PEI-831): fixed in peinit 3c0d847,
+        -- "fix(timer): refuse a fraction in any time field as
+        -- fractional seconds". Green since 0.0.5-4.
     },
     function(t)
         -- The day and month fields take `a..b` (checked above), and the

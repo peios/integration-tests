@@ -82,7 +82,9 @@ test("nothing but a submit answer carries ancillary data",
         -- it through `immediate_view_response`. `status` needs only
         -- JOB_QUERY, so a caller with no right to run anything is handed
         -- a live handle on somebody else's process by asking about it.
-        tags = { "known-bug" },
+        -- PEI-837: fixed in peinit 92cc149, "fix(jobs): attach
+        -- the pidfd to the submit answer only". Green since
+        -- 0.0.5-4.
     },
     function(t)
         local id = submit_via_svctl()

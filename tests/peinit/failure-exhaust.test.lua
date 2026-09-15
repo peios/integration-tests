@@ -175,7 +175,9 @@ test("a service that has exited costs nothing, because there is no process to ho
         -- the process is reaped, so PID 1's descriptor table grows by
         -- one on every start of any service — an unbounded leak in the
         -- one process that cannot be restarted to clear it.
-        tags = { "known-bug" },
+        -- PEI-816: fixed in peinit 5175104, "fix(job): release a
+        -- finished job's pidfd for the runtime to close". Green
+        -- since 0.0.5-4.
     },
     function(t)
         -- The inventory is per *supervised process*. A Oneshot that has

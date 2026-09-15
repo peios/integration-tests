@@ -158,7 +158,11 @@ test("a shutdown requested while Phase 2 is still running takes effect immediate
         -- and the next readiness on that fd raises UnknownJob out of the
         -- runtime loop, which takes PID 1 into recovery instead of
         -- finishing the shutdown.
-        tags = { "known-bug" },
+        -- PEI-826: fixed in peinit 1c33407, "fix(shutdown): drop
+        -- a cancelled Starting job's pending process setup with
+        -- its job record", and 9420064, "fix(runtime): treat a
+        -- readiness for a cancelled process setup as stale".
+        -- Green since 0.0.5-5.
     },
     function(t)
         -- Deliberately NOT settled, and waited only as far as "phase2

@@ -358,7 +358,9 @@ test("a reload refused for an undecodable key names the key and what was wrong",
         -- a decode error lands — as the generic
         -- {"code":"INTERNAL_ERROR","message":"control request failed"},
         -- discarding the error it was given.
-        tags = { "known-bug" },
+        -- PEI-1075: fixed in peinit cb44744, "fix(control): name
+        -- the service and decode problem when a reload is
+        -- refused". Green since 0.0.5-4.
     },
     function(t)
         local vm = boot("reload-undecodable-named")

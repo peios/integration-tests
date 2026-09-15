@@ -183,11 +183,16 @@ test("three SIGINTs inside five seconds force an immediate reboot, even once a g
             t:assert(log:find("peinit: shutdown stopping pt-stubborn", 1, true),
                 "which had got as far as asking the stubborn service to stop")
             -- And the machine still went down long before that service's
-            -- 120-second StopTimeout could expire, which only the forced
-            -- path does.
-            t:assert(not log:find("peinit: shutdown killing pt-stubborn", 1, true),
-                "the machine went down before the graceful StopTimeout could expire, " ..
-                "so the reboot was forced rather than waited out")
+            -- 120-second StopTimeout could expire (the 60-second wait
+            -- above is the bound), which only the forced path does --
+            -- and, since PEI-827 lets a finalising turn's console output
+            -- out, it says so. The forced path kills every cgroup and
+            -- announces each kill with the same "shutdown killing" line
+            -- the graceful escalation uses, so that line no longer tells
+            -- the two apart; the banner does.
+            t:assert(log:find("peinit: shutdown forced reboot requested", 1, true),
+                "the third press forced the reboot rather than waiting the " ..
+                "graceful StopTimeout out")
         end)
     end)
 
@@ -243,13 +248,15 @@ test("a Critical service out of restart budget reboots the machine without a gra
         -- graceful sequence, whose every step announces itself, was
         -- never entered.
         --
-        -- The lines peinit means to print on the way out —
-        -- "critical service X failed" and "exhausted its restart budget;
-        -- rebooting" — are NOT asserted, because they never arrive. A
-        -- turn's console output is written after the turn's work, and
-        -- this turn's work ends in a reboot(2) that does not return. So
-        -- the evidence is the two starts (an original and the one
-        -- restart the budget allowed) followed by the kernel's own line.
+        -- The lines peinit prints on the way out — "critical service X
+        -- failed" and "exhausted its restart budget; rebooting" — used
+        -- not to arrive: a turn's console output was written after the
+        -- turn's work, and this turn's work ended in a reboot(2) that
+        -- does not return. Since PEI-827 the turn writes its console
+        -- output before taking a final action, so both lines precede
+        -- the kernel's own. The evidence is the two starts (an original
+        -- and the one restart the budget allowed), the two lines, and
+        -- then the kernel's.
         with_vm({
             name = "critical",
             append = "peios.quiet=0",
@@ -282,6 +289,14 @@ test("a Critical service out of restart budget reboots the machine without a gra
             for _ in after:gmatch("peinit: service pt%-crit started") do starts = starts + 1 end
             t:assert_eq(starts, 2,
                 "the service started, was restarted once, and the budget was then spent")
+            t:assert(after:find("peinit: critical service pt-crit failed: ", 1, true),
+                "peinit said which Critical service failed before it rebooted")
+            local budget = after:find(
+                "peinit: critical service pt-crit exhausted its restart budget; rebooting",
+                1, true)
+            t:assert(budget, "and that the restart budget was what ran out")
+            t:assert(budget < after:find("reboot: Restarting system", 1, true),
+                "and said so before the kernel's own line, not never")
             t:assert(not log:find("peinit: shutdown ", 1, true),
                 "and the machine rebooted without entering the graceful sequence")
         end)

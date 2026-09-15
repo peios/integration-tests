@@ -255,7 +255,9 @@ test("a Critical failure during a shutdown, in a wave it shares, lets the shutdo
         -- failed one's running main job (supervisor/shutdown_wave/mod.rs:63,
         -- process_target), gets MissingRunningService, and the error ends
         -- PID 1's event loop: recovery, mid-shutdown.
-        tags = { "known-bug" },
+        -- PEI-1086: fixed in peinit 77ded30, "fix(shutdown):
+        -- skip a participant already done when its wave begins".
+        -- Green since 0.0.5-4.
     },
     function(t)
         -- pt-crit shares the second wave with the image's lpsd, which is

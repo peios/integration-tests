@@ -327,7 +327,9 @@ test("a budget spent on readiness timeouts buys RestartMaxRetries restarts too",
         -- PEI-822: a readiness timeout costs two of the budget rather
         -- than one, so a service configured for four retries is given
         -- two.
-        tags = { "known-bug" },
+        -- PEI-822: fixed in peinit 35b9e31, "fix(start): retire
+        -- the main job a readiness timeout kills". Green since
+        -- 0.0.5-4.
     },
     function(t)
         -- pt-rs-hang is configured for four retries and never becomes

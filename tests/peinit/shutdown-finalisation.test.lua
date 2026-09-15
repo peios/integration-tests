@@ -515,7 +515,9 @@ test("the failed final action is retried, the same action each time, at most onc
         -- returned, so the first retry follows the failed attempt by one
         -- second less the length of steps 6 and 7 (0.98 s here), and
         -- later ones by one second less the jitter in sync()'s duration.
-        tags = { "known-bug" },
+        -- PEI-1088: fixed in peinit d5395f1, "fix(shutdown):
+        -- time the final action's retry from the attempt, not
+        -- the turn". Green since 0.0.5-4.
     },
     function(t)
         local record = observed().record

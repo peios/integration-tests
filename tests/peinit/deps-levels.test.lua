@@ -263,7 +263,9 @@ test("a role carrying a level is not resolved on the boot path",
         -- from the raw registry definitions and only afterwards builds
         -- the service table from role-synthesised ones, so a declared
         -- role reference is resolved on every path except the boot one.
-        tags = { "known-bug" },
+        -- PEI-829: fixed in peinit 74909a2, "fix(boot): build
+        -- the boot plan from role-synthesised definitions".
+        -- Green since 0.0.5-4.
     },
     function(t)
         -- The same definition as pt-lv-role, boot-triggered. It should

@@ -172,7 +172,9 @@ test("a non-persistent timer's firing forks nothing outside the launch path",
         -- writes LastTimerRun just like a persistent one. This test asserts
         -- the TRM and stays red until peinit stops writing for
         -- non-persistent timers.
-        tags = { "known-bug" },
+        -- PEI-1083: fixed in peinit 41f8deb, "fix(timer): skip
+        -- the LastTimerRun write for a TimerPersistent=0
+        -- firing". Green since 0.0.5-4.
     },
     function(t)
         -- Non-persistent, firing on every ten.

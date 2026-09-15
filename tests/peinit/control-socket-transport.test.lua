@@ -236,7 +236,9 @@ test("a request pipelined behind a wait is not read until the wait is answered",
     {
         spec = "peinit *control.pipelined-requests-serialise-behind-a-wait",
         -- PEI-1073, above.
-        tags = { "known-bug" },
+        -- PEI-1073: fixed in peinit 3e28d67, "fix(control):
+        -- answer every buffered control frame, not just the
+        -- first". Green since 0.0.5-4.
     },
     function(t)
         local SECONDS = 3
@@ -278,7 +280,9 @@ test("frames that arrive together are each answered, in order",
         -- purest pipelining is frames that reach peinit in one read. Kept
         -- beside the wait case so that a fix which re-drives only after a
         -- wait flush still shows red here.
-        tags = { "known-bug" },
+        -- PEI-1073: fixed in peinit 3e28d67, "fix(control):
+        -- answer every buffered control frame, not just the
+        -- first". Green since 0.0.5-4.
     },
     function(t)
         -- Three frames in a single send(2), so they are in the socket

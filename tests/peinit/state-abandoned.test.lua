@@ -326,7 +326,9 @@ test("a reset of an Abandoned service whose main/ has emptied reclaims the servi
         -- cleans the tree of the generation the service has *now* —
         -- pt-ab-reset%1, which never existed — so the emptied tree the
         -- service was abandoned in is never removed.
-        tags = { "known-bug" },
+        -- PEI-817: fixed in peinit 76783cb, "fix(lifecycle):
+        -- reset an abandoned service against the tree it was
+        -- abandoned in". Green since 0.0.5-4.
     },
     function(t)
         t:assert(reset_outcome.tree_before,

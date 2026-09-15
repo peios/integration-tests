@@ -266,7 +266,9 @@ test("TimerJitter delays each firing by a fresh amount and skips none of them",
         -- about one occurrence in (TimerJitter + 1) produces a run at
         -- all, and every run that does happen lands on the un-jittered
         -- occurrence rather than after it.
-        tags = { "known-bug" },
+        -- PEI-831: fixed in peinit a299bdc, "fix(timer): anchor
+        -- the re-arm after a jittered firing on the schedule".
+        -- Green since 0.0.5-4.
     },
     function(t)
         -- The same schedule as the test above, with TimerJitter=2. What

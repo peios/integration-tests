@@ -297,7 +297,9 @@ test("a failing check marks the service unhealthy and restarts it through the or
 test("the restart happens only after HealthCheckRetries consecutive failures",
     {
         spec = "peinit *health.consecutive-failures-restart-the-service",
-        tags = { "known-bug" },
+        -- PEI-802: went green on kernel 0.20.1-rc13-10 with no peinit change; the
+        -- kernel's PEI-762 fix deduplicated per-delivery event refreshes, which fits
+        -- the duplicated-terminal hypothesis on the ticket. Green since 0.0.5-3.
     },
     function(t)
         -- pt-hc-budget's probe counts its own invocations and always
@@ -351,7 +353,9 @@ test("a check that exceeds HealthCheckTimeout counts as a failure",
 test("the failure count resets the moment a check succeeds",
     {
         spec = "peinit *health.a-success-resets-the-failure-count",
-        tags = { "known-bug" },
+        -- PEI-802: went green on kernel 0.20.1-rc13-10 with no peinit change; the
+        -- kernel's PEI-762 fix deduplicated per-delivery event refreshes, which fits
+        -- the duplicated-terminal hypothesis on the ticket. Green since 0.0.5-3.
     },
     function(t)
         -- The probe fails on every odd invocation and succeeds on every

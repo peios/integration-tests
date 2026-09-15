@@ -224,7 +224,11 @@ test("the power button and a signal are taken in the order they came, whichever 
     end)
 
 test("PID 1 carries on when its epoll wait is interrupted by a tracer",
-    { tags = { "known-bug" } },
+    {
+        -- PEI-1085: fixed in peinit 439f12a, "fix(runtime):
+        -- retry an interrupted epoll wait and authd round trip
+        -- instead of ending the loop". Green since 0.0.5-4.
+    },
     function(t)
         -- PEI-1085: an epoll_wait that returns EINTR is treated as a
         -- fatal runtime-loop error, and PID 1 enters recovery.

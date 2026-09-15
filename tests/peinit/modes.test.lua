@@ -204,7 +204,9 @@ test("peios.quiet=2 drops runtime progress from the console",
 test("peios.quiet=2 does not reach Phase 1's middle steps, which are written unconditionally",
     {
         spec = "peinit *quiet.two-drops-progress-but-not-errors",
-        tags = { "known-bug" },
+        -- PEI-799: fixed in peinit b1df6b0, "fix(init): apply
+        -- peios.quiet to Phase 1's middle steps". Green since
+        -- 0.0.5-4.
     },
     function(t)
         -- §2.6 says level 2 "additionally drop[s] ordinary progress

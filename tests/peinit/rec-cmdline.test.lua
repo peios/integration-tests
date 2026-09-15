@@ -26,7 +26,9 @@ test("peios.notifysocket= moves the socket peinit binds and the one services are
         -- then binds the default one in the runtime, so nothing is
         -- listening where the services were told to write and every Notify
         -- readiness stalls in Starting.
-        tags = { "known-bug" },
+        -- PEI-804: fixed in peinit 22eb3da, "fix(init): honour
+        -- peios.notifysocket= in the runtime and always create
+        -- the runtime dir". Green since 0.0.5-4.
     },
     function(t)
         local vm = peinit.boot({ name = "cmdline-notifysocket", append = "peios.notifysocket=" .. MOVED })

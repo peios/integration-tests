@@ -210,7 +210,9 @@ test("every service is handed the notification path through NOTIFY_SOCKET",
 test("the kernel command line moves the notification socket, and the services follow it",
     {
         spec = "peinit *notify.the-path-is-overridable-on-the-kernel-command-line",
-        tags = { "known-bug" },
+        -- PEI-804: fixed in peinit 22eb3da, "fix(init): honour
+        -- peios.notifysocket= in the runtime and always create
+        -- the runtime dir". Green since 0.0.5-4.
     },
     function(t)
         -- If services really do learn the path from the environment

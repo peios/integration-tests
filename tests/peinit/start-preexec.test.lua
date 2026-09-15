@@ -291,7 +291,9 @@ test("post-hooks run after the service is already Active, and a failing one does
 test("a service with both pre- and post-exec hooks still runs its post-hooks",
     {
         spec = "peinit *preexec.post-hooks-run-after-readiness",
-        tags = { "known-bug" },
+        -- PEI-801: went green on kernel 0.20.1-rc13-10 with no peinit change; the
+        -- kernel's PEI-762 fix deduplicated per-delivery event refreshes, which fits
+        -- the duplicated-terminal hypothesis on the ticket. Green since 0.0.5-3.
     },
     function(t)
         -- pt-both is pt-post's definition with one ExecStartPre added,

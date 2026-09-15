@@ -624,7 +624,9 @@ test("a restart requested while a start is running is queued, not fatal",
         -- and queued, and peinit's runtime loop then fails with
         -- JobTerminal(UnsupportedStoppingOperation), taking PID 1 into
         -- Recovery.
-        tags = { "known-bug" },
+        -- PEI-824: fixed in peinit 2f92ffb, "fix(control):
+        -- implement the §8.3 conflict rows as documented". Green
+        -- since 0.0.5-4.
     },
     function(t)
         local vm = boot("opscx-sr")
@@ -695,7 +697,9 @@ test("a stop aborts a running restart and is created in its place",
         -- abort-then-create, the admission matrix expects a merge
         -- because the service is Stopping, and the mismatch is answered
         -- INTERNAL_ERROR.
-        tags = { "known-bug" },
+        -- PEI-824: fixed in peinit 2f92ffb, "fix(control):
+        -- implement the §8.3 conflict rows as documented". Green
+        -- since 0.0.5-4.
     },
     function(t)
         local vm = boot("opscx-rs")
@@ -717,7 +721,9 @@ test("a start merges into a running restart, which already includes one",
         -- PEI-824: `Restart | Start` — the conflict table says merge,
         -- the admission matrix expects a queue because the service is
         -- Stopping, and the mismatch is answered INTERNAL_ERROR.
-        tags = { "known-bug" },
+        -- PEI-824: fixed in peinit 2f92ffb, "fix(control):
+        -- implement the §8.3 conflict rows as documented". Green
+        -- since 0.0.5-4.
     },
     function(t)
         local vm = boot("opscx-rm")
@@ -740,7 +746,9 @@ test("a stop aborts a running reload and is created in its place",
         -- back to Active for the reload it just abandoned. PEI-820 is
         -- the same defect, found from chapter 6 and located: the stop
         -- cancels the reload's deadlines and cgroup but not its job.
-        tags = { "known-bug" },
+        -- PEI-824: fixed in peinit 2f92ffb, "fix(control):
+        -- implement the §8.3 conflict rows as documented". Green
+        -- since 0.0.5-4.
     },
     function(t)
         local vm = boot("opscx-ls")
@@ -763,7 +771,9 @@ test("a restart aborts a running reload and is created in its place",
             "peinit *conflict.the-cross-type-resolutions",
         },
         -- PEI-824: `Reload (Running) | Restart` — as the row above.
-        tags = { "known-bug" },
+        -- PEI-824: fixed in peinit 2f92ffb, "fix(control):
+        -- implement the §8.3 conflict rows as documented". Green
+        -- since 0.0.5-4.
     },
     function(t)
         local vm = boot("opscx-lr")

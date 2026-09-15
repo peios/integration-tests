@@ -518,7 +518,9 @@ test("a producer that outruns the relay cap is warned about, which is what WARN 
 test("a configuration warning is tagged WARN rather than FAILED",
     {
         spec = "peinit *console.the-warn-tag-means-the-boot-continues",
-        tags = { "known-bug" },
+        -- PEI-809: fixed in peinit 4289af9, "fix(init): tag a
+        -- configuration warning [ WARN ], not [FAILED]". Green
+        -- since 0.0.5-4.
     },
     function(t)
         -- A log knob below its minimum is refused, the default is used

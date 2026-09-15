@@ -216,7 +216,9 @@ test("a final action that returns is retried as the same sync() and reboot(2), o
         -- empty plan, which overwrites the Failed state with Ready, and
         -- the next drive runs a full graceful finalisation — seed write,
         -- unmounts, read-only remounts — before the sync and reboot.
-        tags = { "known-bug" },
+        -- PEI-1087: fixed in peinit afcf56d, "fix(shutdown):
+        -- retry a failed forced or Critical final action as the
+        -- same action". Green since 0.0.5-4.
     },
     function(t)
         for _, name in ipairs({ "graceful", "forced", "critical" }) do

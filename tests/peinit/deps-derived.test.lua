@@ -269,8 +269,16 @@ test("every provider of the role becomes its own Requires, so a start is ordered
         -- names it. Starting a service whose Identity needs an authority has
         -- to pull it in, alongside authd, because each provider becomes
         -- its own edge.
+        --
+        -- Since PEI-829 the boot itself pulls the staged provider in,
+        -- through the derived edges of the image's own non-SYSTEM boot
+        -- services (the test below reads that record), so it is running
+        -- by now. Stop it first, so the start has something to pull in.
+        if status(vm, "pt-d-authority").state ~= "inactive" then
+            vm:run("svctl stop pt-d-authority"):assert_ok()
+        end
         t:assert_eq(status(vm, "pt-d-authority").state, "inactive",
-            "the staged provider is not running yet")
+            "the staged provider is not running")
         vm:run("svctl start pt-d-token"):assert_ok()
 
         wait_until(function()
@@ -367,7 +375,9 @@ test("the derived edge is an ordinary Requires everywhere the graph is built",
         -- exists everywhere except in the boot plan, so a provider that
         -- is not itself boot-triggered is never pulled into the boot
         -- graph by the services that need it.
-        tags = { "known-bug" },
+        -- PEI-829: fixed in peinit 74909a2, "fix(boot): build
+        -- the boot plan from role-synthesised definitions".
+        -- Green since 0.0.5-4.
     },
     function(t)
         -- A declared `Requires` on a triggerless service pulls it into

@@ -229,7 +229,9 @@ test("a reset of a still-populated service warns, in the acknowledgement and on 
         -- the way into Abandoned already advanced it — so the re-check
         -- reads a tree that has never existed, always finds it empty,
         -- never warns, and runs its cleanup against the wrong root.
-        tags = { "known-bug" },
+        -- PEI-817: fixed in peinit 76783cb, "fix(lifecycle):
+        -- reset an abandoned service against the tree it was
+        -- abandoned in". Green since 0.0.5-4.
     },
     function(t)
         -- main/ still holds the keeper's processes, so the re-check a

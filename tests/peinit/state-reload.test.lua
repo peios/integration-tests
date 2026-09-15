@@ -382,7 +382,9 @@ test("a stop while Reloading cancels the reload and sends SIGTERM at once",
         -- event then moves the service to Active unconditionally. From
         -- Inactive that is not a listed transition, the runtime loop
         -- treats the rejection as fatal, and PID 1 enters recovery.
-        tags = { "known-bug" },
+        -- PEI-824 (tagged for PEI-820): fixed in peinit 2f92ffb,
+        -- "fix(control): implement the §8.3 conflict rows as
+        -- documented". Green since 0.0.5-4.
     },
     function(t)
         -- Its own VM: the failure mode takes the whole machine down, and
