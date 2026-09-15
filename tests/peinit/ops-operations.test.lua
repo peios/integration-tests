@@ -449,7 +449,10 @@ test("a retained operation stays queryable after its service is discarded",
         -- checks SERVICE_QUERY_STATUS on the target service, and a discarded
         -- service has no descriptor to check: the answer is UNKNOWN_SERVICE
         -- for an operation peinit still holds.
-        tags = { "known-bug" },
+        -- PEI-1076: fixed in peinit 8c16cee, "fix(control):
+        -- check operation-status of a discarded service against
+        -- the descriptor recorded on the operation". Green since
+        -- 0.0.5-6.
     },
     function(t)
         local id = withdraw_mid_restart(t, "pt-withdrawn2")

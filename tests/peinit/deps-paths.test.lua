@@ -145,7 +145,7 @@ test("at boot a validation finding fails one service and the rest continue; on d
             "and nothing was started by the attempt")
     end)
 
-test("a definition that does not parse is caught when the registry is read, and rejects a whole reload",
+test("a definition that does not parse is caught when the registry is read, and fails only that service on reload",
     { spec = "peinit *ondemand.a-definition-that-does-not-parse-is-caught-when-the-registry-is-read" },
     function(t)
         -- Its own machine, because the reload path validates the whole
@@ -154,9 +154,10 @@ test("a definition that does not parse is caught when the registry is read, and 
         --
         -- The boot half of this bullet — a decode failure at boot
         -- failing that service and letting the rest continue — is
-        -- covered by phase2.test.lua. This is the reload half, where
-        -- the consequence is the opposite: one undecodable key rejects
-        -- the entire transaction.
+        -- covered by phase2.test.lua. This is the reload half, which
+        -- since PEI-621 (peinit 7e8a903) has the same consequence: the
+        -- one undecodable key fails that service and the rest of the
+        -- read lands.
         local other = peinit.boot({
             memory = "800M",
             name = "decode",
@@ -174,13 +175,18 @@ test("a definition that does not parse is caught when the registry is read, and 
         other:run([[reg set 'Machine\System\Services\pt-p-decode' Type dword:3]]):assert_ok()
 
         local reload = other:run("svctl --json reload-config")
-        t:assert(reload.exit_code ~= 0 or reload.stdout:find("error", 1, true),
-            "the reload was rejected outright: rc=" .. reload.exit_code ..
-            " out=" .. reload.stdout .. " err=" .. reload.stderr)
+        reload:assert_ok()
+        t:assert((reload.stdout:match('"undecodable":%[(.-)%]') or ""):find('"pt-p-decode"', 1, true),
+            "the reload succeeded and named the key that would not decode: rc=" ..
+            reload.exit_code .. " out=" .. reload.stdout .. " err=" .. reload.stderr)
+        t:assert(reload.stdout:find('"field":"Type"', 1, true),
+            "and the field: " .. reload.stdout)
 
-        -- Rejected whole: the previous generation stays live, and the
-        -- service is still the one it was.
+        -- Failed alone: the service is Failed with ValidationError, as a
+        -- key that will not decode is at boot.
         local entry = status(other, "pt-p-decode")
-        t:assert(entry.state ~= "failed",
-            "the running generation was left alone: " .. entry.state)
+        t:assert_eq(entry.state, "failed",
+            "the service whose key will not decode is failed: " .. entry.state)
+        t:assert_eq(entry.cause, "validation_error",
+            "for a validation reason")
     end)

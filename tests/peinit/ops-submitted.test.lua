@@ -695,7 +695,7 @@ test("arguments and environment together are refused past 2 MiB",
         -- The bound is on argv plus envp as execve counts them: every
         -- string and its terminating NUL, the image path as argv[0], and
         -- each variable as NAME=VALUE. 2 MiB + 1 of that does not fit in
-        -- a 64 KiB record, so this boot raises MaxJobMessageSize to 4 MiB
+        -- a default-sized record, so this boot raises MaxJobMessageSize to 4 MiB
         -- (in `definitions()` above); and it does not fit a sequenced-
         -- packet socket's default send buffer either, so the worker
         -- forces its own up before it sends. The one byte that tips the
@@ -755,6 +755,64 @@ test("arguments and environment together are refused past 2 MiB",
         -- bound is rejected, not a message that ends the runtime loop.
         t:assert(vm:run("svctl --json job submit /bin/true"):ok(),
             "peinit still serves the jobs socket after the refusal")
+    end)
+
+test("a job whose arguments outgrow job.ended is recorded with a cut, and the cut is announced",
+    { spec = "peinit *emit.job-ended-cuts-its-arguments-and-says-so" },
+    function(t)
+        -- A 100 KiB argument, well inside this boot's raised
+        -- MaxJobMessageSize and the 2 MiB bound. Its `job.ended` cannot
+        -- carry it whole: the event keeps 32 KiB of whole arguments, says
+        -- so, and an `event.oversized` records the cut beside it. Before
+        -- PEI-1082 the oversized event was refused by the ring and the
+        -- refusal ended the runtime loop.
+        local big = string.rep("a", 100000)
+        local record = '{"command":"submit","image_path":"/bin/true","arguments":["' ..
+            big .. '"]}'
+        local id
+        f.with_worker(vm, function(w)
+            local fd = assert(us.socket(w, us.AF_UNIX, us.SOCK.SEQPACKET))
+            local connected = us.connect(w, fd, f.JOBS_SOCKET)
+            assert(connected.ret == 0, "connect to the jobs socket: " ..
+                us.errname(connected.errno))
+            local answer, why = f.jobs_request(w, fd, record)
+            w:syscall(3, fd)
+            assert(answer, "no answer to the submit: " .. tostring(why))
+            id = answer:match('"id":"([^"]+)"')
+            t:assert(id and answer:find('"status":"ok"', 1, true),
+                "a 100 KiB argument is accepted: " .. answer:sub(1, 300))
+        end)
+
+        local waited = vm:run("svctl --json job wait " .. id, { timeout = 60 })
+        t:assert(waited:ok() and waited.stdout:match('"state":"([^"]+)"') == "completed",
+            "the job ran to completion: " .. waited.stdout .. tostring(waited.stderr))
+        t:assert(vm:run("svctl --json job submit /bin/true"):ok(),
+            "and peinit still serves the jobs socket after its job.ended")
+
+        local function field(event, name)
+            local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
+            if not value then return nil end
+            return (value:gsub('^"', ""):gsub('"$', ""))
+        end
+        local ended, cut
+        for _, event in ipairs(events({ "job.ended", "event.oversized" })) do
+            if event.payload:find(id, 1, true) then
+                if event.type == "job.ended" then ended = event end
+                if event.type == "event.oversized" then cut = event end
+            end
+        end
+        t:assert(ended, "the job's job.ended reached the ring")
+        t:assert_eq(field(ended, "arguments_truncated"), "true",
+            "and says its arguments were cut: " .. ended.payload)
+        t:assert_eq(field(ended, "arguments_total"), "1",
+            "naming how many there were: " .. ended.payload)
+        t:assert(not ended.payload:find(big, 1, true),
+            "the 100 KiB argument itself is not in it")
+        t:assert(cut, "an event.oversized records the cut beside it")
+        t:assert_eq(field(cut, "action"), "truncated",
+            "as a truncation, not a drop: " .. cut.payload)
+        t:assert_eq(field(cut, "event"), "job.ended",
+            "naming the event that was cut: " .. cut.payload)
     end)
 
 -- A stop on a job still queued for launch cancels it before it runs. No

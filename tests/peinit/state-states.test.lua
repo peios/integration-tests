@@ -286,7 +286,11 @@ test("a dependent of a service in Backoff waits rather than failing",
         -- before the restart evaluation is consulted, so hard dependents
         -- are given DependencyFailure even when the target went to
         -- Backoff and is about to start again.
-        tags = { "known-bug" },
+        -- PEI-821: fixed in peinit df505e5, "fix(graph): hold
+        -- the dependents of a service in Backoff until its
+        -- restart is decided", and 9f36877 (a released start
+        -- gets its StartTimeout from the release). Green since
+        -- 0.0.5-7.
     },
     function(t)
         local target = wait_until(function()

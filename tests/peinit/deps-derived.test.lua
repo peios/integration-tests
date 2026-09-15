@@ -355,14 +355,25 @@ test("a level on a Provides entry is rejected rather than ignored",
         -- A role is not a service, so there would be nothing for the
         -- level to qualify. `Provides` takes the service-name grammar,
         -- and a colon is not in it.
+        --
+        -- A rejected definition is a decode failure, and since PEI-621
+        -- (peinit 7e8a903) a reload fails only that service with it:
+        -- the answer lists the key under `undecodable`, naming the
+        -- field, and the service is Failed with ValidationError.
         vm:run([[reg set 'Machine\System\Services\pt-d-idle' Provides 'multi:pt-d-thing:ready']])
             :assert_ok()
         local reload = vm:run("svctl --json reload-config")
-        t:assert(reload.exit_code ~= 0 or reload.stdout:find("error", 1, true),
+        local listed = reload.stdout:match('"undecodable":%[(.-)%]') or ""
+        t:assert(listed:find('"pt-d-idle"', 1, true),
             "the definition was rejected: rc=" .. reload.exit_code ..
             " out=" .. reload.stdout .. " err=" .. reload.stderr)
+        t:assert(reload.stdout:find('"field":"Provides"', 1, true),
+            "for its Provides value: " .. reload.stdout)
+        t:assert_eq(status(vm, "pt-d-idle").cause, "validation_error",
+            "and the service is failed for it rather than left as it was")
         vm:run([[reg set 'Machine\System\Services\pt-d-idle' Provides 'multi:']])
         vm:run([[reg del 'Machine\System\Services\pt-d-idle' Provides]])
+        vm:run("svctl --json reload-config")
     end)
 
 test("the derived edge is an ordinary Requires everywhere the graph is built",

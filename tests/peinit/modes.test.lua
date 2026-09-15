@@ -93,7 +93,12 @@ test("Safe mode starts a boot-triggered SafeMode service and leaves the rest out
                 svc("pt-safe-excluded"),
             }),
         })
-        local log = other:console():read_log()
+        -- The dependent starts a moment after "boot complete", so its
+        -- line is waited for rather than read off the log at once.
+        local log = wait_until(function()
+            local current = other:console():read_log()
+            return current:find("peinit: service pt%-safe%-eligible started") and current or nil
+        end, { timeout = 30, interval = 0.5, desc = "pt-safe-eligible to start" })
         t:assert(not log:find("peinit: service pt%-safe%-excluded started"),
             "the ineligible service was excluded from the Safe-mode graph")
         -- And its dependent still started, because dependencies on

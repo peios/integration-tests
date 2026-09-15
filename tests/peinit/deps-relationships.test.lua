@@ -253,10 +253,21 @@ test("a Wants dependent waits for its target to reach a terminal state, satisfyi
 test("a Wants target that fails does not stop its dependent",
     { spec = "peinit *rel.a-failing-or-absent-wants-target-does-not-stop-the-dependent" },
     function(t)
+        -- The target fails for good only once its restart budget is spent
+        -- (§6.1: a Wants dependent waits through Backoff, since the target
+        -- is going to start again; PEI-821), about thirty seconds into the
+        -- boot. By then login-console owns the console and peinit's own
+        -- "started" line for the dependent is dropped, so the evidence is
+        -- the dependent's state, not the console.
         wait_for_state("pt-rel-badwanted", "failed")
-        wait_for_line(vm, "peinit: service pt-rel-softdep started")
-        t:assert_eq(status("pt-rel-softdep").cause, "clean_exit",
+        local ran = wait_until(function()
+            local current = status("pt-rel-softdep")
+            return current.cause == "clean_exit" and current or nil
+        end, { timeout = 60, interval = 0.4,
+               desc = "pt-rel-softdep to run once its Wants target has failed for good" })
+        t:assert_eq(ran.cause, "clean_exit",
             "the dependent ran to completion despite its Wants target failing")
+        t:assert_eq(ran.state, "inactive", "and is done with")
     end)
 
 test("BindsTo starts its target exactly as Requires would",

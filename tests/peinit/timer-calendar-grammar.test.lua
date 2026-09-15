@@ -504,7 +504,10 @@ test("a timezone suffix names an IANA zone",
         -- PEI-832: the image ships no /usr/share/zoneinfo, so jiff has
         -- no database to resolve against and every timezone suffix --
         -- including the bare `UTC` the TRM names -- is a parse error.
-        tags = { "known-bug" },
+        -- PEI-832: org.iana.tzdata is now a dependency of the
+        -- edition (pkgs 83d4f0e) and, until that republishes, a
+        -- layer of the peinit profile (fd6f4cf). Green since
+        -- 0.0.5-6.
     },
     function(t)
         -- The absence half holds: every schedule in this file with no

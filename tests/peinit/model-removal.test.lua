@@ -363,11 +363,10 @@ test("a restart already in its stop phase drains the instance and is then aborte
         -- ordinary removal discard.
         --
         -- The abort's own reason string,
-        -- `definition_removed_during_restart_stop_leg`, is not readable
-        -- from here: the operation record is discarded with the entry,
-        -- so `operation-status` answers UNKNOWN_SERVICE from the moment
-        -- the instance exits, and the string reaches neither the console
-        -- nor any query. What is observable is everything around it.
+        -- `definition_removed_during_restart_stop_leg`, is readable from
+        -- here since PEI-1076 (peinit 8c16cee): the operation keeps the
+        -- descriptor its service had, so it stays queryable for its
+        -- retention window after the entry is discarded.
         forgotten("pt-drain", 90)
         t:assert(status("pt-drain") == nil,
             "the entry took the ordinary removal discard when the instance exited")
@@ -383,9 +382,13 @@ test("a restart already in its stop phase drains the instance and is then aborte
         t:assert(not procs.stdout:find("/pt/stubborn.sh", 1, true),
             "and nothing was started in its place: " .. procs.stdout)
 
-        -- And the operation went with it, rather than being left live
-        -- against a service that no longer exists.
+        -- And the operation is not live, but it is still on record: aborted,
+        -- for exactly the reason §8.2 gives, and readable by whoever could
+        -- have queried the service.
         local final = vm:run("svctl --json operation-status " .. operation)
-        t:assert(final.exit_code ~= 0,
-            "the restart operation is no longer live: " .. final.stdout)
+        final:assert_ok()
+        t:assert_eq(final.stdout:match('"state":"([^"]+)"'), "aborted",
+            "the restart operation was aborted, not left live: " .. final.stdout)
+        t:assert(final.stdout:find("definition_removed_during_restart_stop_leg", 1, true),
+            "and says why: " .. final.stdout)
     end)

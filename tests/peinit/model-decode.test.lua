@@ -14,8 +14,11 @@
 -- service (the boot half is `phase2.test.lua`'s).
 --
 --   accepted    the read succeeded and the service is in the model
---   decode      the read was refused with INTERNAL_ERROR -- the key
---               would not decode, so the whole transaction aborted
+--   decode      the read succeeded but named the key under `undecodable`
+--               -- it would not decode, so that one service is Failed
+--               with ValidationError and everything else loaded (§10.4;
+--               PEI-621, since 0.0.5-6: before that the whole
+--               transaction aborted with INTERNAL_ERROR)
 --   validation  the read was refused with INVALID_STATE and a finding --
 --               the definition decoded, and the *graph* rejected it
 --
@@ -58,6 +61,23 @@ local vm = peinit.boot({
     }),
 })
 
+--- What a reload answer says about `name`: "decode" when the reload
+--- succeeded but listed the key as undecodable, "validation" when the
+--- graph refused the read, "accepted" otherwise. The `undecodable` list
+--- is matched by name inside the JSON rather than decoded, like every
+--- other field this file reads.
+local function classify(reload, name)
+    if reload.exit_code ~= 0 then
+        if reload.stdout:match('"code":"([^"]+)"') == "INVALID_STATE" then
+            return "validation"
+        end
+        return "decode"
+    end
+    local listed = reload.stdout:match('"undecodable":%[(.-)%]')
+    if listed and listed:find('"' .. name .. '"', 1, true) then return "decode" end
+    return "accepted"
+end
+
 --- Rewrite `pt-probe` with `values` and make peinit re-read the whole
 --- registry. Returns "accepted", "decode" or "validation", and the raw
 --- reload result for a failure message.
@@ -74,16 +94,14 @@ local function probe(values)
         "reg apply /tmp/pt-probe.json"):assert_ok()
 
     local reload = vm:run("svctl --json reload-config")
-    if reload.exit_code == 0 then return "accepted", reload end
-    local code = reload.stdout:match('"code":"([^"]+)"')
-    if code == "INVALID_STATE" then return "validation", reload end
-    return "decode", reload
+    return classify(reload, "pt-probe"), reload
 end
 
 --- The same, for a probe about the service *name* rather than about a
 --- value. The key is cleaned up afterwards rather than by the next
 --- probe, since every probe here uses a different name and a key left
---- undecodable would refuse every later reload in the file.
+--- undecodable would sit as a Failed placeholder for the rest of the
+--- file, listed under `undecodable` on every later reload.
 ---
 --- Returns nil when the registry itself would not take the name, which
 --- is a different answer from peinit refusing it.
@@ -95,13 +113,7 @@ local function probe_named(name, values)
     if applied.exit_code ~= 0 then return nil, applied end
 
     local reload = vm:run("svctl --json reload-config")
-    local outcome = "decode"
-    if reload.exit_code == 0 then
-        outcome = "accepted"
-    elseif reload.stdout:match('"code":"([^"]+)"') == "INVALID_STATE" then
-        outcome = "validation"
-    end
-    return outcome, reload, path
+    return classify(reload, name), reload, path
 end
 
 --- Remove a key `probe_named` created and return the model to a clean
@@ -838,24 +850,24 @@ test("a reload signal is an exact canonical name, and the accepted set is the no
         })
     end)
 
-test("a decode failure arriving on reload-config rejects the whole read and changes nothing",
-    { spec = "peinit *schema.a-decode-failure-rejects-a-whole-reload" },
+test("a decode failure arriving on reload-config fails only that service, and the rest of the read lands",
+    { spec = "peinit *schema.a-decode-failure-fails-only-that-service-on-reload" },
     function(t)
         -- Boot marks the one key Failed and carries on because it has to
-        -- produce a running system. A reload has one already, so it
-        -- refuses the whole transaction: that is the asymmetry §3.2
-        -- names, and every probe in this file has been leaning on the
-        -- reload half of it. This test is the half itself.
+        -- produce a running system. A reload does the same, key by key:
+        -- the one that will not decode becomes a failed placeholder with
+        -- no definition behind it, and everything read alongside it is
+        -- applied as if the bad key were not there. Every probe in this
+        -- file leans on that per-key reading; this test is the reading
+        -- itself.
         local before = vm:run("svctl --json status pt-resident")
         before:assert_ok()
         local before_pid = before.stdout:match('"pid":(%d+)')
         t:assert(before_pid, "the resident service is running: " .. before.stdout)
 
         -- Start from a generation that has no pt-probe in it, so that
-        -- "was not admitted" below is about this read rather than about
-        -- an entry an earlier probe left behind. A refused reload leaves
-        -- the previous generation in place, which is the point of the
-        -- test -- and would also have left a stale pt-probe standing.
+        -- the failed entry below is about this read rather than about an
+        -- entry an earlier probe left behind.
         vm:run("reg del '" .. PROBE .. "' --recursive >/dev/null 2>&1; " ..
             "svctl --json reload-config"):assert_ok()
         t:assert(vm:run("svctl --json status pt-probe").stdout
@@ -876,20 +888,27 @@ test("a decode failure arriving on reload-config rejects the whole read and chan
             "\nPT_JSON_EOF\nreg apply /tmp/pt-reject.json"):assert_ok()
 
         local reload = vm:run("svctl --json reload-config")
-        t:assert(reload.exit_code ~= 0,
-            "the reload was refused: " .. reload.stdout)
+        reload:assert_ok()
+        t:assert(reload.stdout:find('"undecodable"', 1, true)
+                and reload.stdout:find('"pt-probe"', 1, true),
+            "the reload succeeded and its answer names the key that would not decode: "
+            .. reload.stdout)
 
-        -- Rejected entire. The service that would have decoded perfectly
-        -- well was not admitted either -- a reload is one transaction,
-        -- not a per-key best effort.
-        t:assert(vm:run("svctl --json status pt-alongside").stdout
+        -- Failed alone. The key that would not decode is a failed
+        -- service with a validation cause; the one that decoded
+        -- perfectly well was admitted -- a reload is a per-key read, not
+        -- one transaction.
+        local probe_status = vm:run("svctl --json status pt-probe")
+        probe_status:assert_ok()
+        t:assert_eq(probe_status.stdout:match('"state":"([^"]+)"'), "failed",
+            "the service whose key would not decode is failed: " .. probe_status.stdout)
+        t:assert_eq(probe_status.stdout:match('"cause":"([^"]+)"'), "validation_error",
+            "with the decode failure as its cause: " .. probe_status.stdout)
+        t:assert(not vm:run("svctl --json status pt-alongside").stdout
             :find("UNKNOWN_SERVICE", 1, true),
-            "a valid definition in the same read was not admitted")
-        t:assert(vm:run("svctl --json status pt-probe").stdout
-            :find("UNKNOWN_SERVICE", 1, true),
-            "and neither was the one that would not decode")
+            "and a valid definition in the same read was admitted")
 
-        -- And the generation that was already running is untouched.
+        -- And the service that was already running is untouched.
         local after = vm:run("svctl --json status pt-resident")
         after:assert_ok()
         t:assert_eq(after.stdout:match('"pid":(%d+)'), before_pid,
@@ -897,9 +916,10 @@ test("a decode failure arriving on reload-config rejects the whole read and chan
         t:assert_eq(after.stdout:match('"state":"([^"]+)"'), "active",
             "and its state")
 
-        -- Cleaning up after this one matters: the probe key is left
-        -- undecodable, and every later reload in the file would fail on
-        -- it.
+        -- Cleaning up after this one still matters: the next probe
+        -- rewrites pt-probe, but nothing else would ever remove
+        -- pt-alongside, and a failed placeholder left behind would be
+        -- reported by every later reload in the file.
         vm:run("reg del '" .. PROBE .. "' --recursive"):assert_ok()
         vm:run([[reg del 'Machine\System\Services\pt-alongside' --recursive]]):assert_ok()
         vm:run("svctl --json reload-config"):assert_ok()

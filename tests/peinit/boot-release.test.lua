@@ -113,9 +113,16 @@ for _ = 1, 60 do
     vm:clock():sleep("100ms")
 end
 for _ = 1, 100 do
+    -- The dependent is read first and the target second: a target that
+    -- becomes ready between the two reads releases its dependent at once,
+    -- and read the other way round that instant looked like a violation.
+    -- Read this way, a moved dependent only counts against a target that
+    -- is still Starting after it moved.
+    local dependent_moved = state("pt-r-after-slowok") ~= "inactive"
+        or cause("pt-r-after-slowok") ~= nil
     if state("pt-r-slowok") ~= "starting" then break end
     SAMPLES = SAMPLES + 1
-    if state("pt-r-after-slowok") ~= "inactive" or cause("pt-r-after-slowok") ~= nil then
+    if dependent_moved then
         VIOLATIONS = VIOLATIONS + 1
     end
     vm:clock():sleep("100ms")

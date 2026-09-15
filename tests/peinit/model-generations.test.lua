@@ -170,23 +170,24 @@ local function argv0(pid)
     return (cmdline(pid):match("^(%S+)") or "")
 end
 
-test("a registry write during the boot window reaches a service that has not started yet",
+test("a registry write during the boot window is coalesced into one reload after the plan drains",
     {
-        spec = "peinit *confgen.a-write-during-the-boot-window-reaches-a-not-yet-started-service",
-        -- PEI-834: the Phase 2 boot context is built from a snapshot of
-        -- every definition taken when the plan was fixed, and a
-        -- boot-plan service released later starts from that snapshot.
-        -- The reload the write triggers updates the model but not the
-        -- context, so a boot-plan service that has not started yet
-        -- starts on the old definition.
-        tags = { "known-bug" },
+        spec = "peinit *confgen.a-write-during-the-boot-window-is-deferred-for-an-unlaunched-service",
+        -- PEI-834: the TRM was wrong, not the code — the spec's snapshot
+        -- rule stands and PEI-350 (peinit 0781f0c, reworked in c1c9eba)
+        -- defers the write for the unlaunched member and applies it in
+        -- one reload after the plan drains. Green since 0.0.5-7.
     },
     function(t)
         -- The watches are armed as the event loop starts: after the plan
         -- is fixed, but while the boot-plan services are still starting.
         -- pt-writer runs inside that window and rewrites pt-late's
         -- Arguments; pt-late requires pt-writer, so it is still waiting
-        -- when the write lands and the reload it triggers is processed.
+        -- when the write lands. The reload it triggers runs, but leaves
+        -- pt-late alone: its new definition is deferred, pt-late starts
+        -- from the one the plan was built from, and once every launch in
+        -- the plan has been attempted peinit runs one reload that applies
+        -- what was deferred.
         --
         -- The argument vector is fixed at exec, so /proc says which
         -- generation the process that eventually started belongs to.
@@ -196,26 +197,46 @@ test("a registry write during the boot window reaches a service that has not sta
         t:assert(pid, "pt-late started")
         local at_boot = cmdline(pid)
 
-        -- First, the premise, so that a failure below is about *when*
-        -- the write landed rather than about whether it happened. The
-        -- registry holds the new arguments and a restart picks them up,
-        -- so the write and the reload it triggered both worked.
+        -- The claim's first half: the service had not started when the
+        -- write landed, and its own start still used the plan's
+        -- definition rather than the one written during the boot.
+        t:assert(at_boot:find("111111", 1, true) and not at_boot:find("222222", 1, true),
+            "the boot start used the definition the plan was built from rather " ..
+            "than the one written during the boot window: " .. at_boot)
+
+        -- The second half: the write was deferred, not dropped. After
+        -- the plan drains peinit records a `config.reload_coalesced`
+        -- event (and says so on the console, though by then login-console
+        -- owns it and the line is dropped), and the one reload it then
+        -- runs is what puts the new arguments into the model. eventd is
+        -- where the event is durable, so that is where it is read.
+        local events = wait_until(function()
+            local out = vm:run(
+                "evctl 'EVENTS config.reload_coalesced TAKE 10' --format jsonl").stdout
+            return out:find("pt-late", 1, true) and out or nil
+        end, { timeout = 90, interval = 1,
+               desc = "the coalesced reload after the boot plan drained" })
+        t:assert(events, "peinit ran one reload once the boot plan had drained: " .. events)
+        local deferred = vm:run(
+            "evctl 'EVENTS config.reload_deferred TAKE 10' --format jsonl").stdout
+        t:assert(deferred:find("pt-late", 1, true),
+            "having recorded at the time that pt-late's write was deferred: " .. deferred)
+
         local written = vm:run([[reg get 'Machine\System\Services\pt-late' Arguments]])
         written:assert_ok()
         t:assert(written.stdout:find("222222", 1, true),
             "the write during the boot window reached the registry: " ..
             written.stdout)
+
+        -- The running service keeps its pinned definition with the new
+        -- one pending, so it is the restart that picks it up.
+        t:assert_eq(pid_of("pt-late"), pid,
+            "the coalesced reload left the running process alone")
         vm:run("svctl --json restart pt-late"):assert_ok()
         local after = await("pt-late", "active")
         t:assert(cmdline(after.current_job.pid):find("222222", 1, true),
             "and the model has it, since a restart starts on it: " ..
             cmdline(after.current_job.pid))
-
-        -- And the claim itself: the service had not started when the
-        -- write landed, so its own start should have used it.
-        t:assert(at_boot:find("222222", 1, true),
-            "the boot start used the definition written during the boot rather " ..
-            "than the one the plan was built from: " .. at_boot)
     end)
 
 test("a pinned field takes effect only when the service is restarted",

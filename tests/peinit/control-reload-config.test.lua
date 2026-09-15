@@ -307,74 +307,114 @@ local function plant_undecodable(vm)
         }, "undecodable")
 end
 
-test("an undecodable key fails the whole reload, and nothing read alongside it is applied",
-    { spec = "peinit *control.reload-config.reads-precede-every-mutation" },
+test("an undecodable key fails only that service, and the rest of the batch loads",
+    { spec = "peinit *control.reload-config.an-undecodable-definition-fails-only-that-service" },
     function(t)
         local vm = boot("reload-undecodable")
-        -- If peinit mutated anything before it had read everything, one
-        -- of the two good changes would have landed by the time the third
-        -- refused to decode.
+        -- A reload decodes per key, exactly as boot does. The key that
+        -- will not decode fails *its* service — a placeholder entry,
+        -- definition-removed, that status reports and nothing can start
+        -- — and the two good changes read alongside it land regardless.
+        -- The reload itself succeeds; what it has to say about the bad
+        -- key is in its answer (the next test) rather than its exit code.
         plant_undecodable(vm)
 
         local reload = vm:run("svctl --json reload-config")
-        t:assert(reload.exit_code ~= 0, "the reload was refused: " .. reload.stdout)
+        reload:assert_ok()
+        t:assert(reload.stdout:find('"undecodable"', 1, true)
+                and reload.stdout:find('"pt-broken"', 1, true),
+            "the answer counts the key that would not decode: " .. reload.stdout)
 
-        -- Nothing the reload read was applied: the new service does not
-        -- exist and the running one kept its description.
-        t:assert(vm:run("svctl --json status pt-fresh").stdout:find("UNKNOWN_SERVICE", 1, true),
-            "the good new definition read alongside it was not admitted")
-        t:assert(not vm:run("svctl --json status pt-resident").stdout
-                :find("rewritten by the reload", 1, true),
-            "and the good change to the running service was not applied either")
+        -- The bad key's service exists, as a failure with a validation
+        -- cause and no definition behind it.
+        local broken = vm:run("svctl --json status pt-broken")
+        broken:assert_ok()
+        t:assert_eq(broken.stdout:match('"state":"([^"]+)"'), "failed",
+            "the service whose key would not decode is failed: " .. broken.stdout)
+        t:assert_eq(broken.stdout:match('"cause":"([^"]+)"'), "validation_error",
+            "with the decode failure as its cause: " .. broken.stdout)
+        t:assert(broken.stdout:find('"definition_removed":true', 1, true),
+            "and no definition behind it: " .. broken.stdout)
+        t:assert(vm:run("svctl --json start pt-broken").exit_code ~= 0,
+            "so nothing can start it")
 
-        -- Every reload fails the same way until the key is repaired —
-        -- including this second explicit one, so no other configuration
-        -- change can take effect in the meantime.
-        local again = vm:run("svctl --json reload-config")
-        t:assert(again.exit_code ~= 0, "a second reload fails the same way: " .. again.stdout)
-
-        -- Repaired by removal, the same reload admits everything else it
-        -- was holding back — which is what shows the two good changes
-        -- were refused for the bad key's sake and not their own.
-        vm:run("reg del '" .. SERVICES .. [[\pt-broken' --recursive]]):assert_ok()
-        local repaired = wait_until(function()
-            local r = vm:run("svctl --json reload-config")
-            if r.exit_code == 0 then return r end
-        end, { timeout = 30, desc = "a reload to succeed once the key is gone" })
-        t:assert(repaired, "the reload succeeds once the key is gone")
+        -- Everything else the reload read was applied: the new service
+        -- exists and the running one has its new description.
         t:assert(not vm:run("svctl --json status pt-fresh").stdout:find("UNKNOWN_SERVICE", 1, true),
-            "the new service is admitted now")
+            "the good new definition read alongside it was admitted")
+        t:assert_eq(status_field(vm, "pt-resident", "description"), "rewritten by the reload",
+            "and the good change to the running service was applied too")
+
+        -- Repaired by removal, the next reload drops the placeholder and
+        -- leaves the two good changes exactly where they were.
+        vm:run("reg del '" .. SERVICES .. [[\pt-broken' --recursive]]):assert_ok()
+        local repaired = vm:run("svctl --json reload-config")
+        repaired:assert_ok()
+        t:assert(not repaired.stdout:find('"pt-broken"', 1, true),
+            "the reload has nothing undecodable to report once the key is gone: "
+            .. repaired.stdout)
+        t:assert(vm:run("svctl --json status pt-broken").stdout:find("UNKNOWN_SERVICE", 1, true),
+            "the placeholder went with the key")
+        t:assert(not vm:run("svctl --json status pt-fresh").stdout:find("UNKNOWN_SERVICE", 1, true),
+            "the new service is still there")
         t:assert_eq(status_field(vm, "pt-resident", "description"), "rewritten by the reload",
             "and so is the new description")
     end)
 
-test("a reload refused for an undecodable key names the key and what was wrong",
+test("a reload with an undecodable key names the key, the field and what was wrong",
     {
-        spec = "peinit *control.reload-config.an-undecodable-definition-aborts-the-reload",
-        -- PEI-1075. The refusal holds (the test above), the naming does
-        -- not: `reload_config_error_response`
-        -- (src/supervisor/control_command/error.rs) keeps a validation
-        -- failure's findings but renders a registry read failure — where
-        -- a decode error lands — as the generic
+        spec = "peinit *control.reload-config.an-undecodable-definition-fails-only-that-service",
+        -- PEI-1075. The refusal held, the naming did not:
+        -- `reload_config_error_response`
+        -- (src/supervisor/control_command/error.rs) kept a validation
+        -- failure's findings but rendered a registry read failure — where
+        -- a decode error landed — as the generic
         -- {"code":"INTERNAL_ERROR","message":"control request failed"},
         -- discarding the error it was given.
         -- PEI-1075: fixed in peinit cb44744, "fix(control): name
         -- the service and decode problem when a reload is
         -- refused". Green since 0.0.5-4.
+        -- PEI-621 then turned the refusal into a per-service failure
+        -- (peinit 7e8a903): the reload succeeds and the naming moved
+        -- from an error into the answer's `undecodable` entries.
     },
     function(t)
         local vm = boot("reload-undecodable-named")
         plant_undecodable(vm)
 
-        -- Every reload fails on this key until it is repaired, including
-        -- the ones a registry change triggers, so the answer is the only
-        -- place an operator learns which key to repair.
+        -- The key stays undecodable until it is repaired, and every
+        -- reload — including the ones a registry change triggers —
+        -- reports it again, so the answer is where an operator learns
+        -- which key to repair and which value on it.
         local reload = vm:run("svctl --json reload-config")
-        t:assert(reload.exit_code ~= 0, "the reload was refused: " .. reload.stdout)
-        t:assert(reload.stdout:find("pt%-broken"),
-            "naming the service that would not decode: " .. reload.stdout)
-        t:assert(reload.stdout:find("StartTimeout", 1, true),
-            "and what was wrong with it: " .. reload.stdout)
+        reload:assert_ok()
+        -- Two `undecodable` lists: `summary.undecodable` is bare names,
+        -- the top-level one is `{service, field, message}` entries. Only
+        -- the entries carry `field` and `message`, and the message quotes
+        -- peinit's own error with braces of its own, so the entry is
+        -- read field by field rather than bracket-matched.
+        local entry = reload.stdout:match('{"field":"[^"]*","message":"[^"]*","service":"pt%-broken"}')
+            or reload.stdout:match('{[^{]-"service":"pt%-broken"[^}]-}') or ""
+        t:assert(reload.stdout:find('"service":"pt-broken"', 1, true),
+            "an undecodable entry names the service: " .. reload.stdout)
+        t:assert_eq(reload.stdout:match('"field":"([^"]*)"'), "StartTimeout",
+            "and the field that would not decode: " .. reload.stdout)
+        t:assert((reload.stdout:match('"message":"([^"]*)"') or "") ~= "",
+            "and says what was wrong with it: " .. reload.stdout)
+        t:assert(entry ~= "" or reload.stdout:find('"field":"StartTimeout"', 1, true),
+            "the field and the service are on one entry: " .. reload.stdout)
+
+        -- The same finding is on the audit trail under the reload phase,
+        -- and on the console as the service's failure.
+        local events = wait_until(function()
+            local out = vm:run(
+                "evctl 'EVENTS graph.validation_error SINCE 1h ago TAKE 400' --format jsonl").stdout
+            return out:find("pt%-broken") and out or nil
+        end, { timeout = 60, interval = 1, desc = "a reload_config finding for pt-broken" })
+        t:assert(events and events:find('"phase":"reload_config"', 1, true),
+            "the finding is recorded under phase reload_config: " .. tostring(events))
+        t:assert(vm:console():read_log():find("peinit: service pt-broken failed: ValidationError", 1, true),
+            "and the console reports the service failed on it")
     end)
 
 --- Every target PID 1 holds a descriptor on, from /proc/1/fd.

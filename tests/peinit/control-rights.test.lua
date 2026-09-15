@@ -219,7 +219,12 @@ test("a caller who may query nothing gets an empty list and a success",
         -- reach peinit can have "no query rights anywhere", and this list
         -- always names registryd. Whether §4.6 or the code gives way is
         -- the ruling PEI-1072 asks for; either answer changes this test.
-        tags = { "known-bug" },
+        -- PEI-1072: fixed in peinit 47d58c4, "fix(boot):
+        -- registryd inherits the Services-key ServiceSecurity
+        -- like any other service without its own" (ruling:
+        -- option 1). Green since 0.0.5-8, once a reload during
+        -- the boot window stopped freezing a launched service
+        -- (b9b5028).
     },
     function(t)
         -- The narrowed descriptor goes on the Services key rather than on

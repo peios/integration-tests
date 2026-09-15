@@ -355,7 +355,10 @@ test("a start held on a level survives its publisher going away",
         -- dependent-satisfying state, while the service stays Inactive
         -- with no recorded cause: the start neither happened nor
         -- failed, and there is no longer an operation saying so.
-        tags = { "known-bug" },
+        -- PEI-830: fixed in peinit ba12680 and 0bc5eb8,
+        -- "fix(graph): a held start is exempt from the operation
+        -- lifetime only while every wait is undecided". Green
+        -- since 0.0.5-7.
     },
     function(t)
         -- The test above stopped netd. What the manual says a held
@@ -382,7 +385,10 @@ test("a soft level waiter proceeds once the publisher is no longer running",
         -- *before* the publisher is stopped makes the same stop release
         -- it, which is what makes this a scheduling defect rather than
         -- the declared semantics.
-        tags = { "known-bug" },
+        -- PEI-830: fixed in peinit ba12680 and 0bc5eb8,
+        -- "fix(graph): a held start is exempt from the operation
+        -- lifetime only while every wait is undecided". Green
+        -- since 0.0.5-7.
     },
     function(t)
         -- netd was stopped by the test above and is not coming back, so
