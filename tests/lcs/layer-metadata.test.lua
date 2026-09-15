@@ -328,10 +328,16 @@ test("a layer with no metadata key GUID and no authorisation descriptor is not i
         end)
         local made = lcs.create_key(src, w, { path = layer_path("Invisible") })
         src:intercept(lcs.OP.CREATE_KEY, nil)
-        src:intercept(lcs.OP.READ_KEY, nil)
         t:assert(made.ret < 0, "the operation that would have exposed the layer fails")
+        -- The descriptor stays unreadable through the check: the key is
+        -- in storage, and any later refresh that could read a descriptor
+        -- for it — in this guest the machine-root fallback re-runs the
+        -- bootstrap refresh on every subkey creation under Machine\ —
+        -- would be entitled to publish it. What is asserted is that no
+        -- refresh publishes a layer whose descriptor will not read.
         local fd = subkey(t, "Invisible")
         local ok, errno = usable("Invisible", fd)
+        src:intercept(lcs.OP.READ_KEY, nil)
         t:assert(not ok, "and the layer is not visible in the table at all")
         t:assert_eq(errno, sys.E.NOENT, "so naming it is ENOENT, not a half-published layer")
         sys.close(w, fd)
