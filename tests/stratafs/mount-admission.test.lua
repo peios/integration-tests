@@ -515,14 +515,14 @@ test("a stack whose strata are all absent is legal",
         if not ok then error(err, 0) end
     end)
 
--- PEI-575. Until some stratum root has existed, every access to the
--- root of an all-absent mount fails ENOENT, so the provider-less
--- attributes §4.2.3 specifies cannot be observed. The branch that
--- produces them is real: once a stratum root has appeared and gone
--- again, the same stat returns mode 040000 as written here.
+-- Red until kernel 0.20.1-rc13-9 (PEI-575): a root with no provider had
+-- no descriptor either, so every access check on it failed and the
+-- provider-less attributes §4.2.3 specifies could not be observed. The
+-- root now serves a synthesised descriptor — owned by the mounter, read
+-- and traverse for everyone — while no stratum root exists.
 test("the root of an all-absent stack is a directory with no permission bits",
-    { spec = "PKM *mount.all-absent-stack-is-legal",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *mount.all-absent-root-serves-a-synthesised-descriptor" },
+    function(t)
         local root = base.root .. "/all-absent-root"
         vm:mkdir(root, { parents = true })
         local r, at = admit({ data = "strata=" .. root .. "/one+am" })

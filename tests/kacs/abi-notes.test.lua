@@ -554,12 +554,13 @@ test("a System V object is addressed by its id in dirfd, with a NULL path",
         if not ok then error(err, 0) end
     end)
 
-test("the runtime-enforced build configuration held at initialisation",
-    { spec = "PKM *abi-notes.build.runtime-enforced-configs" }, function(t)
-        -- CONFIG_STRICT_DEVMEM and CONFIG_MODULE_SIG_FORCE are checked
-        -- when KACS initialises, not only when it is built: KACS
-        -- refuses to come up without them. So the syscalls answering at
-        -- all is the observation.
+test("the build configuration KACS requires held, and KACS is up",
+    { spec = "PKM *abi-notes.build.configs-enforced-at-build" }, function(t)
+        -- CONFIG_STRICT_DEVMEM, CONFIG_MODULE_SIG_FORCE and the absence
+        -- of every other LSM are BUILD_BUG_ON in pkm_init since kernel
+        -- 0.20.1-rc13-9 (PEI-487): a kernel without them does not
+        -- compile, so one that boots at all was built with them. The
+        -- syscalls answering is the observation that KACS came up.
         local fd, e = token.open_self(vm, token.RIGHT.QUERY)
         t:assert(fd, "kacs_open_self_token answers: " .. sys.errname(e or 0))
         sys.close(vm, fd)

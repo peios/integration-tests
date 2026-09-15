@@ -107,12 +107,11 @@ test("MaxTotalLayers defaults to 1024",
     end)
 
 test("MaxTotalLayers is configurable up to 65536, and a value above 1024 validates and publishes",
-    { spec = "PKM *layer.model.max-total-layers-above-1024-not-honoured" },
+    { spec = "PKM *layer.model.max-total-layers-binds-across-the-range" },
     function(t)
-        -- The other half of this claim — that the table still runs out
-        -- at 1023 dynamic entries whatever the configured value says —
-        -- needs 1024 layers and is out of a guest test's reach; the
-        -- fixed array has a stub of its own below.
+        -- The other half of this claim — that the table then grows past
+        -- 1024 entries — needs 1025 layers and is out of a guest test's
+        -- reach; the growth is proven under KUnit (the stub below).
         local pfd = open(t, lcs.PARAMS_PATH, lcs.KEY_ALL_ACCESS)
         local rejected = self_config_rejections(t, function()
             local s = lcs.set_value(src, w, pfd, "MaxTotalLayers", lcs.TYPE.DWORD, lcs.dword(2048))
@@ -637,17 +636,19 @@ test("the reserved name base is recognised with Unicode Simple Case Folding, the
 --- read by the `ENOSPC` case, which is the same fill.
 local fill_stop, fill_errno
 
-test("the table is a fixed array sized for 1023 dynamic layers plus the base layer",
-    { spec = "PKM *layer.model.table-is-fixed-at-1023-dynamic-plus-base",
+test("the table is sized to MaxTotalLayers and grows to it",
+    { spec = "PKM *layer.model.table-grows-to-max-total-layers",
       covered_by = "kunit:pkm_lcs_kunit_layer",
-      skip = "the compile-time size of pkm_lcs_layer_table is only visible once 1023 " ..
-             "dynamic layers exist, which a guest cannot reach in a test's budget; " ..
-             "runs under pkm_lcs_kunit_layer_table_publish_snapshot_remove" },
+      skip = "growth past the 1024 default is only visible once 1025 layers exist, " ..
+             "which a guest cannot reach in a test's budget; runs under " ..
+             "pkm_lcs_kunit_layer_table_grows_to_max_total_layers (PEI-759)" },
     function(t) end)
 
-test("a MaxTotalLayers below 1024 binds",
-    { spec = "PKM *layer.model.max-total-layers-below-1024-binds" },
+test("a MaxTotalLayers below the default binds",
+    { spec = "PKM *layer.model.max-total-layers-binds-across-the-range" },
     function(t)
+        -- The lowering half of the range claim; the raising half is the
+        -- KUnit stub above.
         local pfd = open(t, lcs.PARAMS_PATH, lcs.KEY_ALL_ACCESS)
         local s = lcs.set_value(src, w, pfd, "MaxTotalLayers", lcs.TYPE.DWORD, lcs.dword(24))
         t:assert_eq(s.ret, 0, "MaxTotalLayers is set to 24: " .. sys.errname(s.errno or 0))
@@ -658,8 +659,8 @@ test("a MaxTotalLayers below 1024 binds",
             sys.close(w, fd)
         end
         t:assert(fill_stop,
-            "layer creation stops: a configured value below 1024 binds, and this one " ..
-            "bound far below the default")
+            "layer creation stops: a configured value below the default binds, and " ..
+            "this one bound far below it")
         t:assert(fill_stop <= 24,
             "at the configured 24, not at the 1024 that was in force before it")
     end)

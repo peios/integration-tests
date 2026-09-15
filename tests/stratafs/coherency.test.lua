@@ -356,12 +356,11 @@ test("the root's number agrees with other paths to the same provider",
         if not ok then error(err, 0) end
     end)
 
--- PEI-575. The root of an all-absent stack cannot be stat'd at all
--- until some stratum root has existed, so the bare counter value it is
--- supposed to keep cannot be read.
+-- Red until kernel 0.20.1-rc13-9 (PEI-575): a root with no provider
+-- could not be stat'd at all, so the bare counter value it keeps could
+-- not be read.
 test("a root with no provider keeps the bare counter value",
-    { spec = "PKM *inode.root.bare-counter-without-a-provider",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *inode.root.bare-counter-without-a-provider" }, function(t)
         local s = stratafs.scenario(vm, "bare-counter", {
             { name = "gone", flags = { "am" } },
         }, { mount = false })

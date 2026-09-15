@@ -121,6 +121,19 @@ local SERVICES = {
         { name = "Readiness", type = "dword", data = 0 },
         { name = "RestartPolicy", type = "dword", data = 0 },
     }),
+
+    -- A service whose stop needs SIGKILL: its main ignores SIGTERM, and
+    -- a short StopTimeout escalates quickly. The restart's new main is
+    -- cloned into the cgroup the stop just wrote cgroup.kill to, which
+    -- kernels before 0.20.1-rc13-9 killed at birth (PEI-1078).
+    service("pt-tr-stubborn", {
+        BOOT,
+        { name = "ImagePath", type = "sz", data = "/bin/sh" },
+        { name = "Arguments", type = "multi", data = {
+            "-c", "trap '' TERM; while :; do /bin/sleep 1; done" } },
+        { name = "StopTimeout", type = "dword", data = 2 },
+        { name = "RestartPolicy", type = "dword", data = 0 },
+    }),
 }
 
 -- `peios.quiet=0`, because one assertion below is on a console line
@@ -376,6 +389,36 @@ test("an administrative restart detours through Inactive, so a definition pinned
         end, { timeout = 10, interval = 0.3, desc = "the new image's marker" })
         t:assert(marker:find("detoured", 1, true),
             "the start leg launched the definition released at the Inactive between the legs")
+    end)
+
+test("a service whose stop needed SIGKILL comes back from an administrative restart",
+    { spec = "peinit *trans.an-administrative-restart-detours-through-inactive" },
+    function(t)
+        -- The stop leg escalates to SIGKILL -- pt-tr-stubborn ignores
+        -- SIGTERM -- and the start leg clones the new main into the
+        -- cgroup that was just written cgroup.kill. Kernels before
+        -- 0.20.1-rc13-9 captured the parent's kill sequence for a
+        -- CLONE_INTO_CGROUP child and killed it 1-2 ms after it started
+        -- (PEI-1078), so the restart ended as a process crash. The
+        -- transition itself is the one the previous case proves; what
+        -- this case adds is that the new main survives its birth.
+        local before = settle("pt-tr-stubborn", "active", "pt-tr-stubborn to come up at boot")
+        local old_pid = before.current_job.pid
+
+        vm:run("svctl restart pt-tr-stubborn", { timeout = 60 }):assert_ok()
+        local after = settle("pt-tr-stubborn", "active",
+            "pt-tr-stubborn to come back from a restart whose stop leg had to SIGKILL")
+        t:assert(after.current_job.pid ~= old_pid, "the restart replaced the process")
+        t:assert_eq(after.cause, "explicit_start", "and its start leg was an explicit start")
+
+        -- And it stays up: the kill that PEI-1078 delivered came within
+        -- milliseconds of the start, well inside this window.
+        vm:run("sleep 3")
+        local later = status("pt-tr-stubborn")
+        t:assert_eq(later.state, "active",
+            "three seconds later the new main is still running: " .. later.state ..
+            " (" .. tostring(later.cause) .. ")")
+        t:assert_eq(later.current_job.pid, after.current_job.pid, "on the same process")
     end)
 
 test("a restarting service is never observed Inactive between its legs",

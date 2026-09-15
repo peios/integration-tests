@@ -248,14 +248,15 @@ test("a deferred deletion refused by the arrangement is audited",
         end)
     end)
 
--- PEI-588. §4.6.5 makes this an explicit exception to the EACCES
--- exclusion, because a deferred deletion's error reaches nobody: the
--- descriptor's owner may be gone by the time it runs. The exception is
--- not implemented — an arrangement refusal is audited (the sibling case
--- above), an access-check refusal produces an empty ring.
+-- §4.6.5 makes this an explicit exception to the EACCES exclusion,
+-- because a deferred deletion's error reaches nobody: the descriptor's
+-- owner may be gone by the time it runs. Red until kernel
+-- 0.20.1-rc13-9 (PEI-588): the delete-child check on the merged parent
+-- runs before stratafs's unlink is entered, so a refusal there produced
+-- an empty ring; KACS now raises the stratafs record for it.
 test("a refused deferred deletion is audited on any non-zero result",
-    { spec = "PKM *audit.deferred-deletion-audited-on-any-error",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *audit.deferred-deletion-audited-on-any-error" },
+    function(t)
         stratafs.with(vm, "audit-deferred", {
             { name = "dest", flags = { "create" }, entries = { ["d/f"] = "x" } },
         }, function(s)
