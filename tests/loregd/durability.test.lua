@@ -56,11 +56,6 @@ local vm = peinit.boot({
 })
 local disk = vm:disk("hive")
 
---- The loregd this file started, or nil. File-scope so a test can hand
---- the running daemon to the next one rather than each starting its own
---- against a hive another is still holding open.
-local loregd = nil
-
 --- Adopt the disk's filesystem at MOUNT, usable.
 ---
 --- `new_mount` sets the policy class on the mount fd between `fsmount`
@@ -74,6 +69,11 @@ local function mount_hive(t)
 end
 
 --- Start loregd on the hive and wait until the kernel will route to it.
+---
+--- The Process belongs to the test that called this. provium closes a
+--- test's resources when the test ends — SIGTERM, then SIGKILL two
+--- seconds later — whatever else still refers to them, so a daemon is
+--- never handed from one test to the next: each test starts its own.
 ---
 --- Readiness is asked of LCS rather than read off the daemon's stdout:
 --- what the test needs is not that loregd printed something but that a
@@ -100,8 +100,61 @@ local function start_loregd(t)
             " stdout=" .. tostring(r.stdout) ..
             " stderr=" .. tostring(r.stderr))
     end
-    loregd = proc
     return proc
+end
+
+--- Whether `pid` has finished: gone from /proc, or a zombie the agent
+--- has not reaped yet. A zombie still has a /proc entry, so "the entry
+--- is gone" alone would call an exited daemon alive.
+local function exited(pid)
+    local ok, status = pcall(vm.read_file, vm, "/proc/" .. pid .. "/status")
+    return not ok or status:find("\nState:%s*Z") ~= nil
+end
+
+--- SIGTERM `proc` and say how it ended.
+---
+--- Returns the RunResult and a description for failure messages: the
+--- exit status and loregd's own output — which says whether its signal
+--- handler ever ran, since it logs `received terminated` before closing
+--- the device.
+---
+--- When the daemon is still alive after `grace` seconds, the
+--- description also carries where it is stuck: its /proc state and
+--- signal masks, and every thread's wait channel. Taken BEFORE
+--- `proc:wait` gives up and SIGKILLs it, because afterwards there is
+--- nothing left to look at.
+local function stop_loregd(proc, grace)
+    local pid = proc:pid()
+    proc:kill("term")
+
+    local gone = pcall(wait_until, function() return exited(pid) end,
+        { timeout = grace or 15, interval = 0.25, desc = "loregd to exit" })
+
+    local where = ""
+    if not gone then
+        local lines = { "\n  still alive " .. (grace or 15) ..
+            "s after SIGTERM (pid " .. pid .. "):" }
+        local ok, status = pcall(vm.read_file, vm, "/proc/" .. pid .. "/status")
+        if ok then
+            for line in status:gmatch("[^\n]+") do
+                if line:match("^State:") or line:match("^Sig") or line:match("^ShdPnd:") then
+                    lines[#lines + 1] = "    " .. line
+                end
+            end
+        end
+        local tasks = vm:run("ls /proc/" .. pid .. "/task").stdout
+        for tid in tasks:gmatch("%d+") do
+            local _, wchan = pcall(vm.read_file, vm,
+                "/proc/" .. pid .. "/task/" .. tid .. "/wchan")
+            lines[#lines + 1] = "    thread " .. tid .. " waiting in " .. tostring(wchan)
+        end
+        where = table.concat(lines, "\n")
+    end
+
+    local r = proc:wait("5s")
+    return r, ("exit=%s status=%s signal=%s%s\n  loregd stdout: %s\n  loregd stderr: %s")
+        :format(tostring(r.exit_code), tostring(r.status), tostring(r.signal),
+            where, tostring(r.stdout), tostring(r.stderr))
 end
 
 --- Everything needed to talk to the hive again after a reboot: the
@@ -121,19 +174,75 @@ local function read_dword(name)
     return r, (r.stdout:gsub("%s+$", ""))
 end
 
-test("the disk is mediated, so a power cut is a real one", {}, function(t)
-    -- Asserted first and on its own because every durability case below
-    -- rests on it. `power_cut` errors on a disk that was not booted
-    -- `mediated = true` rather than quietly doing nothing, so a cut that
-    -- returns is a cut that can actually discard something — and without
-    -- this check a misconfigured boot would make every later test pass
-    -- by never losing any data at all.
-    local ok, err = pcall(function() disk:power_cut() end)
-    t:assert(ok, "power_cut on the hive disk: " .. tostring(err))
+--- One sector of `char`, written to the raw disk with O_DIRECT, and
+--- flushed only when asked.
+---
+--- O_DIRECT is the point. An ordinary write stops in the guest's page
+--- cache and may never reach the disk, so "the backing file does not
+--- have it" could not tell a write provium is holding from one the guest
+--- never sent. With O_DIRECT, a write that returns has been acknowledged
+--- by the device — which here is provium.
+---
+--- Not `dd oflag=direct`. O_DIRECT needs a buffer aligned to the
+--- device's sector size, and peiosutils' dd retries any write that fails
+--- EINVAL with O_DIRECT cleared, silently (`handle_o_direct_write`), so
+--- a direct write the kernel refused would land in the page cache and
+--- this check would pass for the wrong reason. The agent's own syscall
+--- buffers carry no alignment either, but an anonymous mapping is
+--- page-aligned: the pattern is read into one and written from there, so
+--- a refusal comes back as an error instead of being hidden.
+local function direct_write(t, sector, char, flush)
+    local src = "/tmp/pt-sector-" .. char
+    vm:write_file(src, string.rep(char, 512))
 
-    local r = vm:run("test -b " .. DEVICE)
-    t:assert_eq(r.exit_code, 0, DEVICE .. " is a block device in the guest")
-end)
+    local page = assert(sys.mmap(vm, -1, 4096,
+        sys.PROT.READ | sys.PROT.WRITE, sys.MAP.PRIVATE | sys.MAP.ANONYMOUS))
+    local sfd = assert(sys.open(vm, src, sys.O.RDONLY))
+    local got = vm:syscall(sys.NR.read, sfd, page, 512)
+    sys.close(vm, sfd)
+    t:assert_eq(got.ret, 512, "the pattern read into the aligned page")
+
+    local fd, errno = sys.open(vm, DEVICE, sys.O.RDWR | sys.O.DIRECT)
+    t:assert(fd, "open " .. DEVICE .. " with O_DIRECT: " .. sys.errname(errno or 0))
+    sys.lseek(vm, fd, sector * 512, 0)
+    local w = vm:syscall(sys.NR.write, fd, page, 512)
+    t:assert_eq(w.ret, 512, "a direct write to sector " .. sector .. ": " ..
+        sys.errname(w.errno or 0))
+    if flush then
+        t:assert_eq(sys.fsync(vm, fd).ret, 0, "and the guest flushed it")
+    end
+    sys.close(vm, fd)
+    sys.munmap(vm, page, 4096)
+end
+
+test("the disk is mediated: a write the guest never flushed is held, not committed",
+    {}, function(t)
+        -- Every durability case below rests on this. A power cut can only
+        -- discard what provium is actually holding, so before trusting one
+        -- the test watches provium hold something. On two raw sectors,
+        -- before anything formats the disk, so no filesystem can blur it;
+        -- the next case's mkfs overwrites both.
+        local r = vm:run("test -b " .. DEVICE)
+        t:assert_eq(r.exit_code, 0, DEVICE .. " is a block device in the guest")
+
+        direct_write(t, 0, "D", true)   -- sent, and flushed
+        direct_write(t, 1, "L", false)  -- sent, never flushed
+
+        -- `read_sectors` reads the backing file on the host directly, so
+        -- this is the disk's real contents, not what either cache believes.
+        local ZERO = string.rep("\0", 512)
+        t:assert_eq(disk:read_sectors(0, 1), string.rep("D", 512),
+            "the flushed write was committed")
+        t:assert_eq(disk:read_sectors(1, 1), ZERO,
+            "the unflushed write was acknowledged but is held, not committed " ..
+            "— on a disk provium did not mediate it would already be here")
+
+        disk:power_cut()
+
+        t:assert_eq(disk:read_sectors(0, 1), string.rep("D", 512),
+            "the flushed write survives the cut")
+        t:assert_eq(disk:read_sectors(1, 1), ZERO, "and the held one is gone")
+    end)
 
 test("a value committed before the power cut is there after it",
     { spec = "loregd *exit.committed-data-is-durable-and-wal-state-is-finalised-at-close" },
@@ -159,7 +268,6 @@ test("a value committed before the power cut is there after it",
         -- out would answer a different question.
         disk:power_cut()
         vm:reset()
-        loregd = nil
 
         -- `vm:reset()` returns with the agent serving again, and the
         -- agent starts in Phase 1.5 — after registryd, which is all this
@@ -175,35 +283,44 @@ test("a value committed before the power cut is there after it",
     end)
 
 test("SIGTERM closes the device and shuts the daemon down cleanly",
-    { spec = "loregd *exit.sigterm-and-sigint-close-the-device-for-a-clean-shutdown" },
+    {
+        spec = "loregd *exit.sigterm-and-sigint-close-the-device-for-a-clean-shutdown",
+        -- PEI-1122: `main` hands the device fd to the registration ioctl
+        -- through `dev.Fd()`, which puts it back into blocking mode, so
+        -- the handler's `dev.Close()` cannot interrupt the read loop and
+        -- an idle daemon never finishes shutting down.
+        tags = { "known-bug" },
+    },
     function(t)
-        t:assert(loregd, "the previous test left a loregd running")
+        local r, how = stop_loregd(start_loregd(t))
 
-        loregd:kill("term")
-        local r = loregd:wait("15s")
-        loregd = nil
-
+        t:assert_eq(r.status, "exited",
+            "loregd ends on its own after SIGTERM, rather than hanging " ..
+            "until it is killed. " .. how)
         t:assert_eq(r.exit_code, 0,
-            "loregd exits 0 on SIGTERM — the handler closes the device, " ..
-            "which unblocks the read loop into the same clean shutdown a " ..
-            "device EOF produces. stderr=" .. tostring(r.stderr))
+            "and with status 0 — the handler closes the device, which " ..
+            "unblocks the read loop into the same clean shutdown a device " ..
+            "EOF produces. " .. how)
     end)
 
 test("data written before a clean close is final",
-    { spec = "loregd *exit.committed-data-is-durable-and-wal-state-is-finalised-at-close" },
+    {
+        spec = "loregd *exit.committed-data-is-durable-and-wal-state-is-finalised-at-close",
+        -- PEI-1122: there is no clean close to test until SIGTERM ends the
+        -- daemon, so this stops at its first assertion for the same reason.
+        tags = { "known-bug" },
+    },
     function(t)
         -- The other half of the sentence: SQLite finalises any
         -- outstanding WAL state as the connections close. So this writes,
         -- closes the daemon properly, and only then cuts the power — if
         -- anything were still owed to the disk at the moment the process
         -- exited, the cut would take it.
-        start_loregd(t)
+        local proc = start_loregd(t)
         vm:run("reg set '" .. KEY .. "' Finalised dword:7"):assert_ok()
 
-        loregd:kill("term")
-        local exit = loregd:wait("15s")
-        loregd = nil
-        t:assert_eq(exit.exit_code, 0, "the daemon closed cleanly first")
+        local exit, how = stop_loregd(proc)
+        t:assert_eq(exit.exit_code, 0, "the daemon closed cleanly first. " .. how)
 
         disk:power_cut()
         vm:reset()

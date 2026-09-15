@@ -101,8 +101,8 @@ M.MS_REMOUNT          = 32
 -- open(2) flags.
 M.O = {
     RDONLY = 0, WRONLY = 1, RDWR = 2, CREAT = 0x40, EXCL = 0x80,
-    TRUNC = 0x200, APPEND = 0x400, DIRECTORY = 0x10000, NOFOLLOW = 0x20000,
-    PATH = 0x200000, TMPFILE = 0x410000,
+    TRUNC = 0x200, APPEND = 0x400, DIRECT = 0x4000, DIRECTORY = 0x10000,
+    NOFOLLOW = 0x20000, PATH = 0x200000, TMPFILE = 0x410000,
 }
 
 -- The inode flag ioctls, and the one flag stratafs's
