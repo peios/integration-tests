@@ -253,20 +253,13 @@ test("a validation warning does not prevent boot",
 test("a validation warning is logged",
     {
         spec = "peinit *phase2.a-validation-warning-does-not-prevent-boot",
-        -- PEI-815: the sentence this anchor names says a warning is
-        -- "logged and does not prevent boot". The second half holds; the
-        -- first does not, because Phase 2 never runs the validator that
-        -- produces warnings at all. `build_phase2_boot_graph`
-        -- (src/boot/phase2/graph/build.rs) walks the closure and blocks
-        -- what is unstartable; `validate_service_graph`
-        -- (src/service/graph/validate.rs:24), which is what produces
-        -- `AliveReadinessWithHardDependents` at validate.rs:222, has
-        -- exactly one non-test caller — reload-config, at
-        -- src/control/reload_config/transaction.rs:38. The audit encoder
-        -- even takes a `phase` argument
-        -- (src/kmes/audit/graph.rs:12) and the only value ever passed is
-        -- "reload_config".
-        tags = { "known-bug" },
+        -- PEI-1124 (was PEI-815): Phase 2 has run the validator since
+        -- peinit 41c3d2c, but it took the warnings only from the
+        -- validator's success and this boot's graph has findings on
+        -- purpose (the cycle and conflict cases above), so the warning was
+        -- computed and thrown away. Fixed in peinit for 0.0.5-10: the
+        -- failure carries the warnings too, and the boot says them on the
+        -- console as `[ WARN ] peinit warning: …` beside the audit event.
     },
     function(t)
         -- eventd is where a boot-time finding is durable; peinit buffers

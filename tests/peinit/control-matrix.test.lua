@@ -422,15 +422,15 @@ test("start clears Skipped first and then re-evaluates the conditions from scrat
 test("leaving Skipped is reported like any other transition",
     {
         spec = "peinit *dispatch.the-skipped-clear-is-reported-as-a-transition",
-        tags = { "known-bug" },
+        -- PEI-1123: the clear was carried on the dispatch and handed to
+        -- the console collector like the Starting transition, but the
+        -- collector had text only for Failed, Skipped and Abandoned, so
+        -- Skipped -> Inactive fell through silently. Fixed in peinit for
+        -- 0.0.5-10: `peinit: service pt-skipped left skipped:
+        -- ExplicitStart`. (There is no per-transition kmes event for any
+        -- state change; the operation events are the audit record.)
     },
     function(t)
-        -- The clear is carried on the dispatch and handed to the console
-        -- collector exactly as the Starting transition is, but the
-        -- collector produces text only for Failed, Skipped and
-        -- Abandoned — so Skipped -> Inactive falls through silently, and
-        -- no state-change event is emitted for it either. A console
-        -- watching the service sees it jump.
         local vm = boot("skipped-report")
         t:assert_eq(state_of(vm, "pt-skipped"), "skipped", "the service is Skipped")
 
