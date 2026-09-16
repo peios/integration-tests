@@ -26,7 +26,7 @@
 --
 -- Structure mirrors volatile-store.test.lua: a mediated disk, per-case daemons
 -- on distinct hive names SIGKILLed at the end (never a clean SIGTERM an idle
--- loregd hangs on — PEI-1122), and the one known-bug reboot case last.
+-- loregd hangs on — PEI-1122), and the one reboot case last.
 
 local loregd = require("helpers.loregd")
 
@@ -148,7 +148,7 @@ test("the deletions do not route and delete from both schemas", {
     hardstop(proc)
 end)
 
--- ==== known-bug: an unknown child GUID's entry goes to the persistent table
+-- ==== reboot: an unknown child GUID's entry goes to the persistent table
 
 -- §5.1: "RSI_CREATE_ENTRY routes on the volatile flag of the child key the
 -- entry points at ... When that child GUID is present in neither store, the
@@ -157,16 +157,14 @@ end)
 -- its GUID is in neither store — and lands in main.path_entries (handler.go:390,
 -- the create-entry-before-create-key ordering, PEI-515). The entry then
 -- survives loregd going down, while its volatile key does not, and dangles.
--- The correct behaviour: the entry should have followed the volatile child, so
--- after a restart the persistent parent enumerates cleanly (the child simply
--- gone). Instead the dangling persistent entry makes enum fail. The shipped
--- loregd (0.21.8-3) predates the enum-tolerance fix (1b307c0, PEI-233), so
--- RSI_ENUM_CHILDREN returns a storage error (EIO) rather than dropping the
--- dangling entry; it will drop it when the image carries 1b307c0, but the
--- entry itself is PEI-515's to remove. NOT PEI-1122 (that is the SIGTERM hang).
+-- The persistent parent must still enumerate cleanly after a restart (the
+-- child simply gone). Up to 0.21.8 the dangling entry made that enumeration
+-- fail with EIO; loregd 0.21.12 carries the enum-tolerance fix (1b307c0,
+-- PEI-233), which drops it. The dangling entry itself is still PEI-515's to
+-- remove, and the name it blocks is volatile-store.test.lua's known-bug case.
+-- NOT PEI-1122 (that is the SIGTERM hang).
 test("an unknown child GUID's entry goes to the persistent table and dangles after restart", {
     spec = "loregd *route.an-entry-with-an-unknown-child-guid-goes-to-the-persistent-table",
-    tags = { "known-bug" },
 }, function(t)
     local NAME, FILE = "PtRB", "/mnt/pt-hive/rb.hive"
     start(t, NAME, FILE)

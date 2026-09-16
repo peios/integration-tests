@@ -21,9 +21,12 @@
 --     delete-entry and hide-entry. A handle whose GUID was rolled back resolves
 --     to no hive and serves as an unresolvable parent for lookup/create/delete;
 --     for hide, a child whose parent has been dropped supplies one.
---   * RSI_LOOKUP dropping a dangling entry is reachable on the image (lookup
---     tolerates it since PEI-510) — reproduced with a persistent entry that
---     outlives its volatile key across a reboot.
+--   * RSI_LOOKUP and RSI_ENUM_CHILDREN dropping a dangling entry — reproduced
+--     with a persistent entry that outlives its volatile key across a reboot.
+--     Lookup has tolerated it since PEI-510; enumeration since loregd 0.21.12
+--     (1b307c0, PEI-233). The kernel rejects an enumeration whose entries and
+--     metadata blocks disagree, so a clean enumeration also shows the dropped
+--     entry's metadata went with it.
 --
 -- Not guest-observable, cited to Go unit tests:
 --   * The raw per-layer/per-GUID shape of a lookup response — the kernel
@@ -33,11 +36,6 @@
 --   * The same-store and cross-store duplicate-triple rejections (LCS opens an
 --     existing name rather than re-creating it; a guest cannot steer one triple
 --     into both stores).
---   * RSI_ENUM_CHILDREN dropping a dangling child — FIXED IN SOURCE (1b307c0,
---     PEI-233) but NOT in the shipped loregd 0.21.8-3, which fails the whole
---     enumeration with a storage error (EIO). Cited to the PEI-233 Go tests,
---     not tested on the image (a VM test would fail against the shipped binary;
---     the EIO itself is already homed as a known-bug in durability/volatile-store).
 --
 -- Mediated boot so the reboot case can power-cut. Every non-reboot case runs on
 -- the file-scope daemon; the reboot case is LAST and restarts loregd itself.
@@ -320,33 +318,6 @@ test("enum children returns every child, grouped into one block per folded name"
     -- guest-constructable here.)
 end)
 
--- §5: enum "including its treatment of an entry whose key record does not yet
--- exist: the entry is dropped, and a child left holding no entries at all is
--- dropped with it." FIXED IN SOURCE (1b307c0, PEI-233) but NOT in the shipped
--- loregd 0.21.8-3, which predates it and fails RSI_ENUM_CHILDREN on a dangling
--- entry with a storage error (EIO) — a VM test would fail against the image.
--- The EIO on the shipped binary is already homed as a known-bug in
--- volatile-store.test.lua / durability.test.lua; here the FIXED behaviour is
--- cited to its PEI-233 unit test (verified failing pre-1b307c0 per that commit).
-test("enum children drops a child left holding no entries",
-    {
-        spec = "loregd *entry.enum-children-drops-a-child-left-holding-no-entries",
-        skip = true,
-        covered_by = "go:loregd internal/handler::TestEnumChildrenSkipsChildWhoseKeyIsNotYetVisible",
-    }, function() end)
-
--- §5: "The metadata block for a dropped entry is omitted with it — the kernel
--- rejects a GUID-typed entry carrying no metadata, and equally a metadata block
--- no entry references." Same shipping lag as above; cited to the PEI-233 tests,
--- whose assertEnumMetadataCorresponds checks both directions of the entry↔
--- metadata correspondence.
-test("enum children omits the metadata block of a dropped entry",
-    {
-        spec = "loregd *entry.enum-children-omits-the-metadata-block-of-a-dropped-entry",
-        skip = true,
-        covered_by = "go:loregd internal/handler::TestEnumChildrenSkipsChildWhoseKeyIsNotYetVisible, go:loregd internal/handler::TestEnumChildrenDropsOnlyTheDanglingLayerEntry",
-    }, function() end)
-
 -- ============================ reboot case (LAST) =======================
 
 -- §5 (RSI_LOOKUP): "If a path entry names a target_guid for which no key record
@@ -358,15 +329,25 @@ test("enum children omits the metadata block of a dropped entry",
 -- survives while its volatile key does not — a dangling entry. This one case
 -- also proves *entry.create-entry-for-an-unknown-child-guid-lands-in-the-
 -- persistent-store: the entry's survival IS its having landed persistent.
+--
+-- The same dangling entry drives enumeration (§5): "an entry whose key record
+-- does not yet exist: the entry is dropped, and a child left holding no entries
+-- at all is dropped with it", and "The metadata block for a dropped entry is
+-- omitted with it — the kernel rejects a GUID-typed entry carrying no metadata,
+-- and equally a metadata block no entry references." A persistent sibling
+-- makes the drop selective: it must still enumerate beside the dropped child.
 -- Must be last: it power-cuts and resets the VM.
-test("lookup drops an entry whose key record is missing (and the unknown-child entry landed persistent)", {
+test("lookup and enum drop an entry whose key record is missing (and the unknown-child entry landed persistent)", {
     spec = "loregd *entry.lookup-drops-an-entry-whose-key-record-is-missing " ..
-        "*entry.create-entry-for-an-unknown-child-guid-lands-in-the-persistent-store",
+        "*entry.create-entry-for-an-unknown-child-guid-lands-in-the-persistent-store " ..
+        "*entry.enum-children-drops-a-child-left-holding-no-entries " ..
+        "*entry.enum-children-omits-the-metadata-block-of-a-dropped-entry",
 }, function(t)
     local NAME, FILE = "PtDangle", "/mnt/pt-hive/dangle.hive"
     local proc = loregd.start(vm, t, { hives = { NAME .. "=" .. FILE }, wait_for = NAME })
 
     loregd.new_key(vm, [[PtDangle\Parent]]):assert_ok()          -- persistent parent
+    loregd.new_key(vm, [[PtDangle\Parent\Keep]]):assert_ok()     -- persistent sibling
     vm:run("reg new 'PtDangle\\Parent\\VKid' --volatile"):assert_ok() -- volatile child
     t:assert(exists([[PtDangle\Parent\VKid]]), "the volatile child resolves before the reboot")
 
@@ -378,12 +359,9 @@ test("lookup drops an entry whose key record is missing (and the unknown-child e
     loregd.mount(vm, t)
     loregd.start(vm, t, { hives = { NAME .. "=" .. FILE }, wait_for = NAME })
 
-    -- The parent still resolves. Prove this with a pure lookup (open_key), NOT
-    -- reg info: reg info composes query-key-info, which enumerates the parent's
-    -- children, and RSI_ENUM_CHILDREN on a parent holding a dangling entry EIOs
-    -- on the shipped loregd 0.21.8-3 (the PEI-233 lag) — that failure is homed
-    -- elsewhere as a known-bug. RSI_LOOKUP, the operation under test, tolerates
-    -- the dangling entry, so a lookup of the parent succeeds.
+    -- The parent still resolves. Prove this with a pure lookup (open_key), not
+    -- reg info: reg info composes query-key-info, which also enumerates the
+    -- parent's children, and this assertion is about RSI_LOOKUP alone.
     local W2 = vm:spawn_worker() -- the file-scope worker died with vm:reset()
     local op = lcs.open_key(nil, W2, -1, [[PtDangle\Parent]], lcs.KEY_ALL_ACCESS, 0)
     t:assert(op.ret >= 0,
@@ -401,5 +379,19 @@ test("lookup drops an entry whose key record is missing (and the unknown-child e
         .. "survived in the PERSISTENT store, where the create-before-key "
         .. "ordering put it — and returned OK. stdout=" .. info.stdout
         .. " stderr=" .. info.stderr)
+
+    -- Enumerating the parent succeeds, still lists the sibling, and omits the
+    -- child whose only entry dangled. Had the dropped entry's metadata block
+    -- been left behind, the kernel would have rejected the response.
+    local ls = vm:run("reg ls 'PtDangle\\Parent' --keys-only")
+    t:assert_eq(ls.exit_code, 0,
+        "enumerating a parent that holds a dangling entry succeeds (the entry and "
+        .. "its metadata are dropped together): stdout=" .. ls.stdout
+        .. " stderr=" .. ls.stderr)
+    t:assert(ls.stdout:find("Keep/", 1, true),
+        "the persistent sibling still enumerates: " .. ls.stdout)
+    t:assert(not ls.stdout:find("VKid", 1, true),
+        "the child left holding no entries is dropped from the enumeration: "
+        .. ls.stdout)
     -- The daemon started inside this (final) test is reaped when the test ends.
 end)

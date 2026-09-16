@@ -17,14 +17,12 @@
 --     at the end (SIGKILL, not the clean SIGTERM an idle loregd hangs on —
 --     PEI-1122). Non-restart cases come first; the reboot cases come last.
 --
---   * loregd has a known bug (handler.go:378, and the known-bug case at the
---     end of this file): the path entry for a volatile child of a *persistent*
---     parent is written to the persistent table, so after a restart it dangles
---     and enumerating that parent returns EIO. Readiness polls `reg ls <hive>`
---     (the hive root), so the volatile keys the reboot cases create are nested
---     under a persistent holder to keep the root enumerable, and their
---     disappearance is checked with a lookup (`reg info`), which handles the
---     dangling entry cleanly.
+--   * loregd has a known bug (PEI-515, the cases at the end of this file):
+--     the path entry for a volatile child of a *persistent* parent is written
+--     to the persistent table, so after a restart it dangles. The volatile
+--     keys the reboot cases create are nested under a persistent holder, and
+--     their disappearance is checked with a lookup (`reg info`), which drops
+--     the dangling entry.
 
 local loregd = require("helpers.loregd")
 local lcs = require("helpers.lcs")
@@ -49,8 +47,8 @@ local function hardstop(proc)
     proc:wait("5s")
 end
 
---- Does a key resolve? Uses lookup (`reg info`), which returns not-found for a
---- dangling entry rather than the EIO that enumeration returns.
+--- Does a key resolve? Uses lookup (`reg info`), which answers not-found for
+--- a dangling entry.
 local function exists(key)
     return vm:run("reg info '" .. key .. "'").exit_code == 0
 end
@@ -281,27 +279,23 @@ test("a volatile key's whole subtree is volatile",
             "and so is its child — the whole subtree was volatile and died with loregd")
     end)
 
--- ---- adversarial: a real bug ----------------------------------------
+-- ---- adversarial: a volatile child of a persistent parent -------------
 --
 -- §3.3 promises "a persistent parent may legitimately have volatile children"
--- and that a volatile key simply "ceases to exist when loregd exits". Both are
--- violated: the path entry for a volatile child of a persistent parent is
--- written to the *persistent* path_entries table (handler.go:378 —
--- RSI_CREATE_ENTRY arrives before RSI_CREATE_KEY, so the child key's volatile
--- flag is not yet known and the entry defaults to persistent), and it is
--- committed to the file. After the reboot it outlives its key, so enumerating
--- the parent fails with EIO — corrupting a persistent key that did nothing
--- wrong. This is NOT PEI-1122 (that is the SIGTERM hang).
+-- and that a volatile key simply "ceases to exist when loregd exits". The
+-- path entry for such a child is written to the *persistent* path_entries
+-- table (handler.go:378 — RSI_CREATE_ENTRY arrives before RSI_CREATE_KEY, so
+-- the child key's volatile flag is not yet known and the entry defaults to
+-- persistent; PEI-515), and it is committed to the file. After the reboot it
+-- outlives its key and dangles.
+--
+-- Up to 0.21.8 that dangling entry made enumerating the parent fail with EIO.
+-- loregd 0.21.12 carries the enum-tolerance fix (1b307c0, PEI-233), which
+-- drops it, so the first case guards that. The entry still occupies the
+-- child's name, which the second case shows. Neither is PEI-1122 (that is the
+-- SIGTERM hang).
 test("a persistent parent stays enumerable after a volatile child vanishes", {
     spec = "loregd *volatile.every-volatile-key-ceases-to-exist-when-loregd-exits",
-    tags = { "known-bug" },
-    -- The volatile child's path entry is written to main.path_entries
-    -- (handler.go:378, the create-entry-before-create-key ordering — PEI-515),
-    -- survives the reboot its key does not, and dangles. The shipped loregd
-    -- (0.21.8-3) predates the enum-tolerance fix (1b307c0, PEI-233), so
-    -- RSI_ENUM_CHILDREN on the parent returns a storage error (EIO) instead of
-    -- dropping the dangling entry. Drops when the image carries 1b307c0; the
-    -- dangling entry itself is PEI-515's to remove. NOT PEI-1122.
 }, function(t)
     local NAME, FILE = "PtBug", "/mnt/pt-hive/bug.hive"
     start(t, NAME, FILE)
@@ -323,6 +317,40 @@ test("a persistent parent stays enumerable after a volatile child vanishes", {
         "enumerating a persistent parent whose only child was a now-vanished " ..
         "volatile key must succeed; instead the child's persistent path entry " ..
         "dangles and enum returns EIO: " .. ls.stderr)
+end)
+
+-- §3.3: "When loregd exits ... every volatile key in every hive ceases to
+-- exist." A key that has ceased to exist leaves its name free, so after the
+-- restart the same name must be creatable again under the same parent.
+test("a vanished volatile child's name can be created again", {
+    spec = "loregd *volatile.every-volatile-key-ceases-to-exist-when-loregd-exits",
+    tags = { "known-bug" },
+    -- PEI-515. The dangling persistent entry still holds the (parent, name,
+    -- layer) triple, so RSI_CREATE_ENTRY answers RSI_ALREADY_EXISTS, and the
+    -- lookup that follows drops that same entry as dangling. The create fails
+    -- "not found", and the name stays unusable under that parent for good.
+    -- 1b307c0 does not help here; this drops when the entry follows the
+    -- volatile child instead of landing in the persistent table.
+}, function(t)
+    local NAME, FILE = "PtName", "/mnt/pt-hive/name.hive"
+    start(t, NAME, FILE)
+
+    loregd.new_key(vm, [[PtName\Parent]]):assert_ok()
+    vm:run("reg new 'PtName\\Parent\\VKid' --volatile"):assert_ok()
+
+    disk:power_cut()
+    vm:reset()
+    loregd.mount(vm, t)
+    start(t, NAME, FILE)
+
+    t:assert(not exists([[PtName\Parent\VKid]]),
+        "precondition: the volatile child ceased to exist when loregd went down")
+    local again = vm:run("reg new 'PtName\\Parent\\VKid'")
+    t:assert_eq(again.exit_code, 0,
+        "re-creating the vanished child's name must succeed; stdout: " ..
+        again.stdout .. " stderr: " .. again.stderr)
+    t:assert(exists([[PtName\Parent\VKid]]),
+        "and the re-created key resolves")
 end)
 
 -- ---- unit-cited ------------------------------------------------------
