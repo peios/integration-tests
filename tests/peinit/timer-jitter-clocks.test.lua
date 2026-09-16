@@ -202,9 +202,36 @@ end
 --- "one firing, not three" is proved by the settle, not by the wait.
 --- What this does not do is call a slow firing a missing one, which is
 --- the only way these ever failed under load.
+--- A failed wait for a firing, with the guest's state attached.
+---
+--- PEI-1127: in four of five full runs on 2026-09-15 a wait in the clock
+--- half failed with the VM alive and nothing else to go on, and a day
+--- later nothing reproduced it in nine tries, loaded or not. Whatever it
+--- is, the next occurrence has to carry its own evidence: the two
+--- counters, the guest's clocks, what PID 1 is blocked in, the service's
+--- own view of itself, and the console.
+local function diagnose(err)
+    local out = { tostring(err), "" }
+    local function run(cmd)
+        local ok, r = pcall(function() return vm:run(cmd, { timeout = 30 }) end)
+        out[#out + 1] = "$ " .. cmd
+        out[#out + 1] = ok and (r.stdout .. tostring(r.stderr or "")) or ("ERROR " .. tostring(r))
+    end
+    run("date +%s; cat /proc/uptime; cat /proc/loadavg")
+    run("cut -d' ' -f3,14,15 /proc/1/stat; cat /proc/1/wchan; echo")
+    run("cat /run/pt-hc.log")
+    run("cat /run/pt-ticks")
+    run("svctl --json status pt-j-health pt-j-daily pt-j-window pt-j-stamp")
+    local ok, log = pcall(function() return vm:console():read_log() end)
+    out[#out + 1] = "== console tail =="
+    out[#out + 1] = ok and log:sub(-4000) or ("ERROR " .. tostring(log))
+    error(table.concat(out, "\n"), 0)
+end
+
 local function expect_firings(t, name, before, expected, why)
-    wait_until(function() return count(name) >= before + expected end,
+    local ok, err = pcall(wait_until, function() return count(name) >= before + expected end,
         { timeout = 90, interval = 0.5, desc = why })
+    if not ok then diagnose(err) end
     vm:run("sleep 4")
     t:assert_eq(count(name), before + expected, why)
 end
@@ -401,9 +428,10 @@ test("an interval deadline is measured on the monotonic clock and a wall-clock j
 
         -- And the interval still works afterwards, so what happened is
         -- that the deadline was left alone rather than lost.
-        wait_until(function() return checks() > after end,
+        local ok, err = pcall(wait_until, function() return checks() > after end,
             { timeout = 60, interval = 0.5,
               desc = "the interval to come round again" })
+        if not ok then diagnose(err) end
     end)
 
 test("a calendar timer stays anchored to its wall-clock time across a clock correction",
