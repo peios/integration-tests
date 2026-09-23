@@ -10,8 +10,9 @@
 -- terminal steps ran.
 --
 -- The subjects are two staged services differing only in
--- `ErrorControl`, and the image's own login-console, which is the one
--- service on the machine with a `TTYPath`.
+-- `ErrorControl`, a third Critical one narrowed by `RequiredPrivileges`,
+-- and the image's own login-console, which is the one service on the
+-- machine with a `TTYPath`.
 
 local peinit = require("helpers.peinit")
 peinit.claim(1)
@@ -34,6 +35,19 @@ local SERVICES = {
         { name = "Arguments", type = "multi", data = { "3600" } },
         { name = "Triggers", type = "multi", data = { "boot" } },
         { name = "Identity", type = "sz", data = "SYSTEM" },
+        { name = "Readiness", type = "dword", data = 1 },
+        { name = "ErrorControl", type = "dword", data = 1 },
+    } },
+    -- Critical again, but narrowed to a token that cannot lower
+    -- oom_score_adj itself: no SeIncreaseQuotaPrivilege. It starts only
+    -- because peinit sets the score before installing the token
+    -- (PEI-1150).
+    { path = [[Machine\System\Services\pt-critical-narrow]], values = {
+        { name = "ImagePath", type = "sz", data = "/bin/sleep" },
+        { name = "Arguments", type = "multi", data = { "3600" } },
+        { name = "Triggers", type = "multi", data = { "boot" } },
+        { name = "Identity", type = "sz", data = "SYSTEM" },
+        { name = "RequiredPrivileges", type = "multi", data = { "SeChangeNotifyPrivilege" } },
         { name = "Readiness", type = "dword", data = 1 },
         { name = "ErrorControl", type = "dword", data = 1 },
     } },
@@ -164,6 +178,14 @@ test("oom_score_adj is -1000 for a Critical service and 0 for everything else",
         local normal = vm:read_file("/proc/" .. main_pid("pt-child") .. "/oom_score_adj")
         t:assert_eq(normal:gsub("%s+$", ""), "0",
             "and an ordinary one is left where the kernel put it")
+    end)
+
+test("a Critical service whose token lacks SeIncreaseQuotaPrivilege still starts OOM-immune",
+    { spec = "peinit *child.resources-are-set-before-the-token-is-installed" },
+    function(t)
+        local narrow = vm:read_file("/proc/" .. main_pid("pt-critical-narrow") .. "/oom_score_adj")
+        t:assert_eq(narrow:gsub("%s+$", ""), "-1000",
+            "the score was peinit's act under its own credentials, not the service token's")
     end)
 
 test("a service with a TTYPath owns its terminal on all three streams; one without has no terminal at all",
