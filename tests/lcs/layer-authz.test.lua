@@ -78,6 +78,12 @@ local function unprivileged(t, fn, spec)
     token.as_principal(t, vm, spec, fn)
 end
 
+--- The groups of a principal that has not authenticated: in Everyone
+--- and in nothing else. The test key grants Everyone every right, so
+--- what refuses such a principal a write is the layer and not the key.
+local ENABLED = token.GROUP.MANDATORY | token.GROUP.ENABLED_BY_DEFAULT | token.GROUP.ENABLED
+local NOT_AUTHENTICATED = { groups = { { sid = token.SID.EVERYONE, attributes = ENABLED } } }
+
 test("before Layers\\base exists, base-layer writes fall back to a compiled-in descriptor",
     { spec = "PKM *layer.authz.base-falls-back-to-a-compiled-in-descriptor" },
     function(t)
@@ -90,28 +96,40 @@ test("before Layers\\base exists, base-layer writes fall back to a compiled-in d
         t:assert_eq(s.ret, 0,
             "the compiled-in default grants SYSTEM KEY_ALL_ACCESS: " .. sys.errname(s.errno or 0))
         sys.close(w, fd)
-        -- An ordinary user is not SYSTEM and not an Administrator, and
-        -- its fd mask on the target key is complete, so the only thing
-        -- that can refuse it is the base layer's descriptor.
+        -- An ordinary user is not SYSTEM and not an Administrator, but
+        -- has authenticated, and that is all the base layer asks: what
+        -- it may write is the target key's descriptor's to say.
+        unprivileged(t, function(w2)
+            local kfd = open(t, TEST_PATH, lcs.KEY_ALL_ACCESS, w2)
+            local s = lcs.set_value(src, w2, kfd, "Authenticated", lcs.TYPE.DWORD, lcs.dword(1))
+            t:assert_eq(s.ret, 0,
+                "and grants KEY_SET_VALUE to Authenticated Users: " .. sys.errname(s.errno or 0))
+            sys.close(w2, kfd)
+        end)
+        -- One that has not authenticated has a complete fd mask on the
+        -- target key too, so the only thing that can refuse it is the
+        -- base layer's descriptor.
         unprivileged(t, function(w2)
             local kfd = open(t, TEST_PATH, lcs.KEY_ALL_ACCESS, w2)
             local d = lcs.set_value(src, w2, kfd, "Denied", lcs.TYPE.DWORD, lcs.dword(1))
             t:assert_eq(d.errno, sys.E.ACCES,
-                "and grants nothing to anyone else, even with a full mask on the target key")
+                "and nothing to anyone else, even with a full mask on the target key")
             sys.close(w2, kfd)
-        end)
+        end, { groups = NOT_AUTHENTICATED.groups })
     end)
 
 test("the compiled-in fallback is replaced the moment the metadata key is created",
     { spec = "PKM *layer.authz.base-fallback-replaced-at-seed-restore" },
     function(t)
-        -- Seed restore creates `Layers\base` by ordinary key creation;
-        -- a kernel-only guest has no seed restore, so this creates it
-        -- the same way a restore would.
+        -- `Layers\base` is made by ordinary key creation, by whoever
+        -- has a reason to say who may write the base layer.
         local created = lcs.create_key(src, w, { path = BASE_KEY_PATH })
         t:assert(created.ret >= 0, "Layers\\base is created: " .. sys.errname(created.errno or 0))
         t:assert_eq(created.disposition, lcs.CREATED_NEW, "for the first time")
         sys.close(w, created.ret)
+        -- The key's descriptor grants Everyone KEY_SET_VALUE, which the
+        -- compiled-in default did not: the principal it refused in the
+        -- case before is now let in.
         unprivileged(t, function(w2)
             local kfd = open(t, TEST_PATH, lcs.KEY_ALL_ACCESS, w2)
             local s = lcs.set_value(src, w2, kfd, "NowAllowed", lcs.TYPE.DWORD, lcs.dword(1))
@@ -119,7 +137,7 @@ test("the compiled-in fallback is replaced the moment the metadata key is create
                 "the persisted descriptor has replaced the compiled-in default: " ..
                 sys.errname(s.errno or 0))
             sys.close(w2, kfd)
-        end)
+        end, { groups = NOT_AUTHENTICATED.groups })
     end)
 
 test("the base layer's descriptor is the one inheritance computes from the Machine hive root",
