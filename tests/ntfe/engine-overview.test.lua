@@ -197,21 +197,21 @@ test("nothing in NTFE fails silently: a refused policy is confessed in the statu
 
 -- The division of the source (§6.1, "Two halves") is not behaviour.
 for _, c in ipairs({
-    { "ntfe-engine.c-glue-owns-kernel-facing-work",
+    { "PKM *ntfe-engine.c-glue-owns-kernel-facing-work",
       "the C half owns everything that touches the kernel" },
-    { "ntfe-engine.core-owns-policy-meaning",
+    { "PKM *ntfe-engine.core-owns-policy-meaning",
       "pnp-core owns everything the policy means" },
-    { "ntfe-engine.core-no-std-fallible-alloc-no-io",
+    { "PKM *ntfe-engine.core-no-std-fallible-alloc-no-io",
       "pnp-core is no_std, allocates fallibly and has no I/O" },
-    { "ntfe-engine.core-compiles-for-cargo-and-kernel",
+    { "PKM *ntfe-engine.core-compiles-for-cargo-and-kernel",
       "the same core source compiles under cargo and into the kernel" },
-    { "ntfe-engine.no-rule-semantics-in-c",
+    { "PKM *ntfe-engine.no-rule-semantics-in-c",
       "nothing about a rule's semantics exists in C" },
-    { "ntfe-engine.bridge-is-only-meeting-point",
+    { "PKM *ntfe-engine.bridge-is-only-meeting-point",
       "the bridge is the only place the two halves meet" },
 }) do
     test(c[2], {
-        spec = "PKM *" .. c[1],
+        spec = c[1],
         covered_by = "build:pkm/kernel/stage-rust-core.sh",
         skip = "a statement about how the source tree is divided, which a " ..
                "running kernel cannot show; the staging script and the " ..

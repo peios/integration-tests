@@ -274,7 +274,7 @@ test("a DROP or REJECT on a new flow kills the entry, so a retry is a fresh flow
     end)
 
 test("a flow with no extension has nowhere to hold a sentence and is evaluated on every packet",
-    { spec = "PKM *ntfe-flow.no-extension-evaluated-per-packet" },
+    { spec = "PKM *ntfe-flow.no-extension-evaluated-per-packet PKM *ntfe-stream.confess-flow-uncached" },
     function(t)
         flow_policy(PASS_ALL)
         -- ctnetlink creates its entries without init_conntrack(), the only

@@ -3,7 +3,7 @@
 -- not describe, a tag or a count it could not land, a packet a sentence
 -- answered, a refusal it waved through, a generation it refused, an
 -- event it could not keep. Each is provoked here and found where the
--- list says; the three with no guest route are stubs naming the unit
+-- list says; the two with no guest route are stubs naming the unit
 -- test they need.
 --
 -- The last test reads the status the earlier ones left behind, so this
@@ -141,17 +141,10 @@ test("a count it could not land is counted in count_key_absent or count_refused"
         E:replace(BASE)
     end)
 
-test("a sentence it could not keep is counted in flow_uncached",
-    { spec = "PKM *ntfe-stream.confess-flow-uncached",
-      covered_by = "kunit:TODO",
-      skip = "a flow lacks the extension that holds its sentence only when " ..
-             "nf_ct_ext_add's GFP_ATOMIC allocation fails at conntrack " ..
-             "creation (tags.c peios_ntfe_ct_ext_add); there is no fault " ..
-             "injection, and the one creation path that skips the extension, " ..
-             "ctnetlink, is a module the kernel-only profile does not ship. " ..
-             "Missing: a kunit case judging an extension-less flow twice and " ..
-             "asserting two evaluations and flow_uncached" },
-    function(t) end)
+-- "A sentence it could not keep → flow_uncached" is confessed in
+-- flow-sentence.test.lua, which has the means to make a flow with no
+-- extension (a ctnetlink entry) and cites this list's anchor beside its
+-- own.
 
 test("an endpoint it could not attribute is counted in identity_unresolved and flagged on its event",
     { spec = "PKM *ntfe-stream.confess-identity-unresolved",
