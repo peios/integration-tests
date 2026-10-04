@@ -22,10 +22,6 @@ peinit.claim(1)
 
 local vm = eventd.boot({ name = "ev-lostdeps" })
 
-local function now_ns()
-    return tonumber(vm:run("date +%s%N").stdout:match("%d+"))
-end
-
 local function visible(etype)
     local r = eventd.query(vm, "EVENTS " .. etype .. " SINCE 30m ago")
     return r.ok and #r.rows or 0, r
@@ -55,7 +51,7 @@ local function second_stream_refused()
 end
 
 test("before the outage: a configured limit in force, one descriptor cached and one not", {}, function(t)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "MaxStreamingQueries", "dword:1"):assert_ok()
     t:assert(wait_change("MaxStreamingQueries", "1", since), "the limit applied")
     t:assert(second_stream_refused(), "and holds")
@@ -75,8 +71,8 @@ test("without the registry eventd keeps its last configuration, even when told t
     -- SIGHUP asks for a re-read now, during the outage; that the attempt
     -- was made is read back from stderr once the registry has returned
     -- (peinit's delivery of the line waits on it), in a test further down.
-    state.hup = now_ns()
-    vm:run("kill -HUP " .. state.pid):assert_ok()
+    state.hup = eventd.guest_ns(vm)
+    eventd.signal(vm, state.pid, "HUP")
     vm:run("sleep 2")
     t:assert_eq(eventd.pid(vm), state.pid, "SIGHUP did not end it")
     t:assert(second_stream_refused(), "the configured limit, not the default, is still in force")
@@ -117,7 +113,7 @@ end)
 test("when the registry returns eventd reads its configuration again", {
     spec = "eventd *lostdeps.when-the-registry-returns-eventd-re-reads-its-configuration",
 }, function(t)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.unset(vm, "MaxStreamingQueries"):assert_ok()
     local _, applied = eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 30m ago", function(rows)
         for _, r in ipairs(rows) do

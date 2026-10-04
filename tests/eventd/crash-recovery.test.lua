@@ -20,57 +20,16 @@ local token = require("helpers.token")
 local client = require("helpers.peinit_client")
 peinit.claim(1)
 
-local SERVICE = [[Machine\System\Services\eventd]]
-
 local vm = eventd.boot({
     name = "ev-crash",
-    files = peinit.seed("zz-pt-eventd-svc", {
-        { path = [[Machine\System]] },
-        { path = [[Machine\System\Services]] },
-        { path = SERVICE, values = {
-            { name = "ErrorControl", type = "dword", data = 0 },
-            { name = "RestartPolicy", type = "dword", data = 0 },
-        } },
-    }),
+    noncritical = true,
 })
-
-local function now_ns()
-    return tonumber(vm:run("date +%s%N").stdout:match("%d+"))
-end
-
-local function gone(pid)
-    return vm:run("test -d /proc/" .. pid).exit_code ~= 0
-end
-
---- kill -9 eventd and wait until it is gone. Returns the old pid.
-local function crash()
-    local pid = eventd.pid(vm)
-    vm:run("kill -9 " .. pid):assert_ok()
-    wait_until(function() return gone(pid) end, { timeout = 10, interval = 0.1, desc = "eventd to die" })
-    return pid
-end
-
-local function start()
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
-end
 
 local function latest(event_type, since)
     local out
     for _, r in ipairs(eventd.rows(vm, "EVENTS " .. event_type .. " SINCE 30m ago")) do
         if r.timestamp >= since and (not out or r.timestamp > out.timestamp) then out = r end
     end
-    return out
-end
-
-local function stderr_lines(needle, since)
-    local out = {}
-    pcall(eventd.wait_rows, vm, 'LOGS FROM eventd CONTAINING "' .. needle .. '" SINCE 30m ago',
-        function(rows)
-            out = {}
-            for _, r in ipairs(rows) do if r.timestamp >= since then out[#out + 1] = r end end
-            return #out > 0
-        end, { timeout = 20, desc = "stderr: " .. needle })
     return out
 end
 
@@ -85,10 +44,10 @@ end
 test("events emitted while eventd is down wait in the ring and are ingested at the next start", {
     spec = "eventd *crash.events-emitted-while-eventd-is-down-accumulate-in-the-ring-buffers",
 }, function(t)
-    crash()
+    eventd.crash(vm)
     local tag = eventd.marker("down")
     for i = 1, 25 do eventd.emit(vm, "pt.down", { tag = tag, i = i }) end
-    start()
+    eventd.start(vm)
     local rows = eventd.wait_rows(vm, 'EVENTS pt.down WHERE tag == "' .. tag .. '" SINCE 10m ago',
         function(r) return #r >= 25 end)
     t:assert_eq(#rows, 25, "all twenty-five were waiting and were read")
@@ -104,11 +63,11 @@ test("committed rows survive a crash and the databases come back consistent", {
     -- Events flowing as the kill lands, so a batch may be in flight,
     -- then the files checked as the crash left them.
     for i = 1, 30 do eventd.emit(vm, "pt.inflight", { i = i }) end
-    crash()
+    eventd.crash(vm)
     for _, db in ipairs({ eventd.shards(vm)[1], eventd.DB.logs, eventd.DB.metrics, eventd.DB.meta }) do
         t:assert_eq(eventd.sql(vm, db, "PRAGMA integrity_check")[1][1], "ok", db .. " is consistent")
     end
-    start()
+    eventd.start(vm)
     local rows = eventd.rows(vm, 'EVENTS pt.commit WHERE tag == "' .. tag .. '" SINCE 10m ago')
     t:assert_eq(#rows, 10, "every committed event is still there, once")
 end)
@@ -118,13 +77,13 @@ test("a restart re-ingests uncovered survivors and records a gap only for what n
 }, function(t)
     -- Part 1: survivors. Frozen, eventd reads none of these; killed, it
     -- never commits them. They are in the ring and in no receipt.
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     local pid = eventd.pid(vm)
-    vm:run("kill -STOP " .. pid):assert_ok()
+    eventd.freeze(vm, pid)
     local tag = eventd.marker("surv")
     for i = 1, 15 do eventd.emit(vm, "pt.surv", { tag = tag, i = i }) end
-    crash()
-    start()
+    eventd.crash(vm)
+    eventd.start(vm)
     local rows = eventd.wait_rows(vm, 'EVENTS pt.surv WHERE tag == "' .. tag .. '" SINCE 10m ago',
         function(r) return #r >= 15 end)
     t:assert_eq(#rows, 15, "each uncovered survivor was ingested once")
@@ -132,12 +91,12 @@ test("a restart re-ingests uncovered survivors and records a gap only for what n
 
     -- Part 2: a sequence in neither. While eventd is down, overrun the
     -- 4 MiB ring with ~60 KiB events, so its oldest entries are gone.
-    since = now_ns()
-    crash()
+    since = eventd.guest_ns(vm)
+    eventd.crash(vm)
     local big = eventd.bin(string.rep("z", 60000))
     local otag = eventd.marker("over")
     for i = 1, 120 do eventd.emit(vm, "pt.over", { tag = otag, i = i, b = big }) end
-    start()
+    eventd.start(vm)
     local gaps = eventd.wait_rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 10m ago", function(r)
         for _, g in ipairs(r) do if g.timestamp >= since then return true end end
         return false
@@ -159,12 +118,12 @@ test("logs and metrics waiting in the receive queues are lost in a crash", {
     spec = "eventd *crash.socket-buffered-logs-and-metrics-are-lost-in-a-crash",
 }, function(t)
     local pid = eventd.pid(vm)
-    vm:run("kill -STOP " .. pid):assert_ok()
+    eventd.freeze(vm, pid)
     local tag = eventd.marker("sock")
     for i = 1, 5 do eventd.send_log(vm, { origin = tag, is_error = false, message = "q" .. i }) end
     for i = 1, 5 do eventd.send_metric(vm, { name = tag, type = "gauge", value = i }) end
-    crash()
-    start()
+    eventd.crash(vm)
+    eventd.start(vm)
     vm:run("sleep 2")
     t:assert_eq(#eventd.rows(vm, "LOGS FROM " .. tag .. " SINCE 10m ago"), 0, "the queued logs are gone")
     t:assert_eq(#eventd.rows(vm, "METRIC " .. tag .. " SINCE 10m ago"), 0, "and the queued metrics")
@@ -174,16 +133,16 @@ test("after a crash peinit restarts eventd and it carries on with nothing done b
     spec = "eventd *crash.no-manual-recovery-is-needed-or-offered"
         .. " eventd *crash.a-restart-is-recognised-from-committed-rows-or-receipts-not-an-advance-flag",
 }, function(t)
-    vm:run("reg set '" .. SERVICE .. "' RestartPolicy dword:1"):assert_ok()
+    vm:run("reg set '" .. eventd.SERVICE .. "' RestartPolicy dword:1"):assert_ok()
     vm:run("svctl reload-config"):assert_ok()
-    local since = now_ns()
-    local old = crash()
+    local since = eventd.guest_ns(vm)
+    local old = eventd.crash(vm)
     local new
     local ok = pcall(wait_until, function()
         new = eventd.pid(vm)
         return new ~= nil and new ~= old
     end, { timeout = 30, interval = 0.25, desc = "peinit to restart eventd" })
-    vm:run("reg set '" .. SERVICE .. "' RestartPolicy dword:0"):assert_ok()
+    vm:run("reg set '" .. eventd.SERVICE .. "' RestartPolicy dword:0"):assert_ok()
     vm:run("svctl reload-config")
     t:assert(ok, "a new eventd is running without anyone starting it")
     eventd.ready(vm)
@@ -196,12 +155,12 @@ test("after a crash peinit restarts eventd and it carries on with nothing done b
 end)
 
 local function signal_stops_gracefully(t, sig)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     local pid = eventd.pid(vm)
-    vm:run("kill -" .. sig .. " " .. pid):assert_ok()
-    wait_until(function() return gone(pid) end, { timeout = 30, interval = 0.1, desc = "eventd to stop" })
+    eventd.signal(vm, pid, sig)
+    assert(eventd.wait_gone(vm, pid, 30), "eventd to stop")
     local status = eventd.status(vm)
-    start()
+    eventd.start(vm)
     t:assert_eq(status.cause, "clean_exit", "SIG" .. sig .. ": eventd exited cleanly: " .. json.encode(status))
     t:assert(latest(eventd.T.shutdown, since), "SIG" .. sig .. ": having written its shutdown record")
 end
@@ -231,10 +190,7 @@ test("SIGQUIT writes a diagnostic dump to stderr, taken before the shutdown star
     -- when the socket closes (seen under host load; reported). So the
     -- whole procedure is tried up to three times until one dump arrives
     -- complete, and every try is a full, graceful SIGQUIT shutdown.
-    local attempts, partial = 0, {}
-    local status, since, lines
-    repeat
-        attempts = attempts + 1
+    local d = eventd.quit_dump(vm, { attempts = 3, prepare = function()
         -- Material for the dump's counters, which are per process and so
         -- are made again each try: a log record whose origin is outside
         -- the grammar, a metric datagram with no identity, one whose
@@ -258,37 +214,13 @@ test("SIGQUIT writes a diagnostic dump to stderr, taken before the shutdown star
         local stream = vm:run_async("/usr/bin/evctl",
             { args = { "--format", "jsonl", "EVENTS pt.never.emitted STREAM" } })
         vm:run("sleep 1")
-        since = now_ns()
-        local pid = eventd.pid(vm)
-        vm:run("kill -QUIT " .. pid):assert_ok()
-        wait_until(function() return gone(pid) end, { timeout = 30, interval = 0.1, desc = "eventd to stop" })
-        pcall(function() stream:wait("5s") end)
-        status = eventd.status(vm)
-        start()
-        t:assert_eq(status.cause, "clean_exit", "the shutdown after the dump was graceful")
-        t:assert(latest(eventd.T.shutdown, since), "and wrote its shutdown record")
-        local header = stderr_lines("eventd diagnostic dump", since)
-        t:assert(#header == 1, "one dump was written to stderr")
-        local job = header[1] and header[1].job_id
-        -- Read until its last line (last_write_errors) has arrived.
-        lines = {}
-        local complete = pcall(wait_until, function()
-            lines = {}
-            for _, r in ipairs(eventd.rows(vm, "LOGS FROM eventd SINCE 10m ago TAKE 1000")) do
-                if r.job_id == job and r.timestamp >= since then
-                    local label, rest = r.message:match("^%s+([%w_%[%]]+):%s*(.*)$")
-                    if label then lines[label] = rest end
-                end
-            end
-            return lines.last_write_errors ~= nil
-        end, { timeout = 30, interval = 0.5, desc = "the whole dump to reach the log store" })
-        if complete then break end
-        local got = {}
-        for k in pairs(lines) do got[#got + 1] = k end
-        partial[#partial + 1] = "try " .. attempts .. " got: " .. table.concat(got, ",")
-    until attempts == 3
-    t:assert(lines.last_write_errors, "a whole dump reached the log store: " .. table.concat(partial, "; "))
-    for k, v in pairs(lines) do dump[k] = v end
+        return function() pcall(function() stream:wait("5s") end) end
+    end })
+    t:assert_eq(d.status.cause, "clean_exit", "the shutdown after the dump was graceful")
+    t:assert(latest(eventd.T.shutdown, d.since), "and wrote its shutdown record")
+    t:assert(d.headers == 1, "one dump was written to stderr")
+    t:assert(d.lines.last_write_errors, "a whole dump reached the log store: " .. table.concat(d.partial, "; "))
+    for k, v in pairs(d.lines) do dump[k] = v end
     dump.captured = true
     t:assert(dump.queries and dump.queries:find("streaming=1", 1, true),
         "the dump saw the stream still open — it was taken before step 1: " .. tostring(dump.queries))
@@ -298,7 +230,7 @@ test("the dump names the boot ID", {
     spec = "eventd *crash.the-dump-includes-the-current-boot-id",
 }, function(t)
     need_dump(t)
-    local id = vm:read_file("/proc/sys/kernel/random/boot_id"):match("[%x%-]+")
+    local id = eventd.boot_id(vm)
     t:assert_eq(dump.boot_id, id, "boot_id")
 end)
 
@@ -385,17 +317,15 @@ test("SIGPIPE is ignored, and every other signal keeps its default action", {
     -- SIGUSR1 and SIGPIPE both terminate a process by default; eventd
     -- ignores SIGPIPE and leaves SIGUSR1 alone.
     local pid = eventd.pid(vm)
-    vm:run("kill -PIPE " .. pid):assert_ok()
-    local piped = pcall(wait_until, function() return gone(pid) end,
-        { timeout = 5, interval = 0.1, desc = "SIGPIPE to end eventd" })
-    if piped then start() end
+    eventd.signal(vm, pid, "PIPE")
+    local piped = eventd.wait_gone(vm, pid, 5)
+    if piped then eventd.start(vm) end
     t:assert(not piped, "SIGPIPE did not end eventd: it is ignored")
     t:assert_eq(eventd.pid(vm), pid, "the same process is still running")
 
     pid = eventd.pid(vm)
-    vm:run("kill -USR1 " .. pid):assert_ok()
-    local died = pcall(wait_until, function() return gone(pid) end,
-        { timeout = 5, interval = 0.1, desc = "SIGUSR1 to end eventd" })
-    if died then start() end
+    eventd.signal(vm, pid, "USR1")
+    local died = eventd.wait_gone(vm, pid, 5)
+    if died then eventd.start(vm) end
     t:assert(died, "SIGUSR1 ended eventd, as its default action does")
 end)

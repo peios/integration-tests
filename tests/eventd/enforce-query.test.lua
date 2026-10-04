@@ -30,27 +30,12 @@ local EVERYONE = token.SID.EVERYONE
 local NOBODY = token.SID.TEST_GROUP_2
 local READ, PUBLISH = 0x1, 0x8
 
-local function hex(s) return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)) end
-local function unhex(h) return (h:gsub("%s", ""):gsub("..", function(x) return string.char(tonumber(x, 16)) end)) end
-
-local guids = {}
---- uuid_v5(EVENTD_FIELD_NAMESPACE, name), PCDS byte order, from the host.
-local function field_guid(name)
-    if not guids[name] then
-        local p = assert(io.popen("python3 -c 'import uuid; print(uuid.uuid5(uuid.UUID("
-            .. "\"e7d3a1b0-5c2f-4e8a-9b1d-0a6f3c8e2d4b\"), \"" .. name .. "\").bytes_le.hex())'"))
-        guids[name] = unhex(p:read("l"))
-        p:close()
-    end
-    return guids[name]
-end
-
 local function allow(mask) return access.ace(access.ACE.ALLOWED, mask, SY) end
 local function deny_field(f)
-    return access.ace(access.ACE.DENIED_OBJECT, READ, SY, 0, { object_type = field_guid(f) })
+    return access.ace(access.ACE.DENIED_OBJECT, READ, SY, 0, { object_type = eventd.field_guid(f) })
 end
 local function allow_field(f)
-    return access.ace(access.ACE.ALLOWED_OBJECT, READ, SY, 0, { object_type = field_guid(f) })
+    return access.ace(access.ACE.ALLOWED_OBJECT, READ, SY, 0, { object_type = eventd.field_guid(f) })
 end
 
 --- A readable record without `fields`.
@@ -61,15 +46,6 @@ local function hiding(fields, mask)
     return access.simple(aces)
 end
 local DENY_ALL = access.simple({ access.ace(access.ACE.ALLOWED, READ | PUBLISH, NOBODY) })
-
-local function put(ns, pattern, sd, opts)
-    local key = eventd.SECURITY .. "\\" .. ns .. "\\" .. pattern
-    vm:run("reg set -p '" .. key .. "' @ hex:" .. hex(sd)):assert_ok()
-end
-
-local function drop(ns, pattern)
-    vm:run("reg del -r -y '" .. eventd.SECURITY .. "\\" .. ns .. "\\" .. pattern .. "'")
-end
 
 local function emit(ty, payload)
     local r = eventd.emit(vm, ty, payload)
@@ -116,7 +92,7 @@ local function two_types(stem)
     emit(base .. ".a", { secret = "sa", num = 1 })
     emit(base .. ".b", { secret = "sb", num = 2 })
     settle(since("EVENTS " .. base .. ".*"), count(2))
-    put("Events", base .. ".a", hiding({ "secret", "num" }))
+    eventd.put_descriptor(vm, "Events", base .. ".a", hiding({ "secret", "num" }))
     settle(since("EVENTS " .. base .. ".*"), function(rs)
         for _, r in ipairs(rs) do
             if r.event_type == base .. ".a" and r.secret ~= nil then return false end
@@ -164,9 +140,9 @@ test("a broad selector is resolved into its concrete identifiers, each authorize
     settle(since('LOGS WHERE message == "' .. tag .. '"'), count(2))
     settle(mq, function(rs) return total(rs) == 3 end, "both metric names")
 
-    put("Events", base .. ".no", DENY_ALL)
-    put("Logs", base .. "no", DENY_ALL)
-    put("Metrics", base .. ".no", DENY_ALL)
+    eventd.put_descriptor(vm, "Events", base .. ".no", DENY_ALL)
+    eventd.put_descriptor(vm, "Logs", base .. "no", DENY_ALL)
+    eventd.put_descriptor(vm, "Metrics", base .. ".no", DENY_ALL)
     local ev = settle(since("EVENTS " .. base .. ".*"), count(1), "EVENTS " .. base .. ".*")
     t:assert_eq(ev[1].event_type, base .. ".ok", "EVENTS <prefix>.* yields only the readable type")
     ev = rows(since('EVENTS WHERE tag == "' .. tag .. '"'))
@@ -187,7 +163,7 @@ test("a denied identifier's records are gone before aggregation, ordering and pa
 }, function(t)
     local base = eventd.marker("ptlogical")
     for i = 1, 3 do emit(base .. ".seen", { i = i }) end
-    put("Events", base .. ".hidden", DENY_ALL)
+    eventd.put_descriptor(vm, "Events", base .. ".hidden", DENY_ALL)
     -- The hidden records are the newest, so a filter applied after
     -- pagination would hand back a short or empty page.
     for i = 1, 5 do emit(base .. ".hidden", { i = i }) end
@@ -226,7 +202,7 @@ test("a field-only grant keeps the identifier visible, with records of exactly t
     emit(ty, { n = 1, other = "x" })
     emit(ty, { other = "y" })
     settle(since("EVENTS " .. ty), count(2))
-    put("Events", ty, access.simple({ allow_field("n") }))
+    eventd.put_descriptor(vm, "Events", ty, access.simple({ allow_field("n") }))
     local rs = settle(since("EVENTS " .. ty), count(1), "the record carrying n, shaped to n")
     local ks = {}
     for k in pairs(rs[1]) do ks[#ks + 1] = k end
@@ -240,8 +216,8 @@ test("each record is shaped by the verdicts for its own identifier", {
     local base = eventd.marker("ptshape")
     for _, s in ipairs({ "a", "b", "c" }) do emit(base .. "." .. s, { secret = s, n = 1 }) end
     settle(since("EVENTS " .. base .. ".*"), count(3))
-    put("Events", base .. ".a", hiding({ "secret" }))
-    put("Events", base .. ".b", hiding({ "n" }))
+    eventd.put_descriptor(vm, "Events", base .. ".a", hiding({ "secret" }))
+    eventd.put_descriptor(vm, "Events", base .. ".b", hiding({ "n" }))
     local rs = settle(since("EVENTS " .. base .. ".*"), function(r)
         local by = {}
         for _, x in ipairs(r) do by[x.event_type] = x end
@@ -258,7 +234,7 @@ end)
 
 --- access-audit records whose object_context is `ctx`.
 local function audits(ctx)
-    return rows('EVENTS access-audit WHERE object_context == x"' .. hex(ctx)
+    return rows('EVENTS access-audit WHERE object_context == x"' .. eventd.hex(ctx)
         .. '" SINCE 1h ago TAKE 100000 SELECT sequence, requested_access')
 end
 
@@ -272,7 +248,7 @@ test("each result identifier is re-checked for EVENTD_READ with an audit context
     local ty = base .. ".x.y"
     emit(ty, { n = 1 })
     settle(since("EVENTS " .. ty), count(1))
-    put("Events", base, access.simple({ allow(READ) }, { sacl = AUDIT }))
+    eventd.put_descriptor(vm, "Events", base, access.simple({ allow(READ) }, { sacl = AUDIT }))
     settle(since("EVENTS " .. ty), count(1))
     wait_until(function() return #audits("events:" .. base) >= 1 end,
         { timeout = 15, desc = "the result check's audit record" })
@@ -301,7 +277,7 @@ test("a label filter in the primary selector reads the label", {
     local filter = '[core="1"]'
     settle(since("METRIC " .. hidden .. filter), count(1))
     settle(since("METRIC " .. open .. filter), count(1))
-    put("Metrics", base, hiding({ "core" }, READ | PUBLISH))
+    eventd.put_descriptor(vm, "Metrics", base, hiding({ "core" }, READ | PUBLISH))
     settle(since("METRIC " .. hidden .. filter), count(0), "the label deny")
     local r = eventd.query(vm, since("METRIC " .. hidden .. filter))
     t:assert(r.ok, "the filtered query is answered: " .. tostring(r.stderr))
@@ -338,7 +314,7 @@ test("event and log aggregation arguments are read", {
     eventd.send_log(vm, { origin = lb .. "b", is_error = false, message = "m" })
     local lq = since('LOGS WHERE origin STARTS_WITH "' .. lb .. '"')
     settle(lq, count(2))
-    put("Logs", lb .. "a", hiding({ "timestamp" }))
+    eventd.put_descriptor(vm, "Logs", lb .. "a", hiding({ "timestamp" }))
     local r = settle(lq .. " GROUP origin MAX timestamp", count(1), "the log timestamp deny")
     t:assert_eq(r[1].origin, lb .. "b", "MAX timestamp groups only the origin whose timestamp is readable")
 end)
@@ -355,7 +331,7 @@ test("a metric result's value is a source field a descriptor can withhold", {
     local name = eventd.marker("ptvalsrc")
     metric(name, 7)
     settle(since("METRIC " .. name), count(1))
-    put("Metrics", name, hiding({ "value" }, READ | PUBLISH))
+    eventd.put_descriptor(vm, "Metrics", name, hiding({ "value" }, READ | PUBLISH))
     local raw = settle(since("METRIC " .. name), function(rs) return #rs == 1 and rs[1].value == nil end,
         "the value deny")
     t:assert_eq(raw[1].name, name, "a raw sample is still a record, without its value")
@@ -370,7 +346,7 @@ test("metric transforms and terminal aggregations read the value field", {
         vm:run("sleep 1")
     end
     settle(since("METRIC " .. hidden), count(3)); settle(since("METRIC " .. open), count(3))
-    put("Metrics", hidden, hiding({ "value" }, READ | PUBLISH))
+    eventd.put_descriptor(vm, "Metrics", hidden, hiding({ "value" }, READ | PUBLISH))
     settle(since("METRIC " .. hidden), function(rs) return not any_carries(rs, "value") end,
         "the value deny")
     for _, clause in ipairs({ " RATE", " DELTA", " AVG", " SUM", " MAX", " MAX_OVER 1m", " SUM_OVER 1m" }) do
@@ -390,8 +366,8 @@ test("a metric boot filter reads boot_id, and a type clause reads type", {
     local boot_q = function(n) return since("METRIC " .. n .. " WHERE boot_id IS NOT NULL") end
     local type_q = function(n) return since("METRIC " .. n .. ' WHERE type == "gauge"') end
     settle(boot_q(nb), count(1)); settle(type_q(nt), count(1))
-    put("Metrics", nb, hiding({ "boot_id" }, READ | PUBLISH))
-    put("Metrics", nt, hiding({ "type" }, READ | PUBLISH))
+    eventd.put_descriptor(vm, "Metrics", nb, hiding({ "boot_id" }, READ | PUBLISH))
+    eventd.put_descriptor(vm, "Metrics", nt, hiding({ "type" }, READ | PUBLISH))
     settle(boot_q(nb), count(0), "a boot filter to match nothing where boot_id is hidden")
     settle(type_q(nt), count(0), "a type predicate to match nothing where type is hidden")
     t:assert_eq(#rows(boot_q(open)), 1, "where boot_id may be read, the boot filter matches")
@@ -405,7 +381,7 @@ test("SELECT reads nothing: an unreadable field it names is dropped, not the rec
     local ty = eventd.marker("ptselect")
     emit(ty, { secret = "s", n = 1 })
     settle(since("EVENTS " .. ty), count(1))
-    put("Events", ty, hiding({ "secret" }))
+    eventd.put_descriptor(vm, "Events", ty, hiding({ "secret" }))
     settle(since("EVENTS " .. ty), function(rs) return #rs == 1 and rs[1].secret == nil end)
     local rs = rows(since("EVENTS " .. ty) .. " SELECT secret, n")
     t:assert_eq(#rs, 1, "the record is returned")
@@ -420,7 +396,7 @@ test("a field's authorization is from its written name, whether or not any recor
     emit(hidden, { n = 1 }); emit(open, { n = 1 })
     settle(since("EVENTS " .. hidden), count(1)); settle(since("EVENTS " .. open), count(1))
     -- No record anywhere carries `ghost`.
-    put("Events", hidden, hiding({ "ghost" }))
+    eventd.put_descriptor(vm, "Events", hidden, hiding({ "ghost" }))
     settle(since("EVENTS " .. hidden .. " WHERE ghost IS NULL"), count(0), "the ghost deny")
     t:assert_eq(#rows(since("EVENTS " .. open .. " WHERE ghost IS NULL")), 1,
         "where ghost may be read, IS NULL matches the record that lacks it")
@@ -435,8 +411,8 @@ test("row and series identifiers and tiebreakers are not fields a descriptor can
     metric(name, 1)
     settle(since("EVENTS " .. ty), count(2)); settle(since("METRIC " .. name), count(1))
     local internal = { "id", "rowid", "series_id", "tie", "shard" }
-    put("Events", ty, hiding(internal))
-    put("Metrics", name, hiding(internal, READ | PUBLISH))
+    eventd.put_descriptor(vm, "Events", ty, hiding(internal))
+    eventd.put_descriptor(vm, "Metrics", name, hiding(internal, READ | PUBLISH))
     vm:run("sleep 1")
     t:assert_eq(#rows(since("EVENTS " .. ty)), 2, "default-order events, tiebroken by row id, are returned")
     t:assert_eq(#rows(since("EVENTS " .. ty) .. " SORT n TAKE 1"), 1, "and a sorted page")
@@ -450,7 +426,7 @@ test("an error from an internal check does not carry a hidden field's value", {
     metric(base .. ".g", 1, nil, "gauge")
     metric(base .. ".c", 1, nil, "counter")
     settle(since("METRIC " .. base .. ".g"), count(1)); settle(since("METRIC " .. base .. ".c"), count(1))
-    put("Metrics", base, hiding({ "type" }, READ | PUBLISH))
+    eventd.put_descriptor(vm, "Metrics", base, hiding({ "type" }, READ | PUBLISH))
     settle(since("METRIC " .. base .. ".g"), function(rs) return not any_carries(rs, "type") end)
     for _, q in ipairs({ "METRIC " .. base .. ".g RATE", "METRIC " .. base .. ".* SUM" }) do
         local r = eventd.query(vm, since(q))
@@ -475,14 +451,14 @@ test("an unreadable cross-type source, or a field its condition needs, means no 
     t:assert_eq(#rows(by_event), 1, "with the event readable, the log meets the condition")
     t:assert_eq(#rows(by_log), 1, "with the log readable, the event meets the condition")
 
-    put("Logs", origin, hiding({ "message" }))
+    eventd.put_descriptor(vm, "Logs", origin, hiding({ "message" }))
     settle(by_log, count(0), "the hidden message to fail CONTAINING")
     t:assert_eq(#rows("EVENTS " .. ty .. " SINCE 1h ago WHERE LOG " .. origin .. " EXISTS"), 1,
         "though the log still exists for a condition that needs only its timestamp")
 
     -- The log is still readable for EXISTS; deny the event type instead.
-    vm:run("reg del -r -y '" .. eventd.SECURITY .. "\\Logs\\" .. origin .. "'")
-    put("Events", ty, DENY_ALL)
+    eventd.drop_descriptor(vm, "Logs", origin)
+    eventd.put_descriptor(vm, "Events", ty, DENY_ALL)
     settle(by_event, count(0), "the denied event type to count as absent")
 end)
 
@@ -500,13 +476,13 @@ test("every check is audited by KACS, against the data type and pattern, into th
     emit(ty, { n = 1 })
     eventd.send_log(vm, { origin = origin, is_error = false, message = "m" })
     settle(since("EVENTS " .. ty), count(1)); settle(since("LOGS FROM " .. origin), count(1))
-    put("Events", base, access.simple({ allow(READ) }, { sacl = AUDIT }))
-    put("Logs", origin, access.simple({ allow(READ) }, { sacl = AUDIT }))
+    eventd.put_descriptor(vm, "Events", base, access.simple({ allow(READ) }, { sacl = AUDIT }))
+    eventd.put_descriptor(vm, "Logs", origin, access.simple({ allow(READ) }, { sacl = AUDIT }))
     vm:run("sleep 1")
     rows(since("EVENTS " .. ty)); rows(since("LOGS FROM " .. origin))
-    local ev = settle('EVENTS access-audit WHERE object_context == x"' .. hex("events:" .. base)
+    local ev = settle('EVENTS access-audit WHERE object_context == x"' .. eventd.hex("events:" .. base)
         .. '" SINCE 1h ago TAKE 1000', function(rs) return #rs >= 1 end, "the event check's audit")
-    local lg = settle('EVENTS access-audit WHERE object_context == x"' .. hex("logs:" .. origin)
+    local lg = settle('EVENTS access-audit WHERE object_context == x"' .. eventd.hex("logs:" .. origin)
         .. '" SINCE 1h ago TAKE 1000', function(rs) return #rs >= 1 end, "the log check's audit")
     t:assert_eq(ev[1].requested_access, READ, "each audited check asked for EVENTD_READ")
     t:assert_eq(lg[1]["process.executable_path"], "/usr/sbin/eventd", "and was eventd's own")
@@ -519,9 +495,9 @@ test("every check is audited by KACS, against the data type and pattern, into th
             "SELECT count(*) FROM events WHERE event_type = 'access-audit'")[1][1]
     end
     t:assert(stored >= 2, "the audit records are in the event store: " .. stored)
-    put("Events", "access-audit", DENY_ALL)
+    eventd.put_descriptor(vm, "Events", "access-audit", DENY_ALL)
     settle("EVENTS access-audit SINCE 1h ago TAKE 1", count(0), "Events\\access-audit to govern them")
-    drop("Events", "access-audit")
+    eventd.drop_descriptor(vm, "Events", "access-audit")
 end)
 
 -- Route closed: as for §7.1 (access-model.test.lua), KACS captures an

@@ -16,34 +16,13 @@ local token = require("helpers.token")
 local client = require("helpers.peinit_client")
 peinit.claim(2)
 
-local SERVICE = [[Machine\System\Services\eventd]]
 local EVENTD_SID = "S-1-5-80-1963885778-1835409261-1671587836-2279113866-1994761124"
 
 local vm = eventd.boot({
     name = "ev-deps",
     append = "peios.quiet=0",
-    files = peinit.seed("zz-pt-eventd-svc", {
-        { path = [[Machine\System]] },
-        { path = [[Machine\System\Services]] },
-        { path = SERVICE, values = {
-            { name = "ErrorControl", type = "dword", data = 0 },
-            { name = "RestartPolicy", type = "dword", data = 0 },
-        } },
-    }),
+    noncritical = true,
 })
-
-local function now_ns()
-    return tonumber(vm:run("date +%s%N").stdout:match("%d+"))
-end
-
-local function settled(machine)
-    local raw
-    wait_until(function()
-        raw = machine:run("svctl --json status eventd").stdout
-        return raw:find('"current_operation":null', 1, true) ~= nil
-    end, { timeout = 60, interval = 0.25, desc = "eventd's operation to finish" })
-    return json.decode(raw)
-end
 
 local function startups(since)
     local out = {}
@@ -71,9 +50,9 @@ test("eventd takes its configuration from the registry and nowhere else", {
     spec = "eventd *deps.eventd-reads-every-setting-from-the-registry",
 }, function(t)
     local pid = eventd.pid(vm)
-    local argv = vm:run("cat /proc/" .. pid .. "/cmdline | tr '\\0' ' '").stdout
+    local argv = (vm:read_file("/proc/" .. pid .. "/cmdline"):gsub("%z", " "))
     t:assert_eq(argv:gsub("%s+$", ""), "/usr/sbin/eventd", "no arguments: " .. argv)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "EventRetentionDays", "dword:51"):assert_ok()
     local _, ok = eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago", function(rows)
         for _, r in ipairs(rows) do
@@ -120,7 +99,7 @@ test("peinit runs eventd and provisioned its state directories before it started
     local status = eventd.status(vm)
     t:assert_eq(status.state, "active", "eventd is a running peinit service")
     local pid = eventd.pid(vm)
-    t:assert(vm:run("cat /proc/" .. pid .. "/status").stdout:find("PPid:%s+1\n"), "whose parent is peinit")
+    t:assert(vm:read_file("/proc/" .. pid .. "/status"):find("PPid:%s+1\n"), "whose parent is peinit")
     for _, dir in pairs(eventd.STORE) do
         local sd = vm:run("sd show " .. dir).stdout
         t:assert(sd:find("DACL_PROTECTED", 1, true) and sd:find(EVENTD_SID, 1, true),
@@ -147,8 +126,7 @@ test("events emitted before eventd started were read by its first drain", {
     vm:run("svctl stop eventd"):assert_ok()
     local tag = eventd.marker("pre")
     eventd.emit(vm, "pt.pre", { tag = tag })
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
+    eventd.start(vm)
     local _, ok = eventd.wait_rows(vm, 'EVENTS pt.pre WHERE tag == "' .. tag .. '" SINCE 10m ago',
         function(r) return #r == 1 end)
     t:assert(ok, "an event emitted while eventd was stopped was read when it started")
@@ -157,7 +135,7 @@ end)
 test("the boot ID is the kernel's, read from /proc/sys/kernel/random/boot_id", {
     spec = "eventd *deps.the-boot-id-is-read-from-proc-sys-kernel-random-boot-id",
 }, function(t)
-    local real = vm:read_file("/proc/sys/kernel/random/boot_id"):match("[%x%-]+")
+    local real = eventd.boot_id(vm)
     t:assert_eq(startups()[1].boot_id, "{" .. real .. "}", "the startup record's boot is the kernel's")
     -- And it is that file, not a service-manager API: put another valid
     -- UUID over it and a new eventd reports that one.
@@ -167,7 +145,7 @@ test("the boot ID is the kernel's, read from /proc/sys/kernel/random/boot_id", {
         .. "'O:SYG:SYD:(A;OICI;GA;;;SY)(A;OICI;GR;;;WD)' none /run/pt-dep-bid"):assert_ok()
     vm:write_file("/run/pt-dep-bid/id", fake .. "\n")
     vm:run("mount --bind /run/pt-dep-bid/id /proc/sys/kernel/random/boot_id"):assert_ok()
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     vm:run("svctl restart eventd")
     local ok = pcall(eventd.ready, vm, 30)
     local s = ok and startups(since)[1]
@@ -184,18 +162,17 @@ test("eventd cannot start without the registry", {
     -- The service's ExecStartPre hook writes registry defaults and would
     -- fail first without a registry; take it out for this start, so the
     -- failure is eventd's own.
-    vm:run("reg set '" .. SERVICE .. "' ExecStartPre 'multi:'"):assert_ok()
+    vm:run("reg set '" .. eventd.SERVICE .. "' ExecStartPre 'multi:'"):assert_ok()
     vm:run("svctl reload-config"):assert_ok()
     vm:run("svctl stop registryd")
     vm:run("svctl --no-wait restart eventd")
-    local status = settled(vm)
+    local status = eventd.settle(vm)
     vm:run("svctl start registryd")
     wait_until(function() return vm:run("reg get '" .. eventd.KEY .. "'").exit_code == 0 end,
         { timeout = 30, interval = 0.5, desc = "the registry to return" })
-    vm:run("reg set '" .. SERVICE .. "' ExecStartPre 'multi:/usr/sbin/eventd --prepare-security'"):assert_ok()
+    vm:run("reg set '" .. eventd.SERVICE .. "' ExecStartPre 'multi:/usr/sbin/eventd --prepare-security'"):assert_ok()
     vm:run("svctl reload-config"):assert_ok()
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
+    eventd.start(vm)
     t:assert_eq(status.state, "failed", "with registryd stopped, eventd's start failed: " .. json.encode(status))
     local logged = pcall(eventd.wait_rows, vm, 'LOGS FROM eventd CONTAINING "cannot read Machine" SINCE 10m ago',
         function(r) return #r >= 1 end)
@@ -217,7 +194,7 @@ test("eventd is Critical: a start it cannot complete ends in a reboot", {
 }, function(t)
     local crit = eventd.boot({ name = "ev-deps-critical", append = "peios.quiet=0" })
     local pid = eventd.pid(crit)
-    t:assert_eq(crit:run("cat /proc/" .. pid .. "/oom_score_adj").stdout:match("%-?%d+"), "-1000",
+    t:assert_eq(crit:read_file("/proc/" .. pid .. "/oom_score_adj"):match("%-?%d+"), "-1000",
         "peinit runs eventd as Critical (oom_score_adj -1000)")
     -- A required value pointing nowhere: every restart attempt fails.
     eventd.set(crit, "EventStorePath", "sz:/var/state/eventd/pt-nowhere"):assert_ok()

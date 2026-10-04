@@ -26,36 +26,13 @@ local STORE_SDDL = "O:SYG:SYD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
 
 local vm = eventd.boot({
     name = "ev-storagefail",
-    files = peinit.seed("zz-pt-eventd-svc", {
-        { path = [[Machine\System]] },
-        { path = [[Machine\System\Services]] },
-        { path = [[Machine\System\Services\eventd]], values = {
-            { name = "ErrorControl", type = "dword", data = 0 },
-            { name = "RestartPolicy", type = "dword", data = 0 },
-        } },
-    }),
+    noncritical = true,
 })
-
-local function now_ns()
-    return tonumber(vm:run("date +%s%N").stdout:match("%d+"))
-end
-
-local function start()
-    wait_until(function()
-        return vm:run("svctl --json status eventd").stdout:find('"current_operation":null', 1, true) ~= nil
-    end, { timeout = 60, interval = 0.25, desc = "peinit's operation on eventd to finish" })
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
-end
-
-local function stop()
-    vm:run("svctl stop eventd")
-end
 
 --- Run a Python body on the host against a copy of guest database `db`
 --- (available as `path`), then write the copy back. Returns stdout.
 local function host_edit(db, body)
-    local dir = io.popen("mktemp -d"):read("l")
+    local dir = eventd.host_tmpdir()
     local f = assert(io.open(dir .. "/db", "wb")); f:write(vm:read_file(db)); f:close()
     f = assert(io.open(dir .. "/run.py", "wb"))
     f:write("import sqlite3, sys\npath = sys.argv[1] + '/db'\n" .. body); f:close()
@@ -121,7 +98,7 @@ end
 --- "ok", or what SQLite says is wrong (it may raise rather than report).
 --- The copy is left as it was: nothing is written back that differs.
 local function integrity(db)
-    local dir = io.popen("mktemp -d"):read("l")
+    local dir = eventd.host_tmpdir()
     local f = assert(io.open(dir .. "/db", "wb")); f:write(vm:read_file(db)); f:close()
     f = assert(io.open(dir .. "/run.py", "wb"))
     f:write("import sqlite3, sys\ntry:\n    c = sqlite3.connect('file:' + sys.argv[1] + '/db?mode=ro', uri=True)\n"
@@ -132,18 +109,6 @@ local function integrity(db)
     p:close()
     os.execute("rm -rf '" .. dir .. "'")
     return (out:gsub("%s+$", ""))
-end
-
-local function stderr_line(needle, since)
-    local found
-    pcall(eventd.wait_rows, vm, 'LOGS FROM eventd CONTAINING "' .. needle .. '" SINCE 30m ago',
-        function(rows)
-            for _, r in ipairs(rows) do
-                if r.timestamp >= since then found = r; return true end
-            end
-            return false
-        end, { timeout = 20, desc = "stderr: " .. needle })
-    return found
 end
 
 local function storage_errors(since)
@@ -162,15 +127,6 @@ local function quarantined(dir)
     return out
 end
 
-local function settled_status()
-    local raw
-    wait_until(function()
-        raw = vm:run("svctl --json status eventd").stdout
-        return raw:find('"current_operation":null', 1, true) ~= nil
-    end, { timeout = 60, interval = 0.25, desc = "eventd's start to settle" })
-    return json.decode(raw)
-end
-
 -- ---------------------------------------------------------------------------
 -- Schema versions and structure, at startup
 -- ---------------------------------------------------------------------------
@@ -179,16 +135,16 @@ test("a required store with an unknown schema version fails startup and is neith
     spec = "eventd *storagefail.a-required-store-with-a-bad-schema-version-fails-startup"
         .. " eventd *storagefail.a-missing-or-unrecognised-schema-version-is-not-treated-as-corruption",
 }, function(t)
-    stop()
+    eventd.stop(vm)
     local original = vm:read_file(eventd.DB.logs)
     sql_exec(eventd.DB.logs, "UPDATE metadata SET value = '99' WHERE key = 'schema_version';")
     local changed = vm:read_file(eventd.DB.logs)
     vm:run("svctl start eventd")
-    local status = settled_status()
+    local status = eventd.settle(vm)
     local after = vm:read_file(eventd.DB.logs)
     local corrupt = quarantined(eventd.STORE.logs)
     vm:write_file(eventd.DB.logs, original)
-    start()
+    eventd.start(vm)
     t:assert_eq(status.state, "failed", "the start failed: " .. json.encode(status))
     t:assert_eq(#corrupt, 0, "nothing was quarantined: " .. table.concat(corrupt, " "))
     t:assert(after == changed, "the database was left exactly as it was: not repaired, not migrated")
@@ -197,20 +153,20 @@ end)
 test("startup checks that the required tables and indexes exist", {
     spec = "eventd *storagefail.startup-corruption-detection-checks-that-required-tables-and-indexes-exist",
 }, function(t)
-    stop()
+    eventd.stop(vm)
     local original = vm:read_file(eventd.DB.logs)
     sql_exec(eventd.DB.logs, "DROP INDEX idx_logs_origin;")
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     vm:run("svctl start eventd")
-    local status = settled_status()
+    local status = eventd.settle(vm)
     local corrupt = quarantined(eventd.STORE.logs)
     -- Detected either way: eventd refused it, or set it aside.
     t:assert(status.state == "failed" or #corrupt > 0,
         "a logs.db missing a required index was not accepted: " .. json.encode(status))
     if status.state == "failed" then
         vm:write_file(eventd.DB.logs, original)
-        start()
-        t:assert(stderr_line("required schema object is missing", since), "and the missing object was reported")
+        eventd.start(vm)
+        t:assert(eventd.stderr_line(vm,"required schema object is missing", since), "and the missing object was reported")
     end
 end)
 
@@ -218,12 +174,12 @@ test("a required store SQLite cannot read is quarantined, replaced, logged and r
     spec = "eventd *storagefail.a-corrupt-required-store-at-startup-is-quarantined-and-replaced-with-an-empty-database"
         .. " eventd *storagefail.startup-corruption-is-logged-and-reported-by-a-storage-error-event",
 }, function(t)
-    stop()
+    eventd.stop(vm)
     local name = eventd.marker("gone")
     local garbage = string.rep("this is not an SQLite database\n", 512)
     vm:write_file(eventd.DB.metrics, garbage)
-    local since = now_ns()
-    start()
+    local since = eventd.guest_ns(vm)
+    eventd.start(vm)
     local corrupt = quarantined(eventd.STORE.metrics)
     t:assert(#corrupt >= 1, "the unreadable metrics.db was moved aside: " .. table.concat(corrupt, " "))
     t:assert_eq(vm:read_file(eventd.STORE.metrics .. "/" .. corrupt[1]), garbage,
@@ -232,7 +188,7 @@ test("a required store SQLite cannot read is quarantined, replaced, logged and r
     eventd.send_metric(vm, { name = name, type = "gauge", value = 3 })
     local _, ok = eventd.wait_rows(vm, "METRIC " .. name .. " SINCE 10m ago", function(r) return #r == 1 end)
     t:assert(ok, "and is in use")
-    t:assert(stderr_line("quarantined corrupt metric store", since), "the corruption was logged")
+    t:assert(eventd.stderr_line(vm,"quarantined corrupt metric store", since), "the corruption was logged")
     local errs = eventd.wait_rows(vm, "EVENTS " .. eventd.T.storage_error .. " SINCE 10m ago", function(r)
         for _, e in ipairs(r) do if e.timestamp >= since and e.store == "metric" then return true end end
         return false
@@ -254,7 +210,7 @@ test("startup does not run an integrity check: a database with a bad page opens"
     -- Old records, many pages of them, so one leaf in their middle can go
     -- bad while the schema, the metadata and the newest pages stay good.
     page.origin = eventd.marker("old")
-    local old = now_ns() - 10 * 86400 * 1000000000
+    local old = eventd.guest_ns(vm) - 10 * 86400 * 1000000000
     for d = 1, 40 do
         local batch = {}
         for i = 1, 50 do
@@ -265,15 +221,15 @@ test("startup does not run an integrity check: a database with a bad page opens"
     end
     eventd.wait_rows(vm, "LOGS FROM " .. page.origin .. " SINCE 30d ago TAKE 5000",
         function(r) return #r == 2000 end, { timeout = 60 })
-    stop()
+    eventd.stop(vm)
     local mid = eventd.sql(vm, eventd.DB.logs, "SELECT id FROM logs WHERE origin = '" .. page.origin
         .. "' ORDER BY id LIMIT 1 OFFSET 1000")[1][1]
     page.leaf = corrupt_leaf(eventd.DB.logs, "logs", mid)
     t:assert(integrity(eventd.DB.logs) ~= "ok", "logs.db now fails an integrity check")
-    local since = now_ns()
-    start()
+    local since = eventd.guest_ns(vm)
+    eventd.start(vm)
     t:assert_eq(#quarantined(eventd.STORE.logs), 0, "yet eventd opened it without quarantining it")
-    t:assert(not stderr_line("corrupt log store", since), "or noticing anything")
+    t:assert(not eventd.stderr_line(vm,"corrupt log store", since), "or noticing anything")
 end)
 
 test("a query that reaches the corrupt page fails with an error", {
@@ -301,7 +257,7 @@ test("corruption met at write time is quarantined, reported, and writing resumes
 }, function(t)
     -- Retention is a write, and the oldest rows are the corrupt page's:
     -- any applied configuration change asks for a retention pass.
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "LogRetentionDays", "dword:1"):assert_ok()
     local ok = pcall(wait_until, function() return #quarantined(eventd.STORE.logs) > 0 end,
         { timeout = 30, interval = 0.5, desc = "logs.db to be quarantined" })
@@ -328,10 +284,10 @@ end)
 local full = {}
 
 local function mount_small(dir)
-    stop()
+    eventd.stop(vm)
     vm:run("mount -t tmpfs -o size=2m,policy=synth-ephemeral --synth-sddl '" .. STORE_SDDL
         .. "' none " .. dir):assert_ok()
-    start()
+    eventd.start(vm)
 end
 
 --- Fill the small tmpfs at `dir`. Refuses anything that is not one: the
@@ -358,7 +314,7 @@ test("a failed event commit on a full disk does not stop the writer", {
     -- record sent now is gone again.
     local probe = eventd.marker("probe")
     eventd.send_log(vm, { origin = probe, is_error = false, message = "probe",
-        timestamp = now_ns() - 10 * 86400 * 1000000000 })
+        timestamp = eventd.guest_ns(vm) - 10 * 86400 * 1000000000 })
     vm:run("sleep 1")
     wait_until(function() return #eventd.rows(vm, "LOGS FROM " .. probe .. " SINCE 30d ago") == 0 end,
         { timeout = 30, interval = 0.5, desc = "the requested retention passes to finish" })
@@ -367,21 +323,21 @@ test("a failed event commit on a full disk does not stop the writer", {
     -- a retention pass removes it.
     full.old = eventd.marker("aged")
     eventd.send_log(vm, { origin = full.old, is_error = false, message = "aged",
-        timestamp = now_ns() - 10 * 86400 * 1000000000 })
+        timestamp = eventd.guest_ns(vm) - 10 * 86400 * 1000000000 })
     eventd.wait_rows(vm, "LOGS FROM " .. full.old .. " SINCE 30d ago", function(r) return #r == 1 end)
     vm:run("sleep 2")
     t:assert_eq(#eventd.rows(vm, "LOGS FROM " .. full.old .. " SINCE 30d ago"), 1,
         "the aged record stays while no pass runs")
     mount_small(eventd.STORE.events)
     full.pid = eventd.pid(vm)
-    full.since = now_ns()
+    full.since = eventd.guest_ns(vm)
     fill(eventd.STORE.events)
     full.tag = eventd.marker("lost")
     for i = 1, 10 do eventd.emit(vm, "pt.lostbatch", { tag = full.tag, i = i }) end
-    t:assert(stderr_line("event store is full", full.since), "the event write failed for want of space")
+    t:assert(eventd.stderr_line(vm,"event store is full", full.since), "the event write failed for want of space")
     vm:run("sleep 1")
     t:assert_eq(eventd.pid(vm), full.pid, "eventd is still the same process")
-    local names = vm:run("cat /proc/" .. full.pid .. "/task/*/comm").stdout
+    local names = select(2, eventd.thread_names(vm, full.pid))
     t:assert(names:find("eventd-writer-0", 1, true), "with its writer thread alive: " .. names)
 end)
 
@@ -410,7 +366,7 @@ test("a failed event batch is logged to stderr with its CPUs and sequence ranges
     spec = "eventd *storagefail.a-failed-event-batch-is-logged-to-stderr-with-its-cpus-and-sequence-ranges",
     tags = { "known-bug" },
 }, function(t)
-    local line = stderr_line("event store is full", full.since)
+    local line = eventd.stderr_line(vm,"event store is full", full.since)
     t:assert(line, "the failure reached stderr")
     local m = line and line.message or ""
     t:assert(m:lower():find("cpu", 1, true) and m:find("%d+%s*%-%s*%d+"),
@@ -452,16 +408,14 @@ end)
 test("a crash before the disk recovers still records the loss, through restart reconciliation", {
     spec = "eventd *storagefail.a-crash-before-disk-recovery-still-records-the-loss-through-restart-reconciliation",
 }, function(t)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     fill(eventd.STORE.events)
     local tag = eventd.marker("crashfull")
     for i = 1, 10 do eventd.emit(vm, "pt.crashfull", { tag = tag, i = i }) end
-    stderr_line("event store is full", since)
-    local pid = eventd.pid(vm)
-    vm:run("kill -9 " .. pid):assert_ok()
-    wait_until(function() return vm:run("test -d /proc/" .. pid).exit_code ~= 0 end, { timeout = 10 })
+    eventd.stderr_line(vm,"event store is full", since)
+    eventd.crash(vm, { pid = eventd.pid(vm) })
     unfill(eventd.STORE.events)
-    start()
+    eventd.start(vm)
     -- Each lost event is either back (it survived in the ring and no
     -- receipt covered it) or inside a gap record.
     local stored = {}
@@ -477,9 +431,9 @@ test("a crash before the disk recovers still records the loss, through restart r
         t:assert(spanned >= missing, "every event not recovered is inside a gap record")
     end
     t:assert(true, "recovered " .. (10 - missing) .. " of 10 from the ring")
-    stop()
+    eventd.stop(vm)
     vm:run("umount " .. eventd.STORE.events):assert_ok()
-    start()
+    eventd.start(vm)
 end)
 
 test("a failed log commit loses that batch and the log writer carries on, with no lost-batch record", {
@@ -488,7 +442,7 @@ test("a failed log commit loses that batch and the log writer carries on, with n
 }, function(t)
     mount_small(eventd.STORE.logs)
     local pid = eventd.pid(vm)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     fill(eventd.STORE.logs)
     local lost = eventd.marker("loglost")
     for i = 1, 5 do eventd.send_log(vm, { origin = lost, is_error = false, message = "l" .. i }) end
@@ -502,15 +456,15 @@ test("a failed log commit loses that batch and the log writer carries on, with n
     local gaps = eventd.rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 10m ago")
     local new_gaps = 0
     for _, g in ipairs(gaps) do if g.timestamp >= since then new_gaps = new_gaps + 1 end end
-    local alive = vm:run("test -d /proc/" .. pid).exit_code
-    stop()
+    local alive = eventd.alive(vm, pid)
+    eventd.stop(vm)
     vm:run("umount " .. eventd.STORE.logs):assert_ok()
-    start()
+    eventd.start(vm)
     eventd.unset(vm, "RetentionCheckIntervalMinutes")
     eventd.unset(vm, "LogRetentionDays")
     t:assert_eq(lost_rows, 0, "the records written into a full disk are gone")
     t:assert(ok, "and the next record after space returned was stored")
-    t:assert_eq(alive, 0, "by the same eventd")
+    t:assert(alive, "by the same eventd")
     t:assert_eq(new_gaps, 0, "no gap record stands for the lost logs")
     t:assert_eq(#errs, 0, "and no storage error either: logs have nothing to account against")
 end)

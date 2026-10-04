@@ -32,56 +32,20 @@ local STORE_SDDL = "O:SYG:SYD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
 
 local vm = eventd.boot({
     name = "ev-shutdown",
-    files = peinit.seed("zz-pt-eventd-svc", {
-        { path = [[Machine\System]] },
-        { path = [[Machine\System\Services]] },
-        { path = [[Machine\System\Services\eventd]], values = {
-            { name = "ErrorControl", type = "dword", data = 0 },
-            { name = "StopTimeout", type = "dword", data = STOP_TIMEOUT },
-            -- A SIGKILLed eventd with unread events in its ring has been
-            -- seen to take longer to die than peinit's default post-kill
-            -- deadline, which then calls it unkillable and abandons the
-            -- service. The abort is what is under test, not that.
-            { name = "PostKillTimeout", type = "dword", data = 30 },
-        } },
-    }),
+    noncritical = { restart = false, values = {
+        { name = "StopTimeout", type = "dword", data = STOP_TIMEOUT },
+        -- A SIGKILLed eventd with unread events in its ring has been
+        -- seen to take longer to die than peinit's default post-kill
+        -- deadline, which then calls it unkillable and abandons the
+        -- service. The abort is what is under test, not that.
+        { name = "PostKillTimeout", type = "dword", data = 30 },
+    } },
 })
 
-local function now_ns()
-    return tonumber(vm:run("date +%s%N").stdout:match("%d+"))
-end
-
---- Wait until peinit has finished whatever operation it has on eventd —
---- after a stop that ended in a kill, the stop operation outlives the
---- process by peinit's post-kill check, and a start issued inside that
---- window is a different test.
-local function settle()
-    wait_until(function()
-        return vm:run("svctl --json status eventd").stdout:find('"current_operation":null', 1, true) ~= nil
-    end, { timeout = 60, interval = 0.25, desc = "peinit's operation on eventd to finish" })
-end
-
-local function start()
-    settle()
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
-end
-
-local function stop()
-    vm:run("svctl stop eventd"):assert_ok()
-end
-
-local function stderr_line(needle, since)
-    local found
-    pcall(eventd.wait_rows, vm, 'LOGS FROM eventd CONTAINING "' .. needle .. '" SINCE 30m ago',
-        function(rows)
-            for _, r in ipairs(rows) do
-                if r.timestamp >= since then found = r; return true end
-            end
-            return false
-        end, { timeout = 20, desc = "stderr: " .. needle })
-    return found
-end
+-- `eventd.start` waits until peinit has finished whatever operation it has
+-- on eventd first: after a stop that ended in a kill, the stop operation
+-- outlives the process by peinit's post-kill check, and a start issued
+-- inside that window is a different test.
 
 --- Hold a shutdown open: an idle query connection that will not send
 --- its request, under the longest query timeout. Returns the client fd.
@@ -125,7 +89,7 @@ test("a held shutdown has unlinked all three socket paths and accepts no new que
     held.asked = begin_stop()
     wait_until(function() return vm:run("ls /run/eventd").stdout:find("sock", 1, true) == nil end,
         { timeout = 3, interval = 0.1, desc = "the socket paths to go" })
-    t:assert(vm:run("test -d /proc/" .. held.pid).exit_code == 0, "eventd is still running its shutdown")
+    t:assert(eventd.alive(vm, held.pid), "eventd is still running its shutdown")
     t:assert_eq(vm:run("ls /run/eventd").stdout:gsub("%s", ""), "", "and every socket path is gone")
     local q = eventd.query(vm, "EVENTS TAKE 1")
     t:assert(not q.ok, "a new query cannot reach it")
@@ -143,15 +107,13 @@ test("a shutdown still running at the stop timeout is ended there", {
     spec = "eventd *shutdown.an-unfinished-shutdown-aborts-at-the-peinit-stop-timeout",
 }, function(t)
     t:assert(held.pid, "the held shutdown from the previous test")
-    local gone = pcall(wait_until, function()
-        return vm:run("test -d /proc/" .. held.pid).exit_code ~= 0
-    end, { timeout = STOP_TIMEOUT + 10, interval = 0.25, desc = "the held eventd to end" })
+    local gone = eventd.wait_gone(vm, held.pid, STOP_TIMEOUT + 10)
     local took = os.time() - held.asked
     t:assert(gone, "eventd did not outlive its stop timeout")
     t:assert(took <= STOP_TIMEOUT + 3, "it ended at the timeout, not at the query timeout: " .. took .. "s")
     -- It never reached step 6.
     vm:syscall(3, held.idle); vm:syscall(3, held.log); vm:syscall(3, held.metric)
-    start()
+    eventd.start(vm)
     local after = eventd.rows(vm, "EVENTS " .. eventd.T.shutdown .. " SINCE 10m ago")
     for _, r in ipairs(after) do
         t:assert(r.timestamp < held.asked * 1000000000,
@@ -166,9 +128,9 @@ test("a stop ends streaming queries with an error", {
     local stream = vm:run_async("/usr/bin/evctl",
         { args = { "--format", "jsonl", "EVENTS pt.never.emitted STREAM" } })
     vm:run("sleep 1")
-    stop()
+    eventd.stop(vm)
     local r = stream:wait("10s")
-    start()
+    eventd.start(vm)
     t:assert(r.exit_code ~= 0, "the streaming client ended with a failure: exit " .. tostring(r.exit_code))
     t:assert((r.stderr or ""):find("shutting down", 1, true),
         "told that eventd is shutting down: " .. tostring(r.stderr))
@@ -187,14 +149,13 @@ test("events and datagrams queued at the stop are read, committed and closed out
     local pid = eventd.pid(vm)
     -- Frozen, so what follows sits in the ring and the receive queues
     -- when the stop arrives: SIGTERM is delivered on SIGCONT.
-    vm:run("kill -STOP " .. pid):assert_ok()
+    eventd.freeze(vm, pid)
     local tag = eventd.marker("q")
     for i = 1, 7 do eventd.emit(vm, "pt.final", { tag = tag, i = i }) end
     for i = 1, 5 do eventd.send_log(vm, { origin = tag, is_error = false, message = "m" .. i }) end
     for i = 1, 3 do eventd.send_metric(vm, { name = tag, type = "gauge", value = i }) end
-    vm:run("kill -TERM " .. pid .. "; kill -CONT " .. pid):assert_ok()
-    wait_until(function() return vm:run("test -d /proc/" .. pid).exit_code ~= 0 end,
-        { timeout = 30, interval = 0.25, desc = "eventd to finish its shutdown" })
+    eventd.signal(vm, pid, "TERM"); eventd.thaw(vm, pid)
+    assert(eventd.wait_gone(vm, pid, 30), "eventd to finish its shutdown")
     -- Read from the files while eventd is down: what the shutdown itself
     -- committed, not what a later start recovers.
     local events = 0
@@ -208,7 +169,7 @@ test("events and datagrams queued at the stop are read, committed and closed out
     t:assert_eq(eventd.sql(vm, eventd.DB.metrics,
         "SELECT count(*) FROM samples JOIN series ON samples.series_id = series.id WHERE series.name = '" .. tag .. "'")[1][1],
         3, "and the queued metric datagrams")
-    start()
+    eventd.start(vm)
     for _, k in ipairs({ "MaxBatchLatencyMs", "LogMaxBatchLatencyMs", "MetricMaxBatchLatencyMs" }) do
         eventd.unset(vm, k)
     end
@@ -221,8 +182,8 @@ test("a clean stop records each CPU's covered sequence, checkpoints it, and clos
 }, function(t)
     for i = 1, 10 do eventd.emit(vm, "pt.stop", { i = i }) end
     vm:run("sleep 1")
-    local asked = now_ns()
-    stop()
+    local asked = eventd.guest_ns(vm)
+    eventd.stop(vm)
     local boot = eventd.sql(vm, eventd.shards(vm)[1],
         "SELECT hex(boot_id), payload FROM events WHERE event_type = '" .. eventd.T.shutdown
         .. "' ORDER BY timestamp DESC LIMIT 1")
@@ -240,7 +201,7 @@ test("a clean stop records each CPU's covered sequence, checkpoints it, and clos
     -- No -wal left beside any database: each was checkpointed on close.
     local wal = vm:run("ls /var/state/eventd/*/ | grep -- '-wal$' || true").stdout
     t:assert_eq(wal:gsub("%s", ""), "", "no write-ahead log survives a clean stop: " .. wal)
-    start()
+    eventd.start(vm)
     local sd = eventd.rows(vm, "EVENTS " .. eventd.T.shutdown .. " SINCE 10m ago")
     table.sort(sd, function(a, b) return a.timestamp < b.timestamp end)
     local last = sd[#sd]
@@ -253,22 +214,23 @@ end)
 test("with no writable shard the shutdown record is skipped and the failure logged", {
     spec = "eventd *shutdown.with-no-writable-shard-the-shutdown-event-is-skipped-and-the-failure-logged",
 }, function(t)
-    stop()
+    eventd.stop(vm)
     vm:run("mount -t tmpfs -o size=1m,policy=synth-ephemeral --synth-sddl '" .. STORE_SDDL
         .. "' none " .. eventd.STORE.events):assert_ok()
-    start()
+    eventd.start(vm)
     vm:run("dd if=/dev/zero of=" .. eventd.STORE.events .. "/pt-fill bs=4k 2>/dev/null; true")
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     vm:run("svctl stop eventd")
     local records = eventd.sql(vm, eventd.shards(vm)[1],
         "SELECT count(*) FROM events WHERE event_type = '" .. eventd.T.shutdown .. "'")[1][1]
     vm:run("umount " .. eventd.STORE.events):assert_ok()
-    start()
+    eventd.start(vm)
     t:assert_eq(records, 0, "the full shard holds no shutdown record")
     -- The writer reports the refused commit (writer.rs request_retention)
     -- and the supervisor a failed one (pipeline.rs commit_synthetic_fallback);
     -- either is the failure on stderr.
-    local line = stderr_line("synthetic.shutdown", since) or stderr_line("event store is full", since)
+    local line = eventd.stderr_line(vm, "synthetic.shutdown", since)
+        or eventd.stderr_line(vm, "event store is full", since)
     t:assert(line, "and the failed write was reported on stderr")
 end)
 
@@ -291,13 +253,13 @@ test("an aborted shutdown: events are recovered from KMES, uncommitted logs are 
 }, function(t)
     -- A clean stop first, so there are checkpoints for the abort to leave
     -- stale.
-    stop()
-    start()
+    eventd.stop(vm)
+    eventd.start(vm)
     local pid = eventd.pid(vm)
     local idle = hold_open(t)
     local log = assert(us.socket(vm, us.AF_UNIX, us.SOCK.DGRAM))
     us.connect(vm, log, eventd.SOCKET.log)
-    local asked = now_ns()
+    local asked = eventd.guest_ns(vm)
     begin_stop()
     wait_until(function() return vm:run("ls /run/eventd").stdout:find("sock", 1, true) == nil end,
         { timeout = 3, interval = 0.1, desc = "the shutdown to be under way" })
@@ -316,13 +278,11 @@ test("an aborted shutdown: events are recovered from KMES, uncommitted logs are 
     -- kills an eventd with unread events in its ring has ended with the
     -- service Abandoned as ProcessUnkillable even though the process was
     -- gone within seconds — reported, not under test here.)
-    vm:run("kill -9 " .. pid):assert_ok()
-    wait_until(function() return vm:run("test -d /proc/" .. pid).exit_code ~= 0 end,
-        { timeout = STOP_TIMEOUT + 10, interval = 0.25, desc = "the held eventd to die" })
+    eventd.crash(vm, { pid = pid, timeout = STOP_TIMEOUT + 10 })
     vm:syscall(3, idle); vm:syscall(3, log)
     -- The checkpoints are now whatever the previous clean stop wrote.
     local cp = eventd.sql(vm, eventd.DB.meta, "SELECT max(updated_at) FROM sequence_checkpoints")[1][1]
-    start()
+    eventd.start(vm)
     eventd.unset(vm, "QueryTimeoutMs")
     local rows = eventd.wait_rows(vm, 'EVENTS pt.abort WHERE tag == "' .. tag .. '" SINCE 10m ago',
         function(r) return #r >= 20 end)

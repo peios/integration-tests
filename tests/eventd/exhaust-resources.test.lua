@@ -26,21 +26,11 @@ peinit.claim(1)
 
 local vm = eventd.boot({
     name = "ev-exhaust",
-    files = peinit.seed("zz-pt-eventd-svc", {
-        { path = [[Machine\System]] },
-        { path = [[Machine\System\Services]] },
-        { path = [[Machine\System\Services\eventd]], values = {
-            { name = "ErrorControl", type = "dword", data = 0 },
-        } },
-    }),
+    noncritical = { restart = false },
 })
 
-local function now_ns()
-    return tonumber(vm:run("date +%s%N").stdout:match("%d+"))
-end
-
 local function set_and_wait(name, value)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, name, "dword:" .. value):assert_ok()
     eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago", function(rows)
         for _, r in ipairs(rows) do
@@ -65,15 +55,14 @@ test("an OOM kill is recovered exactly like a crash", {
     spec = "eventd *exhaust.an-oom-kill-is-recovered-exactly-like-a-crash",
 }, function(t)
     local pid = eventd.pid(vm)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     -- Frozen, so these are in the ring and in no receipt when it dies.
-    vm:run("kill -STOP " .. pid):assert_ok()
+    eventd.freeze(vm, pid)
     local tag = eventd.marker("oom")
     for i = 1, 10 do eventd.emit(vm, "pt.oom", { tag = tag, i = i }) end
-    vm:run("echo 1000 > /proc/" .. pid .. "/oom_score_adj"):assert_ok()
-    vm:run("kill -CONT " .. pid .. "; echo f > /proc/sysrq-trigger"):assert_ok()
-    local died = pcall(wait_until, function() return vm:run("test -d /proc/" .. pid).exit_code ~= 0 end,
-        { timeout = 15, interval = 0.25, desc = "the OOM killer to take eventd" })
+    vm:write_file("/proc/" .. pid .. "/oom_score_adj", "1000\n")
+    eventd.thaw(vm, pid); vm:run("echo f > /proc/sysrq-trigger"):assert_ok()
+    local died = eventd.wait_gone(vm, pid, 15)
     t:assert(died, "the OOM killer took eventd")
     wait_until(function()
         local now = eventd.pid(vm)
@@ -108,17 +97,9 @@ test("the series cache never holds more than MetricSeriesCacheSize", {
         return eventd.sql(vm, eventd.DB.metrics, "SELECT count(*) FROM series WHERE name LIKE '"
             .. base .. ".%'")[1][1] >= 1500
     end, { timeout = 60, interval = 1, desc = "1500 distinct series to be stored" })
-    local since = now_ns()
-    local pid = eventd.pid(vm)
-    vm:run("kill -QUIT " .. pid):assert_ok()
-    wait_until(function() return vm:run("test -d /proc/" .. pid).exit_code ~= 0 end, { timeout = 30 })
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
+    local d = eventd.quit_dump(vm)
     local line
-    eventd.wait_rows(vm, 'LOGS FROM eventd CONTAINING "metric_series_cache:" SINCE 10m ago', function(rows)
-        for _, r in ipairs(rows) do if r.timestamp >= since then line = r.message end end
-        return line ~= nil
-    end)
+    for _, m in ipairs(d.messages) do if m:find("metric_series_cache:", 1, true) then line = m end end
     local held = tonumber(line and line:match("metric_series_cache:%s*(%d+)") or "")
     eventd.unset(vm, "MetricSeriesCacheSize")
     t:assert(held and held >= 1 and held <= 1000,
@@ -167,7 +148,7 @@ test("one user cannot take every query slot; SYSTEM still can", {
     spec = "eventd *exhaust.one-user-cannot-occupy-every-query-slot",
 }, function(t)
     set_and_wait("MaxQueriesPerUser", 1)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     local answer, detail = "", ""
     local system_ok
     client.with_worker(vm, function(w)

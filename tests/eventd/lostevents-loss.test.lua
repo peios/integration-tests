@@ -16,10 +16,6 @@ peinit.claim(1)
 
 local vm = eventd.boot({ name = "ev-lostevents" })
 
-local function now_ns()
-    return tonumber(vm:run("date +%s%N").stdout:match("%d+"))
-end
-
 local function set_and_wait(name, value)
     eventd.set(vm, name, "dword:" .. value):assert_ok()
     eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago", function(rows)
@@ -36,13 +32,13 @@ local overrun = {}
 test("an overrun is seen as a sequence gap on the CPU that overran", {
     spec = "eventd *lostevents.an-overrun-is-detected-as-a-sequence-gap-on-the-affected-cpu",
 }, function(t)
-    overrun.since = now_ns()
+    overrun.since = eventd.guest_ns(vm)
     local pid = eventd.pid(vm)
-    vm:run("kill -STOP " .. pid):assert_ok()
+    eventd.freeze(vm, pid)
     overrun.tag = eventd.marker("lap")
     local big = eventd.bin(string.rep("y", 60000))
     for i = 1, 120 do eventd.emit(vm, "pt.lap", { tag = overrun.tag, i = i, b = big }) end
-    vm:run("kill -CONT " .. pid):assert_ok()
+    eventd.thaw(vm, pid)
     local rows = eventd.wait_rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 10m ago", function(r)
         for _, g in ipairs(r) do if g.timestamp >= overrun.since then return true end end
         return false
@@ -114,7 +110,7 @@ test("a query past QueryTimeoutMs is cancelled with an error, and its connection
     local pid = eventd.pid(vm)
     local function db_fds()
         local n = 0
-        for line in vm:run("ls -l /proc/" .. pid .. "/fd").stdout:gmatch("[^\n]+") do
+        for line in eventd.fd_listing(vm, pid):gmatch("[^\n]+") do
             if line:find("shard%-%d+%.db$") or line:find("logs%.db$") or line:find("metrics%.db$") then
                 n = n + 1
             end
@@ -128,9 +124,13 @@ test("a query past QueryTimeoutMs is cancelled with an error, and its connection
     local q = eventd.guest_tmp(vm, 'EVENTS pt.load WHERE s CONTAINS "never" SINCE 10m ago', "slow")
     local out
     for _, delay in ipairs({ "0.05", "0.1", "0.15", "0.2", "0.03", "0.25" }) do
-        out = vm:run("(evctl --format jsonl --file " .. q .. " > /tmp/pt-slow.out 2>&1; echo rc=$? >> /tmp/pt-slow.out) & "
-            .. "sleep " .. delay .. "; kill -STOP " .. pid .. "; sleep 1.5; kill -CONT " .. pid .. "; wait; "
-            .. "cat /tmp/pt-slow.out").stdout
+        local p = vm:run_async("/usr/bin/evctl", { args = { "--format", "jsonl", "--file", q } })
+        vm:clock():sleep(tonumber(delay))
+        eventd.freeze(vm, pid)
+        vm:clock():sleep(1.5)
+        eventd.thaw(vm, pid)
+        local r = p:wait("60s")
+        out = (r.stdout or "") .. (r.stderr or "") .. "\nrc=" .. tostring(r.exit_code)
         if out:find("timed out", 1, true) then break end
     end
     t:assert(out:find("timed out", 1, true), "the query was cancelled with a timeout error: " .. out)
@@ -168,7 +168,7 @@ test("a datagram refused at a full receive queue is counted nowhere", {
 }, function(t)
     local origin = eventd.marker("full")
     local pid = eventd.pid(vm)
-    vm:run("kill -STOP " .. pid):assert_ok()
+    eventd.freeze(vm, pid)
     local fd = assert(us.socket(vm, us.AF_UNIX, us.SOCK.DGRAM))
     local payload = eventd.msgpack({ origin = origin, is_error = false, message = string.rep("m", 60000) })
     local accepted, dropped = 0, 0
@@ -178,7 +178,7 @@ test("a datagram refused at a full receive queue is counted nowhere", {
         if dropped >= 20 then break end
     end
     vm:syscall(3, fd)
-    vm:run("kill -CONT " .. pid):assert_ok()
+    eventd.thaw(vm, pid)
     t:assert(dropped > 0 and accepted > 0, "the queue filled: " .. accepted .. " in, " .. dropped .. " refused")
     local rows = eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago",
         function(r) return #r >= accepted end)
@@ -203,10 +203,7 @@ test("the log and metric sockets are each drained by the thread that commits the
     -- One thread per channel and no other: eventd-log receives and
     -- commits logs, eventd-metric metrics. There is no separate reader
     -- that could empty a queue while its writer is inside a commit.
-    local names = {}
-    for n in vm:run("cat /proc/" .. eventd.pid(vm) .. "/task/*/comm").stdout:gmatch("[^\n]+") do
-        names[#names + 1] = n
-    end
+    local names = eventd.thread_names(vm, eventd.pid(vm))
     local log, metric = 0, 0
     for _, n in ipairs(names) do
         if n:find("log", 1, true) then log = log + 1 end

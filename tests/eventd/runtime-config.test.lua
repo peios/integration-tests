@@ -25,10 +25,6 @@ peinit.claim(1)
 
 local vm = eventd.boot({ name = "ev-runtime" })
 
-local function now_ns()
-    return tonumber(vm:run("date +%s%N").stdout:match("%d+"))
-end
-
 --- Config-change records for `key` written at or after `since`.
 local function changes(key, since)
     local out = {}
@@ -50,24 +46,11 @@ local function wait_change(key, since, pred, desc)
     return found
 end
 
---- An eventd stderr line containing `needle` written at or after `since`.
-local function stderr_line(needle, since)
-    local found
-    pcall(eventd.wait_rows, vm, 'LOGS FROM eventd CONTAINING "' .. needle .. '" SINCE 30m ago',
-        function(rows)
-            for _, r in ipairs(rows) do
-                if r.timestamp >= since then found = r; return true end
-            end
-            return false
-        end, { timeout = 20, desc = "stderr: " .. needle })
-    return found
-end
-
 test("a change is applied by the watch, without a restart", {
     spec = "eventd *runtime.eventd-watches-its-configuration-subtree-and-applies-changes-without-restarting",
 }, function(t)
     local pid = eventd.pid(vm)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "MetricRetentionDays", "dword:17"):assert_ok()
     t:assert(wait_change("MetricRetentionDays", since, function(r) return r.new_value == "17" end),
         "the change was applied")
@@ -78,7 +61,7 @@ end)
 test("every applied change is recorded with its key and its old and new values", {
     spec = "eventd *runtime.every-applied-change-emits-a-config-change-event-with-key-and-old-and-new-values",
 }, function(t)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "EventRetentionDays", "dword:41"):assert_ok()
     local first = wait_change("EventRetentionDays", since, function(r) return r.new_value == "41" end)
     t:assert(first, "a record for the first change")
@@ -94,7 +77,7 @@ end)
 test("an invalid value is ignored and the value in use, not the default, is kept", {
     spec = "eventd *runtime.an-invalid-value-is-ignored-and-the-value-in-use-is-kept",
 }, function(t)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "LogRetentionDays", "dword:13"):assert_ok()
     t:assert(wait_change("LogRetentionDays", since, function(r) return r.new_value == "13" end),
         "13 applied")
@@ -115,7 +98,7 @@ test("an unknown key in the subtree is ignored", {
     spec = "eventd *runtime.unknown-keys-are-ignored",
 }, function(t)
     local pid = eventd.pid(vm)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "PtNoSuchSetting", "dword:5"):assert_ok()
     -- A known change straight after, so "nothing for the unknown key" is
     -- read once eventd has demonstrably handled what came before it.
@@ -157,9 +140,9 @@ end)
 test("changes to the socket paths wait for a restart", {
     spec = "eventd *runtime.a-socket-path-change-waits-for-a-restart",
 }, function(t)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "MetricSocketPath", "sz:/run/eventd/pt-metric.sock"):assert_ok()
-    t:assert(stderr_line("MetricSocketPath is deferred until restart", since),
+    t:assert(eventd.stderr_line(vm,"MetricSocketPath is deferred until restart", since),
         "eventd noticed the change and deferred it")
     t:assert(not vm:run("ls /run/eventd").stdout:find("pt-metric.sock", 1, true),
         "nothing was bound at the new path")
@@ -178,9 +161,9 @@ end)
 test("a change to a store path waits for a restart", {
     spec = "eventd *runtime.a-store-path-change-waits-for-a-restart",
 }, function(t)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "LogStorePath", "sz:/var/state/eventd/pt-elsewhere"):assert_ok()
-    t:assert(stderr_line("LogStorePath is deferred until restart", since),
+    t:assert(eventd.stderr_line(vm,"LogStorePath is deferred until restart", since),
         "eventd noticed the change and deferred it")
     local origin = eventd.marker("store")
     eventd.send_log(vm, { origin = origin, is_error = false, message = "still here" })
@@ -193,10 +176,10 @@ end)
 test("a StorageShards change waits for a restart", {
     spec = "eventd *runtime.a-storageshards-change-waits-for-a-restart",
 }, function(t)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     local before = #eventd.shards(vm)
     eventd.set(vm, "StorageShards", "dword:4"):assert_ok()
-    t:assert(stderr_line("StorageShards is deferred until restart", since),
+    t:assert(eventd.stderr_line(vm,"StorageShards is deferred until restart", since),
         "eventd noticed the change and deferred it")
     for i = 1, 50 do eventd.emit(vm, "pt.shards", { i = i }) end
     eventd.wait_rows(vm, "EVENTS pt.shards SINCE 10m ago", function(r) return #r >= 50 end)
@@ -209,11 +192,11 @@ test("restart-only changes are deferred, not migrated or recorded as applied", {
     spec = "eventd *runtime.restart-only-changes-are-deferred-not-migrated-live",
 }, function(t)
     local pid = eventd.pid(vm)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "EventStorePath", "sz:/var/state/eventd/pt-moved"):assert_ok()
     eventd.set(vm, "QuerySocketPath", "sz:/run/eventd/pt-q.sock"):assert_ok()
-    t:assert(stderr_line("EventStorePath is deferred until restart", since), "the store move is deferred")
-    t:assert(stderr_line("QuerySocketPath is deferred until restart", since), "the socket move is deferred")
+    t:assert(eventd.stderr_line(vm,"EventStorePath is deferred until restart", since), "the store move is deferred")
+    t:assert(eventd.stderr_line(vm,"QuerySocketPath is deferred until restart", since), "the socket move is deferred")
     t:assert(eventd.query(vm, "EVENTS TAKE 1").ok, "queries are still answered where they were")
     t:assert(vm:run("test -e /var/state/eventd/pt-moved").exit_code ~= 0, "nothing was migrated")
     t:assert_eq(#changes("EventStorePath", since) + #changes("QuerySocketPath", since), 0,
@@ -226,7 +209,7 @@ end)
 test("changes arriving while eventd starts are applied after it is ready", {
     spec = "eventd *runtime.notifications-arriving-during-startup-are-processed-after-readiness",
 }, function(t)
-    local since = now_ns()
+    local since = eventd.guest_ns(vm)
     -- Restart without waiting, then change a value every 50 ms for two
     -- seconds: some changes land before the watch is armed (read as the
     -- starting configuration), some between arming and readiness, some

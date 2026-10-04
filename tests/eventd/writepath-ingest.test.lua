@@ -42,17 +42,10 @@ local READ, PUBLISH = 0x1, 0x8
 local ENABLED = token.GROUP.MANDATORY | token.GROUP.ENABLED_BY_DEFAULT | token.GROUP.ENABLED
 local NOTIFY = token.bit(token.PRIV.CHANGE_NOTIFY)
 
-local function hex(s) return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)) end
-
 local function allow(mask, sid) return access.ace(access.ACE.ALLOWED, mask, sid or SY) end
 local AUDIT = access.acl({ access.ace(access.ACE.AUDIT, 0xf, EVERYONE,
     access.ACE_FLAG.SUCCESSFUL_ACCESS | access.ACE_FLAG.FAILED_ACCESS) })
 local DENY_ALL = access.simple({ allow(READ | PUBLISH, NOBODY) })
-
-local function key_of(ns, pattern) return eventd.SECURITY .. "\\" .. ns .. "\\" .. pattern end
-local function put(ns, pattern, sd)
-    vm:run("reg set -p '" .. key_of(ns, pattern) .. "' @ hex:" .. hex(sd)):assert_ok()
-end
 
 local function groups_of(sids)
     local list = {}
@@ -108,7 +101,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local function audits(ctx)
-    local r = eventd.query(vm, 'EVENTS access-audit WHERE object_context == x"' .. hex(ctx)
+    local r = eventd.query(vm, 'EVENTS access-audit WHERE object_context == x"' .. eventd.hex(ctx)
         .. '" SINCE 1h ago TAKE 100000 SELECT sequence')
     assert(r.ok, "audit query: " .. tostring(r.stderr))
     return #r.rows
@@ -127,7 +120,7 @@ end
 
 --- An audited publication descriptor for `pattern`; returns its context.
 local function audited(pattern, aces)
-    put("Metrics", pattern, access.simple(aces, { sacl = AUDIT }))
+    eventd.put_descriptor(vm, "Metrics", pattern, access.simple(aces, { sacl = AUDIT }))
     -- Prove it is in force: a publish under it is audited.
     local ctx = "metric-publish:" .. pattern
     local ok = wait_until(function()
@@ -158,8 +151,7 @@ test("eventd is not in the admission path: KMES admits events while eventd is st
             t:assert(denied.ret ~= 0, "kmes_emit refuses a caller without SeAuditPrivilege")
         end)
     end)
-    vm:run("svctl start eventd", { timeout = 60 })
-    eventd.ready(vm)
+    eventd.start(vm)
     if not ok then error(err, 0) end
 end)
 
@@ -251,8 +243,8 @@ test("a log datagram is stored with no token, and no read descriptor stands in t
 }, function(t)
     local bare, tokened = eventd.marker("ptnotok"), eventd.marker("pttok")
     -- Nobody may read either origin: the read side has no say in storage.
-    put("Logs", bare, DENY_ALL)
-    put("Logs", tokened, DENY_ALL)
+    eventd.put_descriptor(vm, "Logs", bare, DENY_ALL)
+    eventd.put_descriptor(vm, "Logs", tokened, DENY_ALL)
     eventd.send_log(vm, { origin = bare, is_error = false, message = "m" })
     eventd.send_log(vm, { origin = tokened, is_error = false, message = "m" }, { pass_token = true })
     wait_until(function() return logs_of(bare) == 1 and logs_of(tokened) == 1 end,
@@ -350,7 +342,7 @@ test("a policy failure discards the whole datagram, authorized records with it, 
 }, function(t)
     local broken, fine = eventd.marker("ptbroken"), eventd.marker("ptfine")
     -- A descriptor that is not REG_BINARY cannot be resolved.
-    vm:run("reg set -p '" .. key_of("Metrics", broken) .. "' @ sz:not-a-descriptor"):assert_ok()
+    vm:run("reg set -p '" .. eventd.key_of("Metrics",broken) .. "' @ sz:not-a-descriptor"):assert_ok()
     vm:run("sleep 1")
     local function rejected_lines()
         local r = eventd.query(vm, 'LOGS FROM eventd WHERE message CONTAINS "metric datagram rejected"'
@@ -374,7 +366,7 @@ test("a policy failure discards the whole datagram, authorized records with it, 
     t:assert(lines >= 1, "the policy failure is reported on standard error")
     t:assert(lines <= elapsed + 2, lines .. " reports for ten failures in " .. elapsed
         .. "s: rate-limited, not one per datagram")
-    vm:run("reg del -r -y '" .. key_of("Metrics", broken) .. "'")
+    vm:run("reg del -r -y '" .. eventd.key_of("Metrics",broken) .. "'")
 end)
 
 test("each record is checked for EVENTD_PUBLISH against the token its datagram carried", {
@@ -382,7 +374,7 @@ test("each record is checked for EVENTD_PUBLISH against the token its datagram c
         .. " eventd *writepath.a-denied-metric-record-is-discarded-and-its-authorized-siblings-continue",
 }, function(t)
     local owned, open = eventd.marker("ptowned"), eventd.marker("ptopen")
-    put("Metrics", owned, access.simple({ allow(READ, SY), allow(PUBLISH, token.SID.TEST_USER) }))
+    eventd.put_descriptor(vm, "Metrics", owned, access.simple({ allow(READ, SY), allow(PUBLISH, token.SID.TEST_USER) }))
     vm:run("sleep 1")
     local w = vm:spawn_worker()
     local ok, err = pcall(function()
@@ -415,8 +407,8 @@ test("publication authorizes the name, not its labels or value", {
 }, function(t)
     local name = eventd.marker("ptlabels")
     -- Descriptors named like the labels, refusing everyone: not consulted.
-    put("Metrics", "core", DENY_ALL)
-    put("Metrics", "device", DENY_ALL)
+    eventd.put_descriptor(vm, "Metrics", "core", DENY_ALL)
+    eventd.put_descriptor(vm, "Metrics", "device", DENY_ALL)
     local list = {}
     for i = 1, 12 do
         list[i] = { name = name, type = "gauge", value = (i % 2 == 0) and -i * 1.5 or i * 1e9,
@@ -425,31 +417,19 @@ test("publication authorizes the name, not its labels or value", {
     publish(vm, list)
     wait_series(name, 12, "twelve label sets under one authorized name")
     t:assert_eq(series(name), 12, "every label set and value under the authorized name is stored")
-    vm:run("reg del -r -y '" .. key_of("Metrics", "core") .. "'")
-    vm:run("reg del -r -y '" .. key_of("Metrics", "device") .. "'")
+    vm:run("reg del -r -y '" .. eventd.key_of("Metrics","core") .. "'")
+    vm:run("reg del -r -y '" .. eventd.key_of("Metrics","device") .. "'")
 end)
 
 -- ---------------------------------------------------------------------------
 -- The publication cache
 -- ---------------------------------------------------------------------------
 
---- A persistent sending socket for `who`, KACS_SO_PASS_TOKEN set once, as
---- §7.6 has a metric producer do: KACS reuses the captured token object
---- while the socket keeps one effective identity, so its datagrams share a
---- token_id. (A fresh socket per datagram, as `eventd.send_metric` makes,
---- is a fresh capture each time.)
-local function sender(who)
-    local fd = assert(us.socket(who, us.AF_UNIX, us.SOCK.DGRAM))
-    assert(us.set_pass_token(who, fd, true).ret == 0, "KACS_SO_PASS_TOKEN")
-    return {
-        send = function(records)
-            local bytes = eventd.msgpack(#records == 1 and records[1] or eventd.array(records))
-            local r = us.sendto(who, fd, bytes, eventd.SOCKET.metric)
-            assert(r.ret == #bytes, "sendto: errno " .. tostring(r.errno))
-        end,
-        close = function() sys.close(who, fd) end,
-    }
-end
+-- A persistent sending socket (`eventd.sender`), KACS_SO_PASS_TOKEN set
+-- once, as §7.6 has a metric producer do: KACS reuses the captured token
+-- object while the socket keeps one effective identity, so its datagrams
+-- share a token_id. (A fresh socket per datagram, as `eventd.send_metric`
+-- makes, is a fresh capture each time.)
 
 test("a recurring name is checked once per token and name, denials included", {
     spec = "eventd *writepath.publication-is-not-checked-per-sample-or-per-datagram"
@@ -459,7 +439,7 @@ test("a recurring name is checked once per token and name, denials included", {
 }, function(t)
     local p = eventd.marker("ptpcache")
     local ctx = audited(p, { allow(READ | PUBLISH, SY), allow(PUBLISH, BA) })
-    local s = sender(vm)
+    local s = eventd.sender(vm)
     local base = settled(ctx)
 
     for _ = 1, 5 do s.send({ record(p .. ".a"), record(p .. ".a") }) end
@@ -470,7 +450,7 @@ test("a recurring name is checked once per token and name, denials included", {
     t:assert_eq(settled(ctx) - base, 2, "another name: one more")
 
     -- Denials: a name nobody may publish, sent five times.
-    put("Metrics", p .. ".d", access.simple({ allow(PUBLISH, NOBODY) }, { sacl = AUDIT }))
+    eventd.put_descriptor(vm, "Metrics", p .. ".d", access.simple({ allow(PUBLISH, NOBODY) }, { sacl = AUDIT }))
     local dctx = "metric-publish:" .. p .. ".d"
     wait_until(function()
         publish(vm, { record(p .. ".d.probe" .. eventd.marker("x")) })
@@ -495,7 +475,7 @@ test("a recurring name is checked once per token and name, denials included", {
             groups = groups_of({ EVERYONE, AU, BA }),
             privs_present = NOTIFY | shutdown, privs_enabled = NOTIFY,
         }))
-        local ws = sender(w)
+        local ws = eventd.sender(w)
         local function as_other()
             assert(token.impersonate(w, other).ret == 0)
             ws.send({ record(p .. ".a") })
@@ -527,7 +507,7 @@ test("MetricAuthorizationCacheSize bounds the cache, and a full cache is cleared
         -- console's token, so the cache holds only what this test puts in
         -- it; each step waits for the audit count to settle instead of
         -- sending a witness, which would be one more entry.
-        local s = sender(vm)
+        local s = eventd.sender(vm)
         local function n(i) return p .. ".n" .. i end
         local fill = {}
         for i = 0, 255 do fill[#fill + 1] = record(n(i)) end
@@ -559,13 +539,13 @@ test("any change under the security subtree clears the publication verdicts befo
 }, function(t)
     local p = eventd.marker("ptgen")
     local ctx = audited(p, { allow(READ | PUBLISH, SY) })
-    local s = sender(vm)
+    local s = eventd.sender(vm)
     s.send({ record(p .. ".r") }); witness()
     local base = settled(ctx)
     s.send({ record(p .. ".r") }); witness()
     t:assert_eq(settled(ctx) - base, 0, "a cached name is a hit")
     -- An unrelated descriptor, in another namespace.
-    put("Events", eventd.marker("ptunrelated"), access.simple({ allow(READ, SY) }))
+    eventd.put_descriptor(vm, "Events", eventd.marker("ptunrelated"), access.simple({ allow(READ, SY) }))
     vm:run("sleep 1")
     s.send({ record(p .. ".r") }); witness()
     t:assert_eq(settled(ctx) - base, 1, "after an unrelated security change the name is checked again")
@@ -587,7 +567,7 @@ test("rejected metric input leaves no event and no log record behind", {
     end
     local logs, events = eventd_logs(), eventd_events()
     local name = eventd.marker("ptreject")
-    put("Metrics", name .. ".denied", DENY_ALL)
+    eventd.put_descriptor(vm, "Metrics", name .. ".denied", DENY_ALL)
     for _ = 1, 20 do
         eventd.send_metric(vm, record(name .. ".anon"), { pass_token = false })
         publish(vm, { record(name .. ".denied") })
@@ -602,15 +582,9 @@ end)
 --- SIGQUIT eventd, start it again, and return the metric_ingress counters
 --- of the dump it wrote on the way out.
 local function dump_counters()
-    local before = #eventd.rows(vm, 'LOGS FROM eventd WHERE message CONTAINS "metric_ingress:" SINCE 1h ago TAKE 1000')
-    vm:run("kill -QUIT " .. assert(eventd.pid(vm))):assert_ok()
-    wait_until(function() return eventd.pid(vm) == nil end, { timeout = 30, desc = "eventd to exit on SIGQUIT" })
-    vm:run("svctl start eventd", { timeout = 60 }):assert_ok()
-    eventd.ready(vm)
-    local lines = eventd.wait_rows(vm,
-        'LOGS FROM eventd WHERE message CONTAINS "metric_ingress:" SINCE 1h ago TAKE 1000',
-        function(rs) return #rs > before end, { desc = "the dump's metric_ingress line" })
-    local line = lines[1].message
+    local d = eventd.quit_dump(vm)
+    local line = assert(d.lines.metric_ingress,
+        "the dump's metric_ingress line: " .. table.concat(d.messages, " | "))
     local out = {}
     for k, v in line:gmatch("([%w_]+)=(%d+)") do out[k] = tonumber(v) end
     return out, line
@@ -622,7 +596,7 @@ test("rejected metric input is counted in memory, and only there", {
     -- A clean slate: a start's counters are zero.
     dump_counters()
     local name = eventd.marker("ptcount")
-    put("Metrics", name .. ".denied", DENY_ALL)
+    eventd.put_descriptor(vm, "Metrics", name .. ".denied", DENY_ALL)
     for _ = 1, 3 do eventd.send_metric(vm, record(name .. ".anon"), { pass_token = false }) end
     for _ = 1, 4 do publish(vm, { record(name .. ".denied") }) end
     for _ = 1, 2 do

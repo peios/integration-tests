@@ -22,35 +22,12 @@ peinit.claim(1, { cpus = 2 })
 
 local vm = eventd.boot({ name = "ev-boot-seq", cpus = 2 })
 
---- Run SQL against a guest database while eventd is stopped, and write
---- the result back. A stopped eventd has checkpointed and closed every
---- database, so the file is the whole of it.
-local function sql_write(db, statements)
-    local dir = io.popen("mktemp -d"):read("l")
-    local f = assert(io.open(dir .. "/db", "wb")); f:write(vm:read_file(db)); f:close()
-    f = assert(io.open(dir .. "/q.sql", "wb")); f:write(statements); f:close()
-    local script = "import sqlite3,sys\nc=sqlite3.connect(sys.argv[1]+'/db')\n"
-        .. "c.executescript(open(sys.argv[1]+'/q.sql').read())\nc.commit()\n"
-        .. "c.execute('PRAGMA wal_checkpoint(TRUNCATE)')\nc.close()\n"
-    f = assert(io.open(dir .. "/run.py", "wb")); f:write(script); f:close()
-    local p = io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1")
-    local out = p:read("a")
-    assert(p:close(), "sqlite on host failed: " .. out)
-    f = assert(io.open(dir .. "/db", "rb")); local bytes = f:read("a"); f:close()
-    os.execute("rm -rf '" .. dir .. "'")
-    vm:write_file(db, bytes)
-end
+-- SQL against a guest database while eventd is stopped is applied on the
+-- host and written back (`eventd.edit_store`). A stopped eventd has
+-- checkpointed and closed every database, so the file is the whole of it.
 
 local function startups()
     return eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1h ago")
-end
-
-local function threads(pid)
-    local out = {}
-    for name in vm:run("cat /proc/" .. pid .. "/task/*/comm").stdout:gmatch("[^\n]+") do
-        out[#out + 1] = name
-    end
-    return out
 end
 
 local function count_prefix(list, prefix)
@@ -61,19 +38,7 @@ local function count_prefix(list, prefix)
     return n
 end
 
---- The canonical UUID text as PCDS GUID bytes, lowercase hex: the first
---- three groups little-endian, the last two as written.
-local function pcds_hex(uuid)
-    local a, b, c, d, e = uuid:match("^(%x+)-(%x+)-(%x+)-(%x+)-(%x+)$")
-    local function rev(h)
-        local out = {}
-        for i = #h - 1, 1, -2 do out[#out + 1] = h:sub(i, i + 1) end
-        return table.concat(out)
-    end
-    return (rev(a) .. rev(b) .. rev(c) .. d .. e):lower()
-end
-
-local boot_uuid = vm:read_file("/proc/sys/kernel/random/boot_id"):match("[%x%-]+")
+local boot_uuid = eventd.boot_id(vm)
 
 test("with StorageShards absent the default applies: one shard per attached KMES buffer", {
     spec = "eventd *bootstrap.absent-optional-keys-take-their-compiled-in-defaults"
@@ -86,7 +51,7 @@ test("with StorageShards absent the default applies: one shard per attached KMES
     local s = first[#first]
     t:assert_eq(s.shard_count, 2, "two vCPUs, two buffers, two shards: " .. json.encode(s))
     t:assert_eq(#eventd.shards(vm), 2, "and two shard files")
-    local fds = vm:run("ls -l /proc/" .. eventd.pid(vm) .. "/fd").stdout
+    local fds = eventd.fd_listing(vm, eventd.pid(vm))
     local _, rings = fds:gsub("anon_inode:kmes%-cpu", "")
     t:assert_eq(rings, 2, "eventd holds one KMES ring descriptor per CPU: " .. fds)
     -- Mapped, not merely opened: events from both CPUs are being read.
@@ -112,7 +77,7 @@ test("every slot is walked and given a dense ordinal: each CPU has coverage, a d
     for _, p in ipairs(s.resume_points or {}) do seen[#seen + 1] = p.cpu_id end
     table.sort(seen)
     t:assert_eq(table.concat(seen, ","), "0,1", "the startup record names CPUs 0 and 1")
-    local names = threads(eventd.pid(vm))
+    local names = eventd.thread_names(vm, eventd.pid(vm))
     t:assert_eq(count_prefix(names, "eventd-drain-"), 2, "two drain threads: " .. table.concat(names, " "))
     local drains = {}
     for _, n in ipairs(names) do if n:find("^eventd%-drain%-") then drains[#drains + 1] = n end end
@@ -129,7 +94,7 @@ test("one writer per active shard, and one log, metric, retention and index-poli
 }, function(t)
     -- Thread names are cut to 15 bytes by the kernel: eventd-writer-0000
     -- reads eventd-writer-0, eventd-retention eventd-retentio.
-    local names = threads(eventd.pid(vm))
+    local names = eventd.thread_names(vm, eventd.pid(vm))
     local all = table.concat(names, " ")
     t:assert_eq(count_prefix(names, "eventd-writer-"), 2, "a writer for each of two shards: " .. all)
     t:assert_eq(count_prefix(names, "eventd-log"), 1, "one log ingestion thread")
@@ -148,7 +113,7 @@ test("the boot ID is read from the kernel and stored in PCDS GUID layout", {
         "SELECT DISTINCT hex(boot_id) FROM events WHERE event_type = '"
         .. eventd.T.startup .. "'")
     t:assert_eq(#stored, 1, "one boot in the store")
-    t:assert_eq(stored[1][1]:lower(), pcds_hex(boot_uuid),
+    t:assert_eq(stored[1][1]:lower(), eventd.boot_pcds_hex(boot_uuid):lower(),
         "stored as PCDS GUID bytes (first three groups little-endian)")
 end)
 
@@ -182,7 +147,7 @@ test("the startup record is committed, and the sockets and threads up, by the ti
     for _, s in ipairs({ "query.sock", "log.sock", "metric.sock" }) do
         t:assert(listing:find(s, 1, true), s .. " existed at readiness")
     end
-    local names = table.concat(threads(eventd.pid(vm)), " ")
+    local names = table.concat((eventd.thread_names(vm, eventd.pid(vm))), " ")
     for _, n in ipairs({ "eventd-writer-", "eventd-drain-", "eventd-log", "eventd-metric",
                          "eventd-retentio", "eventd-index-po" }) do
         t:assert(names:find(n, 1, true), n .. " was running at readiness: " .. names)
@@ -208,12 +173,12 @@ test("each drain starts from the merged receipts: covered sequences skipped, unc
     -- next start they are ring survivors no receipt covers, while every
     -- earlier event in the ring is covered by one. peinit restarts the
     -- killed eventd itself (the image's RestartPolicy).
-    local since = tonumber(vm:run("date +%s%N").stdout:match("%d+"))
+    local since = eventd.guest_ns(vm)
     local pid = eventd.pid(vm)
-    vm:run("kill -STOP " .. pid):assert_ok()
+    eventd.freeze(vm, pid)
     local tag = eventd.marker("cov")
     for i = 1, 12 do eventd.emit(vm, "pt.cov", { tag = tag, i = i }) end
-    vm:run("kill -9 " .. pid):assert_ok()
+    eventd.signal(vm, pid, "KILL")
     wait_until(function()
         local now = eventd.pid(vm)
         return now ~= nil and now ~= pid
@@ -228,7 +193,7 @@ test("each drain starts from the merged receipts: covered sequences skipped, unc
     for _, shard in ipairs(eventd.shards(vm)) do
         for _, r in ipairs(eventd.sql(vm, shard,
             "SELECT cpu_id, sequence FROM events WHERE sequence IS NOT NULL AND hex(boot_id) = '"
-            .. pcds_hex(boot_uuid):upper() .. "'")) do
+            .. eventd.boot_pcds_hex(boot_uuid) .. "'")) do
             local k = r[1] .. ":" .. r[2]
             if seen[k] then dups = dups + 1 end
             seen[k] = true
@@ -315,11 +280,10 @@ test("historical shards are read for their receipts and their rows; an unreadabl
     -- file in the shard namespace that is not a database at all.
     local bad = eventd.DB.meta:gsub("eventd%-meta%.db$", "shard-0008.db")
     vm:write_file(bad, vm:read_file(shard1))
-    sql_write(bad, "UPDATE metadata SET value = '99' WHERE key = 'schema_version';")
+    eventd.edit_store(vm, bad, "UPDATE metadata SET value = '99' WHERE key = 'schema_version';")
     vm:write_file(eventd.DB.meta:gsub("eventd%-meta%.db$", "shard-0009.db"), "not a database\n")
     eventd.set(vm, "StorageShards", "dword:1"):assert_ok()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
 
     local s = startups()
     table.sort(s, function(a, b) return a.timestamp < b.timestamp end)
@@ -353,8 +317,7 @@ test("the three databases are created when absent, in WAL mode", {
 }, function(t)
     vm:run("svctl stop eventd"):assert_ok()
     vm:run("rm -f " .. eventd.DB.logs .. "* " .. eventd.DB.metrics .. "* " .. eventd.DB.meta .. "*"):assert_ok()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
     for _, db in ipairs({ eventd.DB.logs, eventd.DB.metrics, eventd.DB.meta }) do
         t:assert_eq(eventd.sql(vm, db, "PRAGMA journal_mode")[1][1], "wal", db .. " recreated in WAL mode")
     end
@@ -370,9 +333,8 @@ test("the sequence checkpoints are not used for recovery", {
     local cps = eventd.sql(vm, eventd.DB.meta, "SELECT cpu_id, sequence FROM sequence_checkpoints")
     t:assert(#cps >= 1, "the stop wrote checkpoints")
     -- Lie: claim everything up to a sequence far in the future is covered.
-    sql_write(eventd.DB.meta, "UPDATE sequence_checkpoints SET sequence = 900000000;")
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.edit_store(vm, eventd.DB.meta, "UPDATE sequence_checkpoints SET sequence = 900000000;")
+    eventd.start(vm)
     local s = startups()
     table.sort(s, function(a, b) return a.timestamp < b.timestamp end)
     for _, p in ipairs(s[#s].resume_points) do
@@ -393,10 +355,9 @@ test("each shard's material indexes are discovered from its schema", {
     -- schema; when the policy converges it is found and dropped.
     vm:run("svctl stop eventd"):assert_ok()
     local shard0 = eventd.shards(vm)[1]
-    sql_write(shard0, "CREATE INDEX idx_events_process_guid ON events(process_guid);")
+    eventd.edit_store(vm, shard0, "CREATE INDEX idx_events_process_guid ON events(process_guid);")
     t:assert(eventd.schema(vm, shard0).idx_events_process_guid, "the index is planted while eventd is down")
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
     -- Any applied configuration change asks the policy to recompute (it
     -- may already have converged at start, which proves the same thing).
     eventd.set(vm, "LogRetentionDays", "dword:29"):assert_ok()
@@ -416,19 +377,9 @@ test("the series cache starts empty", {
     -- A restart, and at once the diagnostic dump: what the new process's
     -- cache holds before anything has asked it for a series.
     eventd.restart(vm)
-    local since = tonumber(vm:run("date +%s%N").stdout:match("%d+"))
-    vm:run("kill -QUIT " .. eventd.pid(vm)):assert_ok()
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 30, interval = 0.25, desc = "the SIGQUIT shutdown" })
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
-    local rows = eventd.wait_rows(vm, 'LOGS FROM eventd CONTAINING "metric_series_cache:" SINCE 10m ago',
-        function(r)
-            for _, x in ipairs(r) do if x.timestamp >= since then return true end end
-            return false
-        end)
+    local d = eventd.quit_dump(vm)
     local line
-    for _, x in ipairs(rows) do if x.timestamp >= since then line = x.message end end
+    for _, m in ipairs(d.messages) do if m:find("metric_series_cache:", 1, true) then line = m end end
     t:assert_eq(line and line:match("metric_series_cache:%s*(%d+)"), "0",
         "the restarted daemon's cache held nothing: " .. tostring(line))
 end)

@@ -17,7 +17,6 @@ local eventd = require("helpers.eventd")
 local peinit = require("helpers.peinit")
 local token = require("helpers.token")
 local access = require("helpers.access")
-local us = require("helpers.unixsock")
 local sys = require("helpers.sys")
 peinit.claim(1)
 
@@ -34,125 +33,20 @@ local GROUP = token.SID.TEST_GROUP
 local READ, ADMINISTER, PUBLISH = 0x1, 0x4, 0x8
 local ALLOWED = access.ACE.ALLOWED
 
-local function hex(s) return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)) end
-local function unhex(h) return (h:gsub("%s", ""):gsub("..", function(x) return string.char(tonumber(x, 16)) end)) end
-
 local function allow(mask, sid) return access.ace(ALLOWED, mask, sid) end
 local function descriptor(aces, opts) return access.simple(aces, opts) end
 local DENY_ALL = descriptor({ allow(READ | PUBLISH, NOBODY) })
 
-local function key_of(ns, pattern)
-    return eventd.SECURITY .. (ns and ("\\" .. ns) or "") .. "\\" .. pattern
-end
-
-local function put(ns, pattern, sd)
-    vm:run("reg set -p '" .. key_of(ns, pattern) .. "' @ hex:" .. hex(sd)):assert_ok()
-end
-
-local function put_hex(ns, pattern, h)
-    vm:run("reg set -p '" .. key_of(ns, pattern) .. "' @ hex:" .. h):assert_ok()
-end
-
---- Remove a pattern's key (and anything under it).
-local function drop(ns, pattern)
-    vm:run("reg del -r -y '" .. key_of(ns, pattern) .. "'")
-end
-
---- The descriptor value's bytes as hex, or nil when there is none.
-local function get_hex(ns, pattern)
-    local r = vm:run("reg get '" .. key_of(ns, pattern) .. "' @")
-    if r.exit_code ~= 0 then return nil end
-    return (r.stdout:gsub("%s", ""))
-end
+local function put(ns, pattern, sd) eventd.put_descriptor(vm, ns, pattern, sd) end
+local function put_hex(ns, pattern, h) eventd.put_descriptor(vm, ns, pattern, eventd.unhex(h)) end
+local function drop(ns, pattern) eventd.drop_descriptor(vm, ns, pattern) end
+local function get_hex(ns, pattern) return eventd.descriptor_hex(vm, ns, pattern) end
 
 --- Run `body`, then `restore` whatever happened, then re-raise.
 local function finally(body, restore)
     local ok, err = pcall(body)
     restore()
     if not ok then error(err, 0) end
-end
-
--- ---------------------------------------------------------------------------
--- The query channel, spoken directly (PSPU §3.15–§3.17), for a caller who
--- is not the console
--- ---------------------------------------------------------------------------
-
-local NIL = setmetatable({}, { __tostring = function() return "nil" end })
-
-local function decode(b, at)
-    local tag = b:byte(at)
-    if tag < 0x80 then return tag, at + 1 end
-    if tag >= 0xe0 then return tag - 0x100, at + 1 end
-    local function map(n, p)
-        local out = {}
-        for _ = 1, n do local k, v; k, p = decode(b, p); v, p = decode(b, p); out[k] = v end
-        return out, p
-    end
-    local function arr(n, p)
-        local out = {}
-        for i = 1, n do out[i], p = decode(b, p) end
-        return out, p
-    end
-    local function bytes(n, p) return b:sub(p, p + n - 1), p + n end
-    if tag <= 0x8f then return map(tag - 0x80, at + 1) end
-    if tag <= 0x9f then return arr(tag - 0x90, at + 1) end
-    if tag <= 0xbf then return bytes(tag - 0xa0, at + 1) end
-    if tag == 0xc0 then return NIL, at + 1 end
-    if tag == 0xc2 then return false, at + 1 end
-    if tag == 0xc3 then return true, at + 1 end
-    if tag == 0xc4 or tag == 0xd9 then return bytes(b:byte(at + 1), at + 2) end
-    if tag == 0xc5 or tag == 0xda then return bytes(string.unpack(">I2", b, at + 1), at + 3) end
-    if tag == 0xc6 or tag == 0xdb then return bytes(string.unpack(">I4", b, at + 1), at + 5) end
-    if tag == 0xca then return string.unpack(">f", b, at + 1), at + 5 end
-    if tag == 0xcb then return string.unpack(">d", b, at + 1), at + 9 end
-    if tag == 0xcc then return string.unpack(">I1", b, at + 1), at + 2 end
-    if tag == 0xcd then return string.unpack(">I2", b, at + 1), at + 3 end
-    if tag == 0xce then return string.unpack(">I4", b, at + 1), at + 5 end
-    if tag == 0xcf or tag == 0xd3 then return string.unpack(">i8", b, at + 1), at + 9 end
-    if tag == 0xd0 then return string.unpack(">i1", b, at + 1), at + 2 end
-    if tag == 0xd1 then return string.unpack(">i2", b, at + 1), at + 3 end
-    if tag == 0xd2 then return string.unpack(">i4", b, at + 1), at + 5 end
-    if tag == 0xdc then return arr(string.unpack(">I2", b, at + 1), at + 3) end
-    if tag == 0xdd then return arr(string.unpack(">I4", b, at + 1), at + 5) end
-    if tag == 0xde then return map(string.unpack(">I2", b, at + 1), at + 3) end
-    if tag == 0xdf then return map(string.unpack(">I4", b, at + 1), at + 5) end
-    error(string.format("msgpack: unhandled tag 0x%02x", tag))
-end
-
---- One whole query from `who`, connected while impersonating `as`.
-local function ask(who, text, as)
-    local out = { records = {} }
-    local fd = assert(us.socket(who, us.AF_UNIX, us.SOCK.STREAM))
-    who:syscall(us.NR.setsockopt, { args = { fd, 1, 20, 0, 16 },
-        bufs = { string.pack("<i8i8", 20, 0) }, ptrs = { 3 } })
-    if as then assert(token.impersonate(who, as).ret == 0, "impersonate") end
-    local r = us.connect(who, fd, eventd.SOCKET.query)
-    if as then token.revert(who) end
-    if r.ret ~= 0 then
-        sys.close(who, fd)
-        out.connect_error = us.errname(r.errno)
-        return out
-    end
-    local body = eventd.msgpack({ query = text })
-    us.sendmsg(who, fd, string.pack("<I4", #body) .. body)
-    local buf = ""
-    while not out.status do
-        local got = us.recvmsg(who, fd, 65536, { cmsg = 0 })
-        if got.ret <= 0 then out.closed = got.ret; break end
-        buf = buf .. got.data
-        while #buf >= 4 and #buf >= 4 + string.unpack("<I4", buf) do
-            local n = string.unpack("<I4", buf)
-            local m = decode(buf:sub(5, 4 + n), 1)
-            buf = buf:sub(5 + n)
-            if m.status == "ok" then
-                for _, rec in ipairs(m.records) do out.records[#out.records + 1] = rec end
-            else
-                out.status, out.error = m.status, m.error
-            end
-        end
-    end
-    sys.close(who, fd)
-    return out
 end
 
 local ENABLED = token.GROUP.MANDATORY | token.GROUP.ENABLED_BY_DEFAULT | token.GROUP.ENABLED
@@ -367,8 +261,8 @@ test("only the default value of a key under Machine\\System\\eventd\\Security is
     settles("events", ty, 1)
     -- A named value beside where the descriptor would go, and a default
     -- value at the same relative path outside the Security subtree.
-    vm:run("reg set -p '" .. key_of("Events", ty) .. "' Descriptor hex:" .. hex(DENY_ALL)):assert_ok()
-    vm:run("reg set -p '" .. eventd.KEY .. "\\Events\\" .. ty .. "' @ hex:" .. hex(DENY_ALL)):assert_ok()
+    vm:run("reg set -p '" .. eventd.key_of("Events", ty) .. "' Descriptor hex:" .. eventd.hex(DENY_ALL)):assert_ok()
+    vm:run("reg set -p '" .. eventd.KEY .. "\\Events\\" .. ty .. "' @ hex:" .. eventd.hex(DENY_ALL)):assert_ok()
     vm:run("sleep 1")
     t:assert_eq(seen("events", ty), 1, "neither a named value nor a key outside Security is consulted")
     put("Events", ty, DENY_ALL)
@@ -411,8 +305,8 @@ local DEFAULTS = {
 --- granting `want` ({sid, mask} pairs, in any order); otherwise why not.
 local function differs(ns, pattern, want)
     local h = get_hex(ns, pattern)
-    if not h then return "no descriptor at " .. key_of(ns, pattern) end
-    local sd = access.parse_sd(unhex(h))
+    if not h then return "no descriptor at " .. eventd.key_of(ns, pattern) end
+    local sd = access.parse_sd(eventd.unhex(h))
     if not sd.dacl then return "no DACL" end
     local got = {}
     for _, ace in ipairs(sd.dacl.aces) do
@@ -439,7 +333,7 @@ test("eventd creates the default descriptors when they do not exist", {
         eventd.restart(vm)
         for _, d in ipairs(DEFAULTS) do
             local why = differs(d[1], d[2], d[3])
-            t:assert(not why, key_of(d[1], d[2]) .. " was recreated with its default: " .. tostring(why))
+            t:assert(not why, eventd.key_of(d[1], d[2]) .. " was recreated with its default: " .. tostring(why))
         end
     end, function()
         for _, d in ipairs(DEFAULTS) do
@@ -462,7 +356,7 @@ test("the default Events descriptor grants EVENTD_READ to SYSTEM and Administrat
     settles("events", ty, 1)
     local w = vm:spawn_worker()
     local ok, err = pcall(function()
-        local out = ask(w, Q.events(ty), mint(w, { EVERYONE, AU, BA }))
+        local out = eventd.rq.ask(w, Q.events(ty), { as = mint(w, { EVERYONE, AU, BA }), timeout = 20 })
         t:assert_eq(#out.records, 1, "an Administrator reads it: " .. tostring(out.error)
             .. " " .. tostring(out.connect_error))
     end)
@@ -552,7 +446,7 @@ test("the old read-only Metrics wildcard is upgraded only when it matches byte f
     -- The former compiled default differs from today's only in its masks:
     -- read (0x1) where SYSTEM and Administrators now hold read|publish
     -- (0x9). Patch exactly those two masks in today's bytes.
-    local bytes = unhex(metrics_now)
+    local bytes = eventd.unhex(metrics_now)
     local sd = access.parse_sd(bytes)
     t:assert_eq(#sd.dacl.aces, 3, "today's Metrics\\* has three ACEs")
     local legacy, edits = bytes, 0
@@ -569,15 +463,15 @@ test("the old read-only Metrics wildcard is upgraded only when it matches byte f
     t:assert_eq(edits, 2, "two masks were the publish-granting ones")
 
     -- An administrator's Events\*: the default plus a grant of its own.
-    local events_sd = access.parse_sd(unhex(events_now))
+    local events_sd = access.parse_sd(eventd.unhex(events_now))
     local aces = {}
     for _, ace in ipairs(events_sd.dacl.aces) do aces[#aces + 1] = allow(ace.mask, ace.sid) end
     aces[#aces + 1] = allow(READ, GROUP)
-    local custom_events = hex(access.sd({ owner = SY, group = SY, dacl = access.acl(aces),
+    local custom_events = eventd.hex(access.sd({ owner = SY, group = SY, dacl = access.acl(aces),
         control = access.CONTROL.DACL_PROTECTED }))
 
     finally(function()
-        put_hex("Metrics", "*", hex(legacy))
+        put_hex("Metrics", "*", eventd.hex(legacy))
         put_hex("Events", "*", custom_events)
         eventd.restart(vm)
         t:assert_eq(get_hex("Metrics", "*"), metrics_now,
@@ -586,12 +480,12 @@ test("the old read-only Metrics wildcard is upgraded only when it matches byte f
             "an administrator's Events\\* is left as written")
 
         -- One ACE more than the former default: not a byte-exact match.
-        local near = unhex(hex(legacy))
+        local near = eventd.unhex(eventd.hex(legacy))
         local nsd = access.parse_sd(near)
         local naces = {}
         for _, ace in ipairs(nsd.dacl.aces) do naces[#naces + 1] = allow(ace.mask, ace.sid) end
         naces[#naces + 1] = allow(READ, GROUP)
-        local near_hex = hex(access.sd({ owner = SY, group = SY, dacl = access.acl(naces),
+        local near_hex = eventd.hex(access.sd({ owner = SY, group = SY, dacl = access.acl(naces),
             control = access.CONTROL.DACL_PROTECTED }))
         put_hex("Metrics", "*", near_hex)
         eventd.restart(vm)
@@ -713,15 +607,14 @@ end)
 test("recreating eventd-meta.db does not reset the administrative policy", {
     spec = "eventd *pattern.recreating-eventd-meta-db-does-not-reset-the-admin-policy",
 }, function(t)
-    local narrowed = hex(descriptor({ allow(ADMINISTER, NOBODY), allow(READ, SY) }))
+    local narrowed = eventd.hex(descriptor({ allow(ADMINISTER, NOBODY), allow(READ, SY) }))
     finally(function()
         put_hex(nil, "Admin", narrowed)
         index_settles(false, "the narrowed Admin descriptor")
         vm:run("svctl stop eventd", { timeout = 60 }):assert_ok()
         vm:run("rm -f " .. eventd.DB.meta .. " " .. eventd.DB.meta .. "-wal "
             .. eventd.DB.meta .. "-shm"):assert_ok()
-        vm:run("svctl start eventd", { timeout = 60 }):assert_ok()
-        eventd.ready(vm)
+        eventd.start(vm)
         t:assert(vm:run("test -f " .. eventd.DB.meta).exit_code == 0, "eventd-meta.db was recreated")
         t:assert_eq(get_hex(nil, "Admin"), narrowed, "the Admin descriptor is as it was")
         t:assert(not (index("ptadminfield")), "and INDEX is still refused")

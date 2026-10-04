@@ -24,8 +24,6 @@ local peinit = require("helpers.peinit")
 local unixsock = require("helpers.unixsock")
 peinit.claim(1)
 
-local SERVICE = [[Machine\System\Services\eventd]]
-
 --- The descriptor eventd requires on a store directory (directory.rs),
 --- for the tmpfs a test mounts where it needs a fresh, valid one.
 local STORE_SDDL = "O:SYG:SYD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
@@ -37,19 +35,8 @@ local SOCKET_DIR_SDDL = "O:SYG:SYD:(A;OICI;GA;;;SY)"
 
 local vm = eventd.boot({
     name = "ev-boot-fail",
-    files = peinit.seed("zz-pt-eventd-svc", {
-        { path = [[Machine\System]] },
-        { path = [[Machine\System\Services]] },
-        { path = SERVICE, values = {
-            { name = "ErrorControl", type = "dword", data = 0 },
-            { name = "RestartPolicy", type = "dword", data = 0 },
-        } },
-    }),
+    noncritical = true,
 })
-
-local function guest_now(vm_)
-    return tonumber(vm_:run("date +%s%N").stdout:match("%d+"))
-end
 
 local function tmpfs(path, sddl, size)
     vm:run("mkdir -p " .. path):assert_ok()
@@ -61,38 +48,12 @@ end
 --- has settled. `restart` covers both a running eventd and a failed one.
 local function attempt()
     vm:run("svctl restart eventd")
-    local raw
-    wait_until(function()
-        raw = vm:run("svctl --json status eventd").stdout
-        return raw:find('"current_operation":null', 1, true) ~= nil
-    end, { timeout = 60, interval = 0.25, desc = "eventd's start attempt to settle" })
-    return json.decode(raw)
-end
-
---- Start eventd after a test has put its input right.
-local function repair()
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
+    return eventd.settle(vm)
 end
 
 --- Whether anything answers on the default query socket.
 local function answering()
     return eventd.query(vm, "EVENTS TAKE 1").ok
-end
-
---- The first stderr line eventd wrote at or after `since` that contains
---- `needle`, from the log store; nil if none arrives.
-local function stderr_line(needle, since)
-    local found
-    pcall(eventd.wait_rows, vm,
-        'LOGS FROM eventd CONTAINING "' .. needle .. '" SINCE 30m ago',
-        function(rows)
-            for _, r in ipairs(rows) do
-                if r.timestamp >= since then found = r; return true end
-            end
-            return false
-        end, { timeout = 20, desc = "eventd's stderr line: " .. needle })
-    return found
 end
 
 --- Assert one failed start: Failed, by a non-zero exit, never ready.
@@ -108,7 +69,7 @@ test("a missing required key fails startup, which is logged to stderr and exits 
         .. " eventd *bootstrap.a-startup-failure-is-logged-to-stderr-and-exits-non-zero"
         .. " eventd *bootstrap.a-failed-phase-means-readiness-is-never-signalled",
 }, function(t)
-    local since = guest_now(vm)
+    local since = eventd.guest_ns(vm)
     eventd.unset(vm, "EventStorePath"):assert_ok()
     local status = attempt()
     -- Readiness is Notify: peinit moves a service to Active only on its
@@ -116,24 +77,24 @@ test("a missing required key fails startup, which is logged to stderr and exits 
     -- readiness signal never having been sent.
     assert_failed(t, status, "EventStorePath deleted")
     eventd.set(vm, "EventStorePath", "sz:/var/state/eventd/events/"):assert_ok()
-    repair()
-    local line = stderr_line("EventStorePath", since)
+    eventd.start(vm)
+    local line = eventd.stderr_line(vm,"EventStorePath", since)
     t:assert(line, "the failure reached standard error, which peinit captured")
     t:assert(line and line.message:find("missing", 1, true),
         "and it names the missing value: " .. json.encode(line))
 
     -- Invalid rather than missing: the right type, but not absolute.
-    since = guest_now(vm)
+    since = eventd.guest_ns(vm)
     eventd.set(vm, "QuerySocketPath", "sz:relative.sock"):assert_ok()
     assert_failed(t, attempt(), "QuerySocketPath relative")
     eventd.set(vm, "QuerySocketPath", "sz:/run/eventd/query.sock"):assert_ok()
-    repair()
+    eventd.start(vm)
     -- And the wrong type entirely.
     eventd.set(vm, "LogStorePath", "dword:7"):assert_ok()
     assert_failed(t, attempt(), "LogStorePath a DWORD")
     eventd.set(vm, "LogStorePath", "sz:/var/state/eventd/logs/"):assert_ok()
-    repair()
-    local invalid = stderr_line("invalid type or value", since)
+    eventd.start(vm)
+    local invalid = eventd.stderr_line(vm,"invalid type or value", since)
     t:assert(invalid, "an invalid required value is reported as invalid")
 end)
 
@@ -154,7 +115,7 @@ test("the six required keys are the three store paths and the three socket paths
         local status = attempt()
         t:assert_eq(status.state, "failed", name .. " is required: without it the start fails")
         eventd.set(vm, name, "sz:" .. paths[name]):assert_ok()
-        repair()
+        eventd.start(vm)
     end
     -- Every other value is optional: the image sets none of them, and an
     -- eventd started with only the six is the one answering now.
@@ -172,7 +133,7 @@ test("a missing store directory, or one with the wrong descriptor, fails startup
     spec = "eventd *bootstrap.a-missing-or-unsafe-store-directory-fails-startup"
         .. " eventd *bootstrap.there-is-no-degraded-mode-without-a-store-or-kmes",
 }, function(t)
-    local since = guest_now(vm)
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "MetricStorePath", "sz:/var/state/eventd/pt-absent"):assert_ok()
     assert_failed(t, attempt(), "metric store directory missing")
     -- No degraded mode: the event and log stores are fine, yet neither
@@ -187,10 +148,10 @@ test("a missing store directory, or one with the wrong descriptor, fails startup
     eventd.set(vm, "MetricStorePath", "sz:/var/state/eventd/pt-plain"):assert_ok()
     assert_failed(t, attempt(), "metric store directory with the wrong descriptor")
     eventd.set(vm, "MetricStorePath", "sz:/var/state/eventd/metrics/"):assert_ok()
-    repair()
-    t:assert(stderr_line("state directory", since),
+    eventd.start(vm)
+    t:assert(eventd.stderr_line(vm,"state directory", since),
         "the directory failure was reported on stderr")
-    t:assert(stderr_line("required protected descriptor", since),
+    t:assert(eventd.stderr_line(vm,"required protected descriptor", since),
         "and the descriptor mismatch named as such")
 end)
 
@@ -206,7 +167,7 @@ test("store directories are opened without following symbolic links", {
     eventd.set(vm, "LogStorePath", "sz:/run/pt-varlink/logs"):assert_ok()
     assert_failed(t, attempt(), "log store reached through an intermediate symlink")
     eventd.set(vm, "LogStorePath", "sz:/var/state/eventd/logs/"):assert_ok()
-    repair()
+    eventd.start(vm)
 end)
 
 test("a non-socket at a socket path fails startup and is left in place", {
@@ -227,7 +188,7 @@ test("a non-socket at a socket path fails startup and is left in place", {
         t:assert_eq(vm:read_file(path), "not eventd's\n",
             name .. ": the file that was there is untouched")
         eventd.set(vm, name, "sz:" .. before):assert_ok()
-        repair()
+        eventd.start(vm)
     end
 end)
 
@@ -274,7 +235,7 @@ end)
 test("an unavailable or malformed boot ID fails startup", {
     spec = "eventd *bootstrap.an-unavailable-or-malformed-boot-id-fails-startup",
 }, function(t)
-    local since = guest_now(vm)
+    local since = eventd.guest_ns(vm)
     -- A tmpfs eventd may read, so that the bind below is malformed rather
     -- than merely unreadable; then a file eventd may not read, which is
     -- the unavailable case.
@@ -284,18 +245,18 @@ test("an unavailable or malformed boot ID fails startup", {
     local status = attempt()
     vm:run("umount /proc/sys/kernel/random/boot_id"):assert_ok()
     assert_failed(t, status, "malformed boot ID")
-    repair()
-    t:assert(stderr_line("not a canonical UUID", since), "the malformed boot ID was reported")
+    eventd.start(vm)
+    t:assert(eventd.stderr_line(vm,"not a canonical UUID", since), "the malformed boot ID was reported")
 
-    since = guest_now(vm)
+    since = eventd.guest_ns(vm)
     tmpfs("/run/pt-bid-closed", "O:SYG:SYD:(A;OICI;GA;;;SY)", "64k")
     vm:write_file("/run/pt-bid-closed/id", vm:read_file("/proc/sys/kernel/random/boot_id"))
     vm:run("mount --bind /run/pt-bid-closed/id /proc/sys/kernel/random/boot_id"):assert_ok()
     status = attempt()
     vm:run("umount /proc/sys/kernel/random/boot_id"):assert_ok()
     assert_failed(t, status, "unreadable boot ID")
-    repair()
-    t:assert(stderr_line("cannot read kernel boot ID", since), "the unreadable boot ID was reported")
+    eventd.start(vm)
+    t:assert(eventd.stderr_line(vm,"cannot read kernel boot ID", since), "the unreadable boot ID was reported")
 end)
 
 test("KMES attachment needs SeSecurityPrivilege, and without KMES nothing starts", {
@@ -304,17 +265,17 @@ test("KMES attachment needs SeSecurityPrivilege, and without KMES nothing starts
     -- The service's privileges are what peinit's RequiredPrivileges
     -- leaves in the token. Keeping only SeChangeNotifyPrivilege (traverse)
     -- removes SeSecurityPrivilege, and nothing before Phase 2 needs it.
-    local since = guest_now(vm)
-    vm:run("reg set '" .. SERVICE .. "' RequiredPrivileges 'multi:SeChangeNotifyPrivilege'"):assert_ok()
+    local since = eventd.guest_ns(vm)
+    vm:run("reg set '" .. eventd.SERVICE .. "' RequiredPrivileges 'multi:SeChangeNotifyPrivilege'"):assert_ok()
     vm:run("svctl reload-config"):assert_ok()
     local status = attempt()
-    vm:run("reg del '" .. SERVICE .. "' RequiredPrivileges"):assert_ok()
+    vm:run("reg del '" .. eventd.SERVICE .. "' RequiredPrivileges"):assert_ok()
     vm:run("svctl reload-config"):assert_ok()
     assert_failed(t, status, "no SeSecurityPrivilege")
     t:assert(not vm:run("ls /run/eventd").stdout:find(".sock", 1, true),
         "and no socket was created: there is no mode without KMES")
-    repair()
-    local line = stderr_line("eventd:", since)
+    eventd.start(vm)
+    local line = eventd.stderr_line(vm,"eventd:", since)
     t:assert(line and (line.message:lower():find("kmes", 1, true)
         or line.message:lower():find("permission", 1, true)
         or line.message:lower():find("operation not permitted", 1, true)),
@@ -333,14 +294,14 @@ test("the phases do not fix the order: the boot ID is read before any store is o
     vm:write_file("/run/pt-bid-order/malformed", "not-a-uuid\n")
     eventd.set(vm, "EventStorePath", "sz:/run/pt-fresh-events"):assert_ok()
     vm:run("mount --bind /run/pt-bid-order/malformed /proc/sys/kernel/random/boot_id"):assert_ok()
-    local since = guest_now(vm)
+    local since = eventd.guest_ns(vm)
     local status = attempt()
     vm:run("umount /proc/sys/kernel/random/boot_id"):assert_ok()
     local listing = vm:run("ls /run/pt-fresh-events").stdout
     eventd.set(vm, "EventStorePath", "sz:/var/state/eventd/events/"):assert_ok()
-    repair()
+    eventd.start(vm)
     t:assert_eq(status.state, "failed", "the malformed boot ID failed startup")
-    t:assert(stderr_line("not a canonical UUID", since), "and it was the boot ID that failed it")
+    t:assert(eventd.stderr_line(vm,"not a canonical UUID", since), "and it was the boot ID that failed it")
     t:assert(not listing:find("eventd-meta.db", 1, true) and not listing:find("shard-0000.db", 1, true),
         "no store had been opened or created when the boot ID was read: "
         .. (listing == "" and "(empty)" or listing))
