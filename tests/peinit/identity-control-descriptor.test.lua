@@ -1,5 +1,6 @@
 -- Peinit TRM §4.7 — the control descriptor: the two operations that are
--- not about any one service, checked against peinit's own descriptor.
+-- not about any one service, and the boot query, checked against peinit's
+-- own descriptor.
 --
 -- `reload-config` is the whole test surface here, and deliberately so.
 -- Both rights can be exercised through it: a caller granted
@@ -113,29 +114,33 @@ test("the two control rights are separate grants",
         clear_control()
     end)
 
-test("the generic rights map onto the two control rights",
+test("the generic rights map onto the three control rights",
     {
         spec = {
-            "peinit *svcsd.control-generic-read-conveys-nothing",
+            "peinit *svcsd.control-generic-read-is-query-status",
             "peinit *svcsd.control-generic-write-is-reload-config",
             "peinit *svcsd.control-generic-execute-is-shutdown",
-            "peinit *svcsd.control-generic-all-is-both",
+            "peinit *svcsd.control-generic-all-is-all-three",
+            "peinit *svcsd.control-query-status-grants-the-boot-query",
         },
     },
     function(t)
-        -- GENERIC_READ conveys no access at all: the control descriptor
-        -- governs two actions and no queries, so there is nothing for a
-        -- read grant to convey. Not an error — just nothing.
+        local boot = function() return verdict(vm:run("svctl boot")) end
+
+        -- GENERIC_READ is SYSTEM_QUERY_STATUS: the boot query, and neither
+        -- action.
         set_control(0x80000000, "denied")
+        t:assert_eq(boot(), "allowed", "GENERIC_READ conveys the boot query")
         t:assert_eq(reload_config(), "denied", "GENERIC_READ does not convey reload-config")
         t:assert_eq(verdict(vm:run("svctl shutdown poweroff")), "denied",
-            "and it does not convey shutdown either, so it conveys nothing")
+            "and it does not convey shutdown either")
 
         -- GENERIC_WRITE is SYSTEM_RELOAD_CONFIG, and that alone.
         set_control(0x40000000, "allowed")
         t:assert_eq(reload_config(), "allowed", "GENERIC_WRITE conveys reload-config")
         t:assert_eq(verdict(vm:run("svctl shutdown poweroff")), "denied",
             "and not shutdown")
+        t:assert_eq(boot(), "denied", "and not the boot query")
 
         -- GENERIC_EXECUTE is SYSTEM_SHUTDOWN, and that alone. Only the
         -- negative half is asserted: the positive half is a machine that
@@ -144,10 +149,11 @@ test("the generic rights map onto the two control rights",
         t:assert_eq(reload_config(), "denied",
             "GENERIC_EXECUTE does not convey reload-config")
 
-        -- GENERIC_ALL is both, which is visible in the one of the two
-        -- that can be asked for without consequence.
+        -- GENERIC_ALL is all three, which is visible in the two that can
+        -- be asked for without consequence.
         set_control(0x10000000, "allowed")
         t:assert_eq(reload_config(), "allowed", "GENERIC_ALL conveys reload-config")
+        t:assert_eq(boot(), "allowed", "and the boot query")
 
         clear_control()
     end)
