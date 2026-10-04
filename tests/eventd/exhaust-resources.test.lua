@@ -175,9 +175,19 @@ test("one user cannot take every query slot; SYSTEM still can", {
         local held = assert(client.connect_as(w, eventd.SOCKET.query, us.SOCK.STREAM, tok))
         vm:run("sleep 1")
         local second = assert(client.connect_as(w, eventd.SOCKET.query, us.SOCK.STREAM, tok))
-        local r = us.recvmsg(w, second, 4096, { cmsg = 0 })
-        answer = r.data or ""
-        detail = "recvmsg ret " .. tostring(r.ret) .. " errno " .. tostring(r.errno)
+        -- The refusal is one frame, a four-byte length and its payload, and
+        -- the stream may deliver the two separately: under load the first
+        -- read can return the length alone. Read until the frame is whole.
+        local buf, r = "", nil
+        for _ = 1, 50 do
+            r = us.recvmsg(w, second, 4096, { cmsg = 0 })
+            if not r.ret or r.ret <= 0 then break end
+            buf = buf .. (r.data or "")
+            if #buf >= 4 and #buf >= 4 + string.unpack("<I4", buf) then break end
+        end
+        answer = buf
+        detail = "read " .. #buf .. " bytes; last recvmsg ret " .. tostring(r and r.ret) ..
+            " errno " .. tostring(r and r.errno)
         system_ok = eventd.query(vm, "EVENTS TAKE 1").ok
         us.sendmsg(w, held, "") -- `held` stays open until here
     end)
