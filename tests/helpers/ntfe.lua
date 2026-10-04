@@ -988,10 +988,18 @@ M.Engine = Engine
 --- worker spawned inside a test() when that test ends, and the source
 --- and the writer are workers.
 ---
---- `policy` nil seeds a Network key with an empty Rules key (nothing
---- publishes: generation stays 0); `o.no_network = true` seeds no
---- Network key at all. `o.seed(src)` runs before registration for
+--- `policy` nil seeds a Network key with an empty Rules key, which
+--- publishes an empty policy: generation 1, `enforcing` 0. Only
+--- `o.no_network = true`, which seeds no Network key at all, leaves the
+--- engine at generation 0. `o.seed(src)` runs before registration for
 --- anything else the hive should hold.
+---
+--- The hive also holds the other keys the kernel reads (the layer
+--- table, KMES, the port reservations), so LCS arms a targeted watch on
+--- each. Without them it falls back to a watch on the hive root, and
+--- every key created anywhere re-runs the bootstrap refresh — an NTFE
+--- walk that publishes and is not a noted change — inside the creating
+--- syscall. `o.fallback = true` leaves them out, for a test of that.
 ---
 --- Returns the handle: `E.vm`, `E.src` (the helpers/lcs source), `E.dev`
 --- (a status fd on the main agent), `E.writer` (a worker for registry
@@ -1005,6 +1013,13 @@ function M.engine(vm, policy, o)
     if not o.no_network then
         self.src:key(M.RULES_KEY)
         if policy then M.seed(self.src, policy) end
+    end
+    -- (The port reservations live under the Network key, so a hive
+    -- without that key is necessarily untargeted.)
+    if not o.fallback and not o.no_network then
+        self.src:key("Machine\\System\\Registry\\Layers")
+        self.src:key("Machine\\System\\KMES")
+        self.src:key(M.NETWORK_KEY .. "\\TcpIp\\PortReservations")
     end
     if o.seed then o.seed(self.src) end
     assert(self.src:register())
