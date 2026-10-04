@@ -192,6 +192,16 @@ test("reading the sessions list is access-checked and PIP-checked",
             t:assert(not text, "an ordinary principal is refused")
             t:assert_eq(e, sys.E.ACCES, "EACCES")
         end)
+        -- Administrators, not the session's creator, are the other reader.
+        local ENABLED = token.GROUP.MANDATORY | token.GROUP.ENABLED_BY_DEFAULT | token.GROUP.ENABLED
+        token.as_principal(t, vm, { groups = {
+            { sid = token.SID.EVERYONE, attributes = ENABLED },
+            { sid = token.SID.AUTHENTICATED_USERS, attributes = ENABLED },
+            { sid = token.SID.ADMINISTRATORS, attributes = ENABLED },
+        } }, function(w)
+            local text, e = read_sessions(w)
+            t:assert(text, "a member of Administrators reads it: " .. sys.errname(e or 0))
+        end)
     end)
 
 test("AccessCheck never consults auth_id; the logon SID acts as an ordinary group",

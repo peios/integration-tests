@@ -395,6 +395,15 @@ test("the non-ptrace-gated /proc entries carry their own descriptor requirement"
         end)
     end)
 
+test("/proc/<pid>/psb reads on PROCESS_QUERY_LIMITED without dominance",
+    { spec = "PKM *pip.proc.psb-exempt-from-dominance",
+      covered_by = "kunit:pkm_kunit_process",
+      skip = "no process in this guest can carry a PIP type (only a " ..
+             "trust-label ACE on its descriptor, which the descriptor " ..
+             "check honours); runs under " ..
+             "pkm_kunit_psb_read_query_limited_crosses_pip" },
+    function(t) end)
+
 test("entries stricter than a metadata query keep their native hardening",
     { spec = "PKM *pip.proc.stricter-entries-keep-native" }, function(t)
         local METADATA = pip.RIGHT.QUERY_LIMITED | pip.RIGHT.QUERY_INFORMATION

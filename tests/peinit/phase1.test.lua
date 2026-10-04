@@ -28,7 +28,7 @@ test("the root writability probe leaves nothing behind",
         end
     end)
 
-test("peinit mounts the four filesystems it owns and re-mounts none of the three it inherits",
+test("peinit mounts the five filesystems it owns and re-mounts none of the three it inherits",
     {
         spec = {
             "peinit *phase1.mounts-only-what-is-absent",
@@ -44,12 +44,13 @@ test("peinit mounts the four filesystems it owns and re-mounts none of the three
             table.insert(at[point], fstype)
         end
 
-        -- The four peinit owns, with the filesystem the table names.
+        -- The five peinit owns, with the filesystem the table names.
         local owned = {
             ["/dev/pts"] = "devpts",
             ["/dev/shm"] = "tmpfs",
             ["/run"] = "tmpfs",
             ["/sys/fs/cgroup"] = "cgroup2",
+            ["/sys/kernel/security"] = "securityfs",
         }
         for point, fstype in pairs(owned) do
             t:assert(at[point], point .. " is mounted")

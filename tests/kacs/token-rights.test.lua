@@ -119,6 +119,79 @@ test("opening another process's token also needs PROCESS_QUERY_INFORMATION on th
         end)
     end)
 
+--- Grant `who` PROCESS_QUERY_INFORMATION and PROCESS_QUERY_LIMITED (which
+--- pidfd_open needs, and the former does not imply) on the process behind
+--- `pidfd`, leaving SYSTEM everything.
+local function grant_process_query(pidfd, who)
+    local psd = access.sd({ dacl = access.acl({
+        access.ace(access.ACE.ALLOWED, PROCESS_QUERY_INFORMATION | 0x1000, who),
+        access.ace(access.ACE.ALLOWED, 0x1FFFFF, token.SID.LOCAL_SYSTEM) }) })
+    return vm:syscall(kacs.SYS.SET_SD, {
+        args = { pidfd, 0, kacs.SI.DACL, 0, #psd, sys.AT_EMPTY_PATH },
+        bufs = { sys.cstr(""), psd }, ptrs = { 1, 3 } })
+end
+
+test("/proc/<pid>/token needs the token's own TOKEN_QUERY as well as QUERY_INFORMATION on the process",
+    { spec = "PKM *token.rights.proc-token-file" }, function(t)
+        token.as_principal(t, vm, {}, function(a)
+            local a_pid = a:syscall(sys.NR.getpid).ret
+            local a_tok, a_pidfd = reach(a)
+            t:assert_eq(grant_process_query(a_pidfd, token.SID.TEST_USER_2).ret, 0,
+                "A's process grants B QUERY_INFORMATION")
+            token.as_principal(t, vm, { user_sid = token.SID.TEST_USER_2, projected_uid = 1102 }, function(b)
+                local path = "/proc/" .. a_pid .. "/token"
+                local fd, errno = sys.open(b, path, sys.O.RDONLY)
+                if fd then sys.close(b, fd) end
+                t:assert(not fd and errno == sys.E.ACCES,
+                    "the default token descriptor names neither B nor a group of B's: EACCES, "
+                        .. sys.errname(errno or 0))
+                t:assert_eq(set_dacl(a_tok, {
+                    access.ace(access.ACE.ALLOWED, R.QUERY, token.SID.TEST_USER_2),
+                    access.ace(access.ACE.ALLOWED, R.ALL_ACCESS, token.SID.LOCAL_SYSTEM) }).ret, 0,
+                    "A's token now grants B TOKEN_QUERY")
+                fd, errno = sys.open(b, path, sys.O.RDONLY)
+                t:assert(fd, "and B opens it: " .. sys.errname(errno or 0))
+                t:assert_eq(token.query(b, fd, token.CLASS.USER), token.SID.TEST_USER, "it is A's")
+                sys.close(b, fd)
+            end)
+            sys.close(vm, a_tok); sys.close(vm, a_pidfd)
+        end)
+    end)
+
+test("the default token descriptor lets Administrators read a token, and nothing more",
+    { spec = "PKM *token.rights.default-sd-administrators-query" }, function(t)
+        local ENABLED = token.GROUP.MANDATORY | token.GROUP.ENABLED_BY_DEFAULT | token.GROUP.ENABLED
+        token.as_principal(t, vm, {}, function(a)
+            local a_pid = a:syscall(sys.NR.getpid).ret
+            local a_tok, a_pidfd = reach(a)
+            t:assert_eq(grant_process_query(a_pidfd, token.SID.ADMINISTRATORS).ret, 0,
+                "A's process grants Administrators QUERY_INFORMATION")
+            token.as_principal(t, vm, { user_sid = token.SID.TEST_USER_2, projected_uid = 1102,
+                groups = {
+                    { sid = token.SID.EVERYONE, attributes = ENABLED },
+                    { sid = token.SID.AUTHENTICATED_USERS, attributes = ENABLED },
+                    { sid = token.SID.ADMINISTRATORS, attributes = ENABLED },
+                } }, function(b)
+                local fd, errno = sys.open(b, "/proc/" .. a_pid .. "/token", sys.O.RDONLY)
+                t:assert(fd, "an administrator who is not A, A's creator or SYSTEM reads A's token: "
+                    .. sys.errname(errno or 0))
+                if fd then
+                    t:assert_eq(token.query(b, fd, token.CLASS.USER), token.SID.TEST_USER, "it is A's")
+                    sys.close(b, fd)
+                end
+                local pidfd = assert(token.pidfd_open(b, a_pid))
+                fd, errno = token.open_process(b, pidfd, R.QUERY)
+                t:assert(fd, "so does the syscall, for TOKEN_QUERY: " .. sys.errname(errno or 0))
+                if fd then sys.close(b, fd) end
+                fd, errno = token.open_process(b, pidfd, R.DUPLICATE)
+                t:assert(not fd and errno == sys.E.ACCES, "but TOKEN_DUPLICATE is refused: "
+                    .. sys.errname(errno or 0))
+                sys.close(b, pidfd)
+            end)
+            sys.close(vm, a_tok); sys.close(vm, a_pidfd)
+        end)
+    end)
+
 test("self-query follows from the default descriptor and can be revoked by rewriting it",
     { spec = "PKM *token.rights.self-query-revocable" }, function(t)
         token.as_principal(t, vm, {}, function(w)
@@ -224,7 +297,7 @@ test("DELETE has no effect on a token",
         sys.close(vm, fd)
     end)
 
-test("a new token's descriptor is owned by the creator with the three-ACE default DACL",
+test("a new token's descriptor is owned by the creator with the four-ACE default DACL",
     { spec = "PKM *token.rights.default-descriptor" }, function(t)
         local fd = assert(token.mint(vm, {}))
         local sd = token.parse_sd(assert(token.get_sd(vm, fd)))
@@ -245,7 +318,8 @@ test("a new token's descriptor is owned by the creator with the three-ACE defaul
             t:assert_eq(token.find_ace(msd.dacl, token.SID.TEST_USER, 0).mask, SELF_RIGHTS, "subject: the adjust set")
             t:assert_eq(token.find_ace(msd.dacl, token.SID.TEST_USER_2, 0).mask, R.ALL_ACCESS, "creator: ALL_ACCESS")
             t:assert_eq(token.find_ace(msd.dacl, token.SID.LOCAL_SYSTEM, 0).mask, R.ALL_ACCESS, "SYSTEM: ALL_ACCESS")
-            t:assert_eq(#msd.dacl, 3, "and nothing else")
+            t:assert_eq(token.find_ace(msd.dacl, token.SID.ADMINISTRATORS, 0).mask, R.QUERY, "Administrators: QUERY only")
+            t:assert_eq(#msd.dacl, 4, "and nothing else")
         end)
         sys.close(vm, fd)
     end)

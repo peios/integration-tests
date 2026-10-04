@@ -180,6 +180,32 @@ test("cgroup sits in the PROCESS_QUERY_LIMITED set, not the detailed one",
         end)
     end)
 
+test("/proc/<pid>/psb reads on PROCESS_QUERY_LIMITED and says the process's PIP and mitigations",
+    { spec = { "PKM *psb.proc.psb-file", "PKM *psb.proc.psb-read-access" } }, function(t)
+        local function proc_text(w, pid, name)
+            local fd, errno = sys.open(w, "/proc/" .. pid .. "/" .. name, sys.O.RDONLY)
+            if not fd then return nil, "open:" .. sys.errname(errno or 0) end
+            local data, rerrno = sys.read(w, fd, 256)
+            sys.close(w, fd)
+            if not data then return nil, "read:" .. sys.errname(rerrno or 0) end
+            return data
+        end
+        against(t, R.QUERY_LIMITED, function(w, pid)
+            local text, why = proc_text(w, pid, "psb")
+            t:assert(text, "it reads on PROCESS_QUERY_LIMITED alone: " .. tostring(why))
+            t:assert(text and text:match(
+                "^pip_type=%d+ pip_trust=%d+ mitigations=0x%x%x%x process_guid=" ..
+                "%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x\n$"),
+                "one line of key=value pairs: " .. tostring(text))
+            t:assert(text and text:match("^pip_type=0 pip_trust=0 "),
+                "an unsigned target is not protected")
+        end)
+        against(t, psb.ALL_RIGHTS & ~R.QUERY_LIMITED, function(w, pid)
+            t:assert_eq(proc_read(w, pid, "psb"), "read:EACCES (13)",
+                "and it is refused when that right is withheld")
+        end)
+    end)
+
 -- The ptrace-mode surfaces -------------------------------------------------
 
 test("PROCESS_VM_READ is what reading another process's memory needs",

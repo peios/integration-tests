@@ -88,6 +88,28 @@ test("devpts carries a synthesised descriptor, and a slave the kernel materialis
             "/dev/shm names no Authenticated Users ACE: " .. shm.raw)
     end)
 
+test("securityfs carries a synthesised descriptor, so KACS's files open and still check their reads",
+    { spec = "peinit *phase1.securityfs-gets-a-synthesise-ephemeral-policy" },
+    function(t)
+        -- securityfs cannot store a descriptor either, so without the
+        -- policy kacs/sessions is unopenable even to SYSTEM. The template
+        -- gives SYSTEM full control and Authenticated Users read and
+        -- traverse; Administrators get nothing of their own here.
+        local mount = descriptor("/sys/kernel/security/kacs/sessions")
+        t:assert(ace_for(mount, "S-1-5-18"), "SYSTEM: " .. mount.raw)
+        local authenticated = ace_for(mount, "S-1-5-11")
+        t:assert(authenticated, "Authenticated Users: " .. mount.raw)
+        t:assert(not ace_for(mount, "S-1-5-32-544"),
+            "and no Administrators ACE of its own: " .. mount.raw)
+
+        -- The console runs as an administrator, so the file's own check
+        -- (Administrators and SYSTEM) lets this read through.
+        local sessions = vm:run("cat /sys/kernel/security/kacs/sessions")
+        sessions:assert_ok()
+        t:assert(sessions.stdout:find("logon_session_id=999 ", 1, true),
+            "the listing reads, SYSTEM's session first among them: " .. sessions.stdout)
+    end)
+
 test("a stamped device node keeps the owner and group the seed gave it",
     { spec = "peinit *phase1.device-node-stamping-replaces-only-the-dacl" },
     function(t)

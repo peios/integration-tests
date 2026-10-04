@@ -101,13 +101,13 @@ test("a filesystem that is not the root is mounted by a service, not by peinit",
         -- this machine came from the initramfs — the medium, the root
         -- overlay and the StrataFS views, all of which the console
         -- attributes to a hook before the handoff — or from the service
-        -- above. Nothing peinit mounts is outside the seven rows of the
+        -- above. Nothing peinit mounts is outside the eight rows of the
         -- table, so a mount point that is neither is evidence about
         -- someone else.
         local peinit_owned = {
             ["/proc"] = true, ["/sys"] = true, ["/dev"] = true,
             ["/dev/pts"] = true, ["/dev/shm"] = true, ["/run"] = true,
-            ["/sys/fs/cgroup"] = true,
+            ["/sys/fs/cgroup"] = true, ["/sys/kernel/security"] = true,
         }
         local log = vm:console():read_log()
         local handoff = log:find("prelude: exec /bin/peinit2", 1, true)
