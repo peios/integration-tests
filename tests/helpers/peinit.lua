@@ -167,12 +167,22 @@ end
 --- Staged rather than injected into the image: the tool is apparatus,
 --- and a test that does not ask for it should not be booting a guest
 --- that carries it.
-function M.tool(name)
+---
+--- `opts.signed` PIP-signs the tool at the TCB tier (tests/tools/sign.sh),
+--- for one that must signal, trace or read the /proc of a TCB-signed
+--- process: PID 1, authd, eventd. An unsigned tool is refused all three.
+function M.tool(name, opts)
     local pipe = assert(io.popen("sh tests/tools/build.sh '" .. name .. "'", "r"))
     local path = pipe:read("*l")
     local ok = pipe:close()
     assert(ok and path and path ~= "",
         "peinit.tool: could not build `" .. name .. "` (see stderr)")
+    if opts and opts.signed then
+        local signed = path .. ".signed"
+        assert(os.execute("sh tests/tools/sign.sh '" .. path .. "' '" .. signed .. "'"),
+            "peinit.tool: could not PIP-sign `" .. name .. "` (see stderr)")
+        path = signed
+    end
 
     local file = assert(io.open(path, "rb"),
         "peinit.tool: built `" .. name .. "` but could not read " .. path)

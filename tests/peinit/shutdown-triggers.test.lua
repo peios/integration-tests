@@ -37,6 +37,9 @@ peinit.claim(1)
 --- closed, so a test that boots a second one without this fails on the
 --- claim rather than queueing.
 local function with_vm(opts, body)
+    -- pt-signal, staged TCB-signed: PID 1 is TCB-signed and refuses a
+    -- signal from the shell's unsigned `kill`.
+    opts.files = peinit.merge(opts.files or {}, peinit.tool("pt-signal", { signed = true }))
     local vm = peinit.boot(opts)
     local ok, err = pcall(body, vm)
     pcall(function() vm:shutdown() end)
@@ -112,21 +115,21 @@ test("the control socket's shutdown command names a kind, and each kind reaches 
 test("SIGINT reboots, SIGTERM and SIGPWR power off",
     { spec = "peinit *sdtrig.sigint-reboots-and-sigterm-and-sigpwr-power-off" },
     function(t)
-        -- `kill` is the shell's builtin, so this keeps working after
-        -- registryd and the rest have gone. SIGPWR has no portable name
-        -- in the guest's shell, so it goes by number: 30 on x86-64.
+        -- pt-signal, staged TCB-signed by with_vm: PID 1 is TCB-signed and
+        -- refuses the shell's unsigned `kill`. Numbers, x86-64: SIGINT 2,
+        -- SIGTERM 15, SIGPWR 30.
         local signals = {
-            { "-INT", "peinit: shutdown Reboot started" },
-            { "-TERM", "peinit: shutdown Poweroff started" },
-            { "-30", "peinit: shutdown Poweroff started" },
+            { "INT", 2, "peinit: shutdown Reboot started" },
+            { "TERM", 15, "peinit: shutdown Poweroff started" },
+            { "PWR", 30, "peinit: shutdown Poweroff started" },
         }
         for _, case in ipairs(signals) do
-            local signal, banner = case[1], case[2]
-            with_vm({ name = "sig" .. signal:gsub("-", ""), append = "peios.quiet=0" }, function(vm)
+            local signal, number, banner = case[1], case[2], case[3]
+            with_vm({ name = "sig" .. signal, append = "peios.quiet=0" }, function(vm)
                 settle(vm)
-                trigger(vm, "kill " .. signal .. " 1")
+                trigger(vm, "/usr/bin/pt-signal 1 " .. number)
                 vm:console():expect(banner, 30)
-                t:assert(true, "kill " .. signal .. " 1 gave: " .. banner)
+                t:assert(true, "SIG" .. signal .. " to PID 1 gave: " .. banner)
             end)
         end
     end)
@@ -171,7 +174,7 @@ test("three SIGINTs inside five seconds force an immediate reboot, even once a g
                 :find('"state":"active"', 1, true),
                 "the service that will hold the graceful reboot open is running")
 
-            trigger(vm, "kill -INT 1; sleep 1; kill -INT 1; sleep 1; kill -INT 1")
+            trigger(vm, "/usr/bin/pt-signal 1 2 3 1") -- SIGINT, three times, 1 s apart
             vm:console():expect("reboot: Restarting system", 60)
 
             local log = vm:console():read_log()
@@ -363,7 +366,7 @@ test("the power button path survives a missing /dev/input, and the socket and si
             -- The boot went on without it, the control socket answers…
             vm:run("svctl --json list"):assert_ok()
             -- …and a signal still shuts the machine down.
-            trigger(vm, "kill -TERM 1")
+            trigger(vm, "/usr/bin/pt-signal 1 15") -- SIGTERM
             vm:console():expect("peinit: shutdown Poweroff started", 30)
             vm:console():expect("reboot: Power down", 60)
         end)

@@ -62,16 +62,25 @@ local BLOCKER = {
 --- a SIGCHLD for PID 1 — which would make PID 1's signalfd ready early, at
 --- a moment nobody chose, and spoil every ordering below. `--no-wait` is
 --- answered before the start reaches authd, so the foreground call returns.
+---
+--- authd is PIP-signed at the TCB tier, so it is stopped and continued by
+--- the agent itself (the profile signs the agent at the same tier), never
+--- by a `kill` run through the shell: a command is a fresh, unsigned exec,
+--- and PIP refuses it every signal to authd.
+local SIGSTOP, SIGCONT, NR_KILL = 19, 18, 62
+
 local function hold_pid1(t, vm)
-    local authd = vm:run("svctl status authd").stdout:match("pid: (%d+)")
+    local authd = tonumber(vm:run("svctl status authd").stdout:match("pid: (%d+)"))
     t:assert(authd, "authd is running")
-    vm:run("kill -STOP " .. authd):assert_ok()
+    local stopped = vm:syscall(NR_KILL, authd, SIGSTOP)
+    t:assert_eq(stopped.ret, 0, "stopped authd (errno " .. tostring(stopped.errno) .. ")")
     vm:run("svctl start pt-blocker --no-wait"):assert_ok()
     wait_until(function()
         return read_or_empty(vm, "/proc/1/wchan"):find("unix_stream_read", 1, true)
     end, { timeout = 10, interval = 0.1, desc = "PID 1 to be waiting on authd" })
     return function()
-        vm:run("kill -CONT " .. authd):assert_ok()
+        local resumed = vm:syscall(NR_KILL, authd, SIGCONT)
+        assert(resumed.ret == 0, "continued authd (errno " .. tostring(resumed.errno) .. ")")
     end
 end
 
@@ -182,7 +191,9 @@ local function race_button_and_sigint(t, name, order)
         if trigger == "button" then
             vm:power_button()
         else
-            vm:run("kill -INT 1"):assert_ok()
+            -- PID 1 is TCB-signed: the agent signals it, not a shell.
+            local r = vm:syscall(NR_KILL, 1, 2) -- SIGINT
+            t:assert_eq(r.ret, 0, "sent PID 1 SIGINT (errno " .. tostring(r.errno) .. ")")
         end
         vm:run("sleep 1")
     end
@@ -245,7 +256,9 @@ test("PID 1 carries on when its epoll wait is interrupted by a tracer",
         local vm = peinit.boot({
             memory = MEM, cpus = CPUS,
             name = "fair-eintr",
-            files = peinit.tool("pt-pause1"),
+            -- Signed: PID 1 is TCB-signed, and PIP refuses an unsigned
+            -- tracer its attach.
+            files = peinit.tool("pt-pause1", { signed = true }),
         })
         peinit.settle(vm, { all = true })
         vm:run("( /usr/bin/pt-pause1 /run/pt-pause.log 2 ) > /dev/null 2>&1 &"):assert_ok()

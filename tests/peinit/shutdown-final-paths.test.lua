@@ -75,9 +75,11 @@ local PATHS = {
     forced = {
         services = { STUBBORN },
         -- One guest command, a second apart: see shutdown-triggers for
-        -- why both halves of that matter.
+        -- why both halves of that matter. pt-signal rather than the
+        -- shell's kill, because PID 1 is TCB-signed and refuses an
+        -- unsigned sender; the tool is staged signed.
         fire = function(vm)
-            trigger(vm, "kill -INT 1; sleep 1; kill -INT 1; sleep 1; kill -INT 1")
+            trigger(vm, "/usr/bin/pt-signal 1 2 3 1")
         end,
         kernel = "reboot: Restarting system",
         cmd = RB_AUTOBOOT,
@@ -115,6 +117,7 @@ local function run_path(name)
         append = "peios.quiet=0",
         files = peinit.merge(
             shutdown.tool(),
+            peinit.tool("pt-signal", { signed = true }),
             { [SEED:sub(2)] = string.rep("pt-seed-", 64) },
             peinit.seed("pt-" .. name, keys)),
     })

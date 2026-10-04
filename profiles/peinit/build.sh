@@ -208,27 +208,18 @@ rmdir "$agent_dir/sbin"
 # PIP denies a non-dominant process every signal and every /proc read of
 # them. The agent is a test's hands, so it is signed at the same tier with
 # the development keyring the image's packages are signed with
-# (agent-sign.pekit.toml says how). A host without that keyring cannot
+# (tests/tools/sign.sh). Only the agent's own operations carry the
+# signature: a command it runs is a fresh, unsigned exec, which is why a
+# test signals a protected process through vm:syscall, not `kill`, and
+# stages a tracing tool with `peinit.tool(name, {signed = true})`. A host
+# without that keyring cannot
 # build this profile usefully, so it fails here rather than produce an
 # agent that quietly cannot reach half the system.
-keyring=$(readlink -f "${PEIOS_DEV_KEYRING:-../../../pkgs/dev.keyring.pekit.toml}" 2>/dev/null || true)
-[ -n "$keyring" ] && [ -r "$keyring" ] || {
-    warn "no development keyring to sign the agent with: set PEIOS_DEV_KEYRING" \
-         "(default ../../../pkgs/dev.keyring.pekit.toml)"
+sh ../../tests/tools/sign.sh "$agent_dir/provium-agent" "$agent_dir/provium-agent.signed" || {
+    warn "could not PIP-sign the agent (tests/tools/sign.sh)"
     exit 1
 }
-pekit=${PEKIT:-$(command -v pekit || echo "$HOME/go/bin/pekit")}
-sign_dir="$out/agent-sign"
-rm -rf "$sign_dir"
-mkdir -p "$sign_dir/sbin"
-cp agent-sign.pekit.toml "$sign_dir/pekit.toml"
-cp "$agent_dir/provium-agent" "$sign_dir/sbin/provium-agent"
-(cd "$sign_dir" && "$pekit" --quiet build main --version 0.0.0 --keyring "$keyring") || {
-    warn "pekit could not PIP-sign the agent"
-    exit 1
-}
-cp "$sign_dir/out/build/main/usr/bin/provium-agent" "$agent_dir/provium-agent"
-rm -rf "$sign_dir"
+mv "$agent_dir/provium-agent.signed" "$agent_dir/provium-agent"
 cp payload/10-provium-agent.sh "$agent_dir/"
 
 cat > "$agent_dir/agent.toml" <<'SPEC'

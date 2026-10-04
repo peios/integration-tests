@@ -1,0 +1,16 @@
+# A sign-only recipe: PIP-sign one binary at the TCB tier. sign.sh copies
+# the binary beside this file as `payload` and runs `pekit build main`
+# here with the development keyring; the signed copy lands in
+# out/build/main/bin/payload.
+#
+# Signing at the TCB tier is what lets a binary dominate the image's
+# TCB-signed processes (peinit, authd, eventd): PIP denies a non-dominant
+# process every signal, ptrace and /proc read of them (PKM §3.7).
+
+out_dir = "out"
+
+[build.main]
+command = 'mkdir -p "$PEKIT_OUT/bin" && cp "$PEKIT_SOURCE_ROOT/payload" "$PEKIT_OUT/bin/payload"'
+
+[build.main.sign.pip]
+"bin/payload" = "tcb.priv"

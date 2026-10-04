@@ -30,7 +30,9 @@ local M = {}
 
 --- The witness, as a `files` entry.
 function M.tool()
-    return peinit.tool("pt-shutwatch")
+    -- Signed: it traces and reads the /proc of PID 1, which is TCB-signed,
+    -- and PIP refuses an unsigned process both.
+    return peinit.tool("pt-shutwatch", { signed = true })
 end
 
 --- Start the witness and wait until all three of its sources are armed.
