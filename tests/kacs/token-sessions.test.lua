@@ -145,14 +145,19 @@ local function ensure_securityfs()
     return true
 end
 
---- Read the sessions file as `who`. Returns text, or nil, errno.
+--- Read the sessions file as `who`. Returns text, or nil, errno, and
+--- which of open and read refused.
 local function read_sessions(who)
     local fd, e = sys.open(who, SECURITYFS .. "/kacs/sessions", sys.O.RDONLY)
-    if not fd then return nil, e end
+    if not fd then return nil, e, "open" end
     local out = {}
     while true do
         local chunk, re = sys.read(who, fd, 4096)
-        if not chunk or #chunk == 0 then break end
+        if not chunk then
+            sys.close(who, fd)
+            return nil, re, "read"
+        end
+        if #chunk == 0 then break end
         out[#out + 1] = chunk
     end
     sys.close(who, fd)
@@ -187,20 +192,27 @@ test("reading the sessions list is access-checked and PIP-checked",
         t:assert(ok, "securityfs mounts with a synthesise policy: " .. tostring(why))
         local text, e = read_sessions(vm)
         t:assert(text, "SYSTEM reads it: " .. sys.errname(e or 0))
-        token.as_principal(t, vm, {}, function(w)
-            local text, e = read_sessions(w)
+        -- Each principal may traverse to the file, as every signed-in one
+        -- may, so the file's own check on read is what decides.
+        local CHANGE_NOTIFY = token.bit(token.PRIV.CHANGE_NOTIFY)
+        local reader = { privs_present = CHANGE_NOTIFY, privs_enabled = CHANGE_NOTIFY }
+        token.as_principal(t, vm, reader, function(w)
+            local text, e, which = read_sessions(w)
             t:assert(not text, "an ordinary principal is refused")
             t:assert_eq(e, sys.E.ACCES, "EACCES")
+            t:assert_eq(which, "read", "by the file's check on read, not on the way to it")
         end)
         -- Administrators, not the session's creator, are the other reader.
         local ENABLED = token.GROUP.MANDATORY | token.GROUP.ENABLED_BY_DEFAULT | token.GROUP.ENABLED
-        token.as_principal(t, vm, { groups = {
+        reader.groups = {
             { sid = token.SID.EVERYONE, attributes = ENABLED },
             { sid = token.SID.AUTHENTICATED_USERS, attributes = ENABLED },
             { sid = token.SID.ADMINISTRATORS, attributes = ENABLED },
-        } }, function(w)
-            local text, e = read_sessions(w)
-            t:assert(text, "a member of Administrators reads it: " .. sys.errname(e or 0))
+        }
+        token.as_principal(t, vm, reader, function(w)
+            local text, e, which = read_sessions(w)
+            t:assert(text, "a member of Administrators reads it: " .. sys.errname(e or 0)
+                .. " on " .. tostring(which))
         end)
     end)
 
