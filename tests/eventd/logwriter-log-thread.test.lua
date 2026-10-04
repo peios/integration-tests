@@ -37,85 +37,9 @@ local vm = eventd.boot({ name = "ev-logwriter" })
 -- Local helpers
 -- ---------------------------------------------------------------------------
 
-local MSG_DONTWAIT = unixsock.MSG.DONTWAIT
 local EAGAIN = 11
 
-local function host_tmpdir()
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l")
-    p:close()
-    return dir
-end
-
-local function host_write(path, bytes)
-    local f = assert(io.open(path, "wb"))
-    f:write(bytes)
-    f:close()
-end
-
-local function host_read(path)
-    local f = assert(io.open(path, "rb"))
-    local s = f:read("a")
-    f:close()
-    return s
-end
-
-local function host_edit(db, script)
-    local dir = host_tmpdir()
-    host_write(dir .. "/db", vm:read_file(db))
-    local okw, wal = pcall(vm.read_file, vm, db .. "-wal")
-    if okw and wal and #wal > 0 then host_write(dir .. "/db-wal", wal) end
-    host_write(dir .. "/edit.sql", script)
-    host_write(dir .. "/run.py", [[
-import sqlite3, sys
-d = sys.argv[1]
-c = sqlite3.connect(d + "/db")
-c.executescript(open(d + "/edit.sql").read())
-c.commit()
-c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-c.close()
-]])
-    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
-    local out = p:read("a")
-    local ok = p:close()
-    assert(ok, "host sqlite edit failed: " .. out)
-    local bytes = host_read(dir .. "/db")
-    os.execute("rm -rf '" .. dir .. "'")
-    vm:run("rm -f '" .. db .. "-wal' '" .. db .. "-shm'"):assert_ok()
-    vm:write_file(db, bytes)
-end
-
-local function stop_eventd()
-    vm:run("svctl stop eventd"):assert_ok()
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 60, interval = 0.25, desc = "eventd to stop" })
-end
-
-local function start_eventd()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
-end
-
-local function guest_now_ns()
-    return math.tointeger(tonumber((vm:run("date +%s%N").stdout:gsub("%s", ""))))
-end
-
-local function boot_pcds_hex()
-    local u = vm:run("cat /proc/sys/kernel/random/boot_id").stdout:gsub("%s", ""):gsub("-", "")
-    local b = {}
-    for i = 1, 32, 2 do b[#b + 1] = u:sub(i, i + 1) end
-    local out = {}
-    for _, i in ipairs({ 4, 3, 2, 1, 6, 5, 8, 7, 9, 10, 11, 12, 13, 14, 15, 16 }) do
-        out[#out + 1] = b[i]
-    end
-    return table.concat(out):upper()
-end
-
 local function sql_quote(s) return "'" .. s:gsub("'", "''") .. "'" end
-
-local function hex(s)
-    return (s:gsub(".", function(c) return string.format("%02X", c:byte()) end))
-end
 
 --- Commit frames in the current generation of logs.db's WAL, and its salt.
 local function wal_state()
@@ -172,17 +96,13 @@ end
 local function burst(n, per)
     local origin = eventd.marker("burst")
     local data = eventd.msgpack(records(origin, per))
-    local addr, len = unixsock.sockaddr(eventd.SOCKET.log)
     local pid = eventd.pid(vm)
-    vm:run("kill -STOP " .. pid):assert_ok()
+    eventd.freeze(vm, pid)
     for _ = 1, n do
-        local fd = unixsock.socket(vm, unixsock.AF_UNIX, unixsock.SOCK.DGRAM)
-        local r = vm:syscall(unixsock.NR.sendto, {
-            args = { fd, 0, #data, MSG_DONTWAIT, 0, len }, bufs = { data, addr }, ptrs = { 1, 4 } })
-        vm:syscall(3, fd)
+        local r = eventd.sendto(vm, nil, data, eventd.SOCKET.log, eventd.DONTWAIT)
         assert(r.ret == #data, "burst datagram queued (errno " .. tostring(r.errno) .. ")")
     end
-    vm:run("kill -CONT " .. pid):assert_ok()
+    eventd.thaw(vm, pid)
     eventd.wait_rows(vm, "LOGS FROM " .. origin .. " TAKE 1000000",
         function(rs) return #rs == n * per end, { timeout = 60 })
     return origin
@@ -206,7 +126,7 @@ test("a discarded origin is reported on stderr at once, then at most once a minu
     spec = "eventd *logwriter.a-discard-is-reported-on-stderr-at-the-first-occurrence-then-at-most-once-a-minute"
         .. " eventd *logwriter.the-stderr-report-is-stored-as-a-log-record-under-the-origin-eventd",
 }, function(t)
-    local from = guest_now_ns()
+    local from = eventd.guest_ns(vm)
     local function reports(m)
         local n = 0
         for _, r in ipairs(eventd_lines(from)) do
@@ -253,8 +173,7 @@ test("one log thread, separate from the event drain and writer threads", {
         .. " eventd *logwriter.one-thread-does-both-the-socket-reads-and-the-sqlite-writes",
 }, function(t)
     local pid = eventd.pid(vm)
-    local names = {}
-    for n in vm:run("cat /proc/" .. pid .. "/task/*/comm").stdout:gmatch("[^\n]+") do names[#names + 1] = n end
+    local names = eventd.thread_names(vm, pid)
     local log, writers, drains = {}, 0, 0
     for _, n in ipairs(names) do
         if n:find("log", 1, true) then log[#log + 1] = n end
@@ -265,12 +184,7 @@ test("one log thread, separate from the event drain and writer threads", {
     t:assert(writers >= 1 and drains >= 1, "beside the event writers and drains, which are threads of their own")
     -- And logs.db has exactly one read-write connection, which by the
     -- above can only be that thread's.
-    local rw = vm:run("for f in /proc/" .. pid .. "/fd/*; do [ \"$(readlink $f)\" = " .. eventd.DB.logs
-        .. " ] && sed -n 's/^flags:[[:space:]]*//p' /proc/" .. pid .. "/fdinfo/${f##*/}; done").stdout
-    local n = 0
-    for flags in rw:gmatch("%d+") do
-        if tonumber(flags, 8) & 3 == 2 then n = n + 1 end
-    end
+    local n = (eventd.fds_on(vm, pid, eventd.DB.logs))
     t:assert_eq(n, 1, "one read-write descriptor on logs.db")
 end)
 
@@ -295,19 +209,17 @@ test("while the socket is not drained, its max_dgram_qlen queue fills and the ke
 }, function(t)
     local qlen = tonumber(vm:read_file("/proc/sys/net/unix/max_dgram_qlen"):match("%d+"))
     local origin = eventd.marker("q")
-    local addr, len = unixsock.sockaddr(eventd.SOCKET.log)
     local fd = unixsock.socket(vm, unixsock.AF_UNIX, unixsock.SOCK.DGRAM)
     local pid = eventd.pid(vm)
-    vm:run("kill -STOP " .. pid):assert_ok()
+    eventd.freeze(vm, pid)
     local accepted, refused = 0, 0
     local body = string.rep("x", 1000)
     for i = 1, 300 do
         local data = eventd.msgpack({ origin = origin, is_error = false, message = body .. i })
-        local r = vm:syscall(unixsock.NR.sendto, {
-            args = { fd, 0, #data, MSG_DONTWAIT, 0, len }, bufs = { data, addr }, ptrs = { 1, 4 } })
+        local r = eventd.sendto(vm, fd, data, eventd.SOCKET.log, eventd.DONTWAIT)
         if r.ret == #data then accepted = accepted + 1 elseif r.errno == EAGAIN then refused = refused + 1 end
     end
-    vm:run("kill -CONT " .. pid):assert_ok()
+    eventd.thaw(vm, pid)
     vm:syscall(3, fd)
     local stored = #eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago",
         function(rs) return #rs >= accepted end, { timeout = 20 })
@@ -446,9 +358,9 @@ test("the writer works from its own set of known origins, loaded from the catalo
     local origin = eventd.marker("mem")
     eventd.send_log(vm, { origin = origin, is_error = false, message = "1" })
     eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 1 end)
-    stop_eventd()
-    host_edit(eventd.DB.logs, "DELETE FROM log_origins WHERE origin = " .. sql_quote(origin) .. ";")
-    start_eventd()
+    eventd.stop(vm)
+    eventd.edit_store(vm, eventd.DB.logs, "DELETE FROM log_origins WHERE origin = " .. sql_quote(origin) .. ";")
+    eventd.start(vm)
     eventd.send_log(vm, { origin = origin, is_error = false, message = "2" })
     local ok = pcall(wait_until, function()
         return #eventd.sql(vm, eventd.DB.logs, "SELECT 1 FROM log_origins WHERE origin = " .. sql_quote(origin)) == 1
@@ -476,19 +388,19 @@ test("eventd adds the boot ID and, when absent, the receipt time; the rest is st
     local origin = eventd.marker("as")
     local message = "  tabs\there, CRLF\r\n, quote \" back \\ snowman \u{2603} nul \0 end  "
     local job = "\1\2\3\4\5\6\7\8\9\10\11\12\13\14\15\16"
-    local before = guest_now_ns()
+    local before = eventd.guest_ns(vm)
     eventd.send_log(vm, { origin = origin, is_error = true, message = message, job_id = eventd.bin(job) })
     eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 1 end)
-    local after = guest_now_ns()
+    local after = eventd.guest_ns(vm)
     local r = eventd.sql(vm, eventd.DB.logs,
         "SELECT hex(boot_id), timestamp, origin, is_error, hex(CAST(message AS BLOB)), hex(job_id) FROM logs WHERE origin = "
         .. sql_quote(origin))[1]
-    t:assert_eq(r[1], boot_pcds_hex(), "eventd supplied this boot's ID")
+    t:assert_eq(r[1], eventd.boot_pcds_hex(vm), "eventd supplied this boot's ID")
     t:assert(r[2] >= before and r[2] <= after, "and its own clock at receipt: " .. r[2])
     t:assert_eq(r[3], origin, "origin as given")
     t:assert_eq(r[4], 1, "is_error as given")
-    t:assert_eq(r[5], hex(message), "message byte for byte")
-    t:assert_eq(r[6], hex(job), "job_id as given")
+    t:assert_eq(r[5], eventd.hex(message, true), "message byte for byte")
+    t:assert_eq(r[6], eventd.hex(job, true), "job_id as given")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -550,7 +462,7 @@ test("a committed log line survives eventd being killed", {
     eventd.send_log(vm, { origin = origin, is_error = false, message = "before the crash" })
     eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 1 end)
     local pid = eventd.pid(vm)
-    vm:run("kill -9 " .. pid):assert_ok()
+    eventd.signal(vm, pid, "KILL")
     wait_until(function()
         local now = eventd.pid(vm)
         return now ~= nil and now ~= pid
@@ -575,19 +487,12 @@ test("discards are counted and the last bad origin is kept escaped and cut to 64
         { origin = last, is_error = false, message = "x" },
     })
     vm:clock():sleep("2s")
-    local from = guest_now_ns()
-    vm:run("kill -QUIT " .. eventd.pid(vm)):assert_ok()
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 60, interval = 0.25, desc = "eventd to exit after its dump" })
-    start_eventd()
+    local d = eventd.quit_dump(vm, { timeout = 60 })
     local count, shown
-    pcall(wait_until, function()
-        for _, r in ipairs(eventd_lines(from)) do
-            count = count or tonumber(r.message:match("log_ingress: rejected_origins=(%d+)"))
-            shown = shown or r.message:match("last_rejected_log_origin: \"(.*)\"$")
-        end
-        return count and shown
-    end, { timeout = 30, interval = 0.5, desc = "the dump to reach the log store" })
+    for _, m in ipairs(d.messages) do
+        count = count or tonumber(m:match("log_ingress: rejected_origins=(%d+)"))
+        shown = shown or m:match("last_rejected_log_origin: \"(.*)\"$")
+    end
     t:assert_eq(count, 3, "the dump counts the three discards")
     local want = ("\\\"" .. string.rep("y", 100)):sub(1, 64) .. "…"
     t:assert_eq(shown, want, "and shows the last origin escaped, cut to 64 characters")

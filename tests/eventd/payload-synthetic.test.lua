@@ -23,7 +23,7 @@
 -- one, and the all-five-types case reads what the others left.
 --
 -- Between a stop and a start the shard is copied to the host and edited
--- with the host's sqlite3 (`rewrite`), which is how a shutdown payload is
+-- with the host's sqlite3 (`eventd.edit_store`), which is how a shutdown payload is
 -- falsified and a gap record with mismatched cpu_id is planted.
 
 local eventd = require("helpers.eventd")
@@ -40,79 +40,10 @@ local SHARD0 = eventd.STORE.events .. "/shard-0000.db"
 -- Helpers
 -- ---------------------------------------------------------------------------
 
-local function unhex(h)
-    return (h:gsub("%x%x", function(b) return string.char(tonumber(b, 16)) end))
-end
-
-local NIL = setmetatable({}, { __tostring = function() return "nil" end })
-
 --- Decode one MessagePack value (the whole of what eventd writes). Maps
 --- come back as {map = {k = v}, keys = {k1, k2, ...}} so key order and
---- duplicates are visible; arrays as {array = {...}}; nil as NIL.
-local function decode(b)
-    local at = 1
-    local value
-    local function n(fmt, len)
-        local v = string.unpack(fmt, b, at)
-        at = at + len
-        return v
-    end
-    local function str(len)
-        local s = b:sub(at, at + len - 1)
-        at = at + len
-        return s
-    end
-    value = function()
-        local tag = b:byte(at)
-        assert(tag, "msgpack: ran off the end")
-        at = at + 1
-        if tag < 0x80 then return tag end
-        if tag >= 0xe0 then return tag - 0x100 end
-        local count
-        if tag >= 0x80 and tag <= 0x8f then count = tag - 0x80
-        elseif tag == 0xde then count = n(">I2", 2)
-        elseif tag == 0xdf then count = n(">I4", 4) end
-        if count then
-            local m = { map = {}, keys = {} }
-            for _ = 1, count do
-                local k = value()
-                local v = value()
-                m.keys[#m.keys + 1] = k
-                m.map[k] = v
-            end
-            return m
-        end
-        if tag >= 0x90 and tag <= 0x9f then count = tag - 0x90
-        elseif tag == 0xdc then count = n(">I2", 2)
-        elseif tag == 0xdd then count = n(">I4", 4) end
-        if count then
-            local a = { array = {} }
-            for i = 1, count do a.array[i] = value() end
-            return a
-        end
-        if tag >= 0xa0 and tag <= 0xbf then return str(tag - 0xa0) end
-        if tag == 0xd9 then return str(n(">I1", 1)) end
-        if tag == 0xda then return str(n(">I2", 2)) end
-        if tag == 0xdb then return str(n(">I4", 4)) end
-        if tag == 0xc4 then return { bin = str(n(">I1", 1)) } end
-        if tag == 0xc5 then return { bin = str(n(">I2", 2)) } end
-        if tag == 0xc0 then return NIL end
-        if tag == 0xc2 then return false end
-        if tag == 0xc3 then return true end
-        if tag == 0xcc then return n(">I1", 1) end
-        if tag == 0xcd then return n(">I2", 2) end
-        if tag == 0xce then return n(">I4", 4) end
-        if tag == 0xcf then return n(">I8", 8) end
-        if tag == 0xd0 then return n(">i1", 1) end
-        if tag == 0xd1 then return n(">i2", 2) end
-        if tag == 0xd2 then return n(">i4", 4) end
-        if tag == 0xd3 then return n(">i8", 8) end
-        error(string.format("msgpack: unhandled tag 0x%02x", tag))
-    end
-    local v = value()
-    assert(at == #b + 1, "msgpack: trailing bytes")
-    return v
-end
+--- duplicates are visible; arrays as {array = {...}}; nil as eventd.NIL.
+local function decode(b) return (eventd.decode(b, 1, { tagged = true, whole = true })) end
 
 --- The newest stored record of a synthetic type in any shard (a gap goes
 --- to the shard its CPU writes to; the rest to shard 0): {payload =
@@ -123,7 +54,7 @@ local function newest(event_type)
         local rows = eventd.sql(vm, db, "SELECT id, hex(payload), cpu_id, timestamp FROM events WHERE event_type = '" ..
             event_type .. "' ORDER BY timestamp DESC, id DESC LIMIT 1")
         if rows[1] and (not best or rows[1][4] > best.timestamp) then
-            best = { id = rows[1][1], payload = decode(unhex(rows[1][2])), cpu_id = rows[1][3],
+            best = { id = rows[1][1], payload = decode(eventd.unhex(rows[1][2])), cpu_id = rows[1][3],
                      timestamp = rows[1][4], db = db }
         end
     end
@@ -147,18 +78,7 @@ local function sorted_keys(m)
 end
 
 local function boot_canonical()
-    return vm:run("cat /proc/sys/kernel/random/boot_id").stdout:gsub("%s", "")
-end
-
---- PCDS binary layout of the boot ID, uppercase hex (sqlite's hex()).
-local function boot_pcds_hex()
-    local c = boot_canonical():gsub("-", "")
-    local function rev(h)
-        local out = {}
-        for i = #h - 1, 1, -2 do out[#out + 1] = h:sub(i, i + 1) end
-        return table.concat(out)
-    end
-    return (rev(c:sub(1, 8)) .. rev(c:sub(9, 12)) .. rev(c:sub(13, 16)) .. c:sub(17)):upper()
+    return eventd.boot_id(vm)
 end
 
 --- Highest sequence contiguously covered from 1 by this boot's receipts
@@ -167,7 +87,7 @@ local function highest_contiguous(cpu)
     local ranges = {}
     for _, s in ipairs(eventd.shards(vm)) do
         for _, r in ipairs(eventd.sql(vm, s, "SELECT first_sequence, last_sequence FROM receipt_ranges " ..
-            "WHERE hex(boot_id) = '" .. boot_pcds_hex() .. "' AND cpu_id = " .. cpu)) do
+            "WHERE hex(boot_id) = '" .. eventd.boot_pcds_hex(boot_canonical()) .. "' AND cpu_id = " .. cpu)) do
             ranges[#ranges + 1] = r
         end
     end
@@ -180,60 +100,6 @@ local function highest_contiguous(cpu)
     return high
 end
 
-local function host_tmpdir()
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l")
-    p:close()
-    return dir
-end
-
-local function host_write(path, bytes)
-    local f = assert(io.open(path, "wb"))
-    f:write(bytes)
-    f:close()
-end
-
---- Copy guest database `src` to the host, run `script` against it there,
---- and write it back. eventd must be stopped (it has then checkpointed and
---- removed the WAL, so the main file is the whole database).
-local function rewrite(src, script)
-    local dir = host_tmpdir()
-    host_write(dir .. "/db", vm:read_file(src))
-    host_write(dir .. "/q.sql", script)
-    host_write(dir .. "/run.py", [[
-import sqlite3, sys
-d = sys.argv[1]
-c = sqlite3.connect(d + "/db")
-c.executescript(open(d + "/q.sql").read())
-c.commit()
-c.close()
-]])
-    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
-    local out = p:read("a")
-    local ok = p:close()
-    local f = assert(io.open(dir .. "/db", "rb"))
-    local bytes = f:read("a")
-    f:close()
-    os.execute("rm -rf '" .. dir .. "'")
-    assert(ok, "host sqlite rewrite failed: " .. out)
-    vm:write_file(src, bytes)
-end
-
-local function hex(s)
-    return (s:gsub(".", function(ch) return string.format("%02X", ch:byte()) end))
-end
-
-local function stop()
-    vm:run("svctl stop eventd"):assert_ok()
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 30, interval = 0.25, desc = "eventd to stop" })
-end
-
-local function start()
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
-end
-
 --- Wait for the config_change record about `key` committed after `after_id`.
 local function config_change_after(key, after_id)
     local rec
@@ -241,7 +107,7 @@ local function config_change_after(key, after_id)
         local rows = eventd.sql(vm, SHARD0, "SELECT id, hex(payload) FROM events WHERE event_type = '" ..
             eventd.T.config_change .. "' AND id > " .. after_id .. " ORDER BY id")
         for _, r in ipairs(rows) do
-            local p = decode(unhex(r[2]))
+            local p = decode(eventd.unhex(r[2]))
             if p.map.key == key then rec = { id = r[1], payload = p } return true end
         end
         return false
@@ -289,9 +155,9 @@ test("startup resume_points: one {cpu_id, sequence} per CPU in cpu_id order, the
 }, function(t)
     -- Bracket the value: at least what the receipts held while eventd was
     -- down, at most what they hold once it has started.
-    stop()
+    eventd.stop(vm)
     local before = { [0] = highest_contiguous(0), [1] = highest_contiguous(1) }
-    start()
+    eventd.start(vm)
     local after = { [0] = highest_contiguous(0), [1] = highest_contiguous(1) }
     local rp = newest(eventd.T.startup).payload.map.resume_points.array
     t:assert_eq(#rp, 2, "one entry per logical CPU")
@@ -308,11 +174,11 @@ test("startup restart is false on the boot's first start and true once the boot 
     spec = "eventd *payload.startup-restart-is-true-when-the-boot-already-had-committed-rows-or-receipts",
 }, function(t)
     local rows = eventd.sql(vm, SHARD0, "SELECT hex(payload) FROM events WHERE event_type = '" ..
-        eventd.T.startup .. "' AND hex(boot_id) = '" .. boot_pcds_hex() .. "' ORDER BY id")
+        eventd.T.startup .. "' AND hex(boot_id) = '" .. eventd.boot_pcds_hex(boot_canonical()) .. "' ORDER BY id")
     t:assert(#rows >= 2, "the boot's first start and the restart above: " .. #rows)
-    t:assert_eq(decode(unhex(rows[1][1])).map.restart, false, "the first start of the boot: false")
+    t:assert_eq(decode(eventd.unhex(rows[1][1])).map.restart, false, "the first start of the boot: false")
     for i = 2, #rows do
-        t:assert_eq(decode(unhex(rows[i][1])).map.restart, true, "every later start: true")
+        t:assert_eq(decode(eventd.unhex(rows[i][1])).map.restart, true, "every later start: true")
     end
 end)
 
@@ -352,14 +218,14 @@ test("synthetic.config_change carries key, old/new value types and values", {
     t:assert_eq(sorted_keys(p), "key,new_value,new_value_type,old_value,old_value_type", "exactly the five fields")
     t:assert_eq(p.map.key, "LogRetentionDays", "key is the value name under Machine\\System\\eventd")
     t:assert_eq(p.map.old_value_type, "absent", "it was absent")
-    t:assert_eq(p.map.old_value, NIL, "so old_value is nil")
+    t:assert_eq(p.map.old_value, eventd.NIL, "so old_value is nil")
     t:assert_eq(p.map.new_value_type, "REG_DWORD", "and is now a REG_DWORD")
     t:assert_eq(p.map.new_value, "13", "with the new value")
     local q = del.payload
     t:assert_eq(q.map.old_value_type, "REG_DWORD", "deleted: it was a REG_DWORD")
     t:assert_eq(q.map.old_value, "13", "of 13")
     t:assert_eq(q.map.new_value_type, "absent", "and is now absent")
-    t:assert_eq(q.map.new_value, NIL, "so new_value is nil")
+    t:assert_eq(q.map.new_value, eventd.NIL, "so new_value is nil")
     for _, r in ipairs({ p, q }) do
         t:assert(TYPES[r.map.old_value_type] and TYPES[r.map.new_value_type], "types are among the five names")
     end
@@ -396,10 +262,10 @@ test("synthetic.shutdown carries last_sequences: each CPU's highest contiguous r
     spec = "eventd *payload.the-synthetic-shutdown-payload-schema"
         .. " eventd *payload.shutdown-last-sequences-give-each-cpus-highest-contiguous-receipted-sequence",
 }, function(t)
-    stop()
+    eventd.stop(vm)
     local s = newest(eventd.T.shutdown)
     local high = { [0] = highest_contiguous(0), [1] = highest_contiguous(1) }
-    start()
+    eventd.start(vm)
     t:assert_eq(sorted_keys(s.payload), "last_sequences", "the one field")
     local ls = s.payload.map.last_sequences.array
     t:assert_eq(#ls, 2, "one entry per CPU")
@@ -414,12 +280,12 @@ end)
 test("startup derives recovery coverage from receipts, never from the shutdown payload", {
     spec = "eventd *payload.startup-never-derives-recovery-coverage-from-the-shutdown-payload",
 }, function(t)
-    stop()
+    eventd.stop(vm)
     local s = newest(eventd.T.shutdown)
     local lie = eventd.msgpack({ last_sequences = eventd.array({
         eventd.map({ cpu_id = 0, sequence = 900000000 }), eventd.map({ cpu_id = 1, sequence = 900000000 }) }) })
-    rewrite(s.db, "UPDATE events SET payload = X'" .. hex(lie) .. "' WHERE id = " .. s.id .. ";")
-    start()
+    eventd.edit_store(vm, s.db, "UPDATE events SET payload = X'" .. eventd.hex(lie, true) .. "' WHERE id = " .. s.id .. ";")
+    eventd.start(vm)
     local after = { [0] = highest_contiguous(0), [1] = highest_contiguous(1) }
     for _, e in ipairs(newest(eventd.T.startup).payload.map.resume_points.array) do
         t:assert(e.map.sequence <= after[e.map.cpu_id],
@@ -438,13 +304,13 @@ local GAP
 local function make_gap()
     if GAP then return GAP end
     local before = count_of(eventd.T.gap)
-    stop()
+    eventd.stop(vm)
     local big = eventd.msgpack({ blob = eventd.bin(string.rep("g", 60000)) })
     local entries = {}
     for i = 1, 100 do entries[i] = { type = "pt.flood", payload = big } end
     local fr = kmes.emit_batch(vm, entries)
     assert(fr.emitted == 100, "the flood was emitted")
-    start()
+    eventd.start(vm)
     assert(count_of(eventd.T.gap) > before, "the restart recorded a gap")
     GAP = newest(eventd.T.gap)
     return GAP
@@ -454,13 +320,13 @@ end
 local planted_gap = false
 local function plant_gap()
     if planted_gap then return end
-    stop()
+    eventd.stop(vm)
     local planted = eventd.msgpack({ cpu_id = 7, first_sequence = 987654321, last_sequence = 987654321,
         count = 1, last_seen_timestamp = eventd.NIL, revealing_timestamp = 1 })
-    rewrite(SHARD0, "INSERT INTO events (boot_id, timestamp, cpu_id, event_type, payload) " ..
-        "SELECT boot_id, timestamp, 1, '" .. eventd.T.gap .. "', X'" .. hex(planted) .. "' FROM events " ..
+    eventd.edit_store(vm, SHARD0, "INSERT INTO events (boot_id, timestamp, cpu_id, event_type, payload) " ..
+        "SELECT boot_id, timestamp, 1, '" .. eventd.T.gap .. "', X'" .. eventd.hex(planted, true) .. "' FROM events " ..
         "WHERE event_type = '" .. eventd.T.shutdown .. "' ORDER BY id DESC LIMIT 1;")
-    start()
+    eventd.start(vm)
     planted_gap = true
 end
 
@@ -481,7 +347,7 @@ test("synthetic.gap carries cpu_id, first/last_sequence, count and both timestam
     t:assert_eq(p.cpu_id, GAP.cpu_id, "cpu_id in the payload is the column's")
     t:assert(p.cpu_id == 0 or p.cpu_id == 1, "and a CPU of this machine")
     t:assert_eq(p.count, p.last_sequence - p.first_sequence + 1, "count is the size of the inclusive range")
-    local boot = boot_pcds_hex()
+    local boot = eventd.boot_pcds_hex(boot_canonical())
     local inside = 0
     for _, s in ipairs(eventd.shards(vm)) do
         inside = inside + eventd.sql(vm, s, "SELECT count(*) FROM events WHERE hex(boot_id) = '" .. boot ..
@@ -503,7 +369,7 @@ test("synthetic.gap carries cpu_id, first/last_sequence, count and both timestam
     t:assert(edge_after, "the event after last_sequence is stored: it revealed the gap")
     t:assert(math.type(p.revealing_timestamp) == "integer", "revealing_timestamp is a timestamp")
     t:assert_eq(p.revealing_timestamp, edge_after, "the revealing event's timestamp")
-    if p.last_seen_timestamp ~= NIL then
+    if p.last_seen_timestamp ~= eventd.NIL then
         t:assert_eq(p.last_seen_timestamp, edge_before, "last_seen_timestamp is the event before the gap")
     end
 end)
@@ -540,7 +406,7 @@ test("every synthetic payload field name is a query field, unless nested or coll
         for _, r in ipairs(rows) do
             local all = true
             for k, v in pairs(stored.payload.map) do
-                if type(v) ~= "table" and v ~= NIL and not COLLIDING[k] and r[k] ~= v then
+                if type(v) ~= "table" and v ~= eventd.NIL and not COLLIDING[k] and r[k] ~= v then
                     all = false
                 end
             end
@@ -548,7 +414,7 @@ test("every synthetic payload field name is a query field, unless nested or coll
         end
         t:assert(rec, event_type .. ": its record comes back through a query")
         for k, v in pairs(stored.payload.map) do
-            if type(v) ~= "table" and v ~= NIL and not COLLIDING[k] then
+            if type(v) ~= "table" and v ~= eventd.NIL and not COLLIDING[k] then
                 t:assert_eq(rec[k], v, event_type .. ": payload field " .. k .. " is queryable as itself")
             end
         end
@@ -577,16 +443,16 @@ test("synthetic.storage_error carries store, shard_index (event store only) and 
         .. " eventd *payload.storage-error-shard-index-is-set-only-for-event-store-errors"
         .. " eventd *payload.storage-error-error-is-a-human-readable-description",
 }, function(t)
-    stop()
+    eventd.stop(vm)
     local garbage = string.rep("this is not a database. ", 400)
     vm:write_file(SHARD0, garbage)
     vm:write_file(eventd.DB.logs, garbage)
-    start()
+    eventd.start(vm)
     local rows = eventd.sql(vm, SHARD0, "SELECT hex(payload) FROM events WHERE event_type = '" ..
         eventd.T.storage_error .. "' ORDER BY id")
     local by_store = {}
     for _, r in ipairs(rows) do
-        local p = decode(unhex(r[1]))
+        local p = decode(eventd.unhex(r[1]))
         t:assert_eq(sorted_keys(p), "error,shard_index,store", "exactly the three fields")
         by_store[p.map.store] = p.map
     end
@@ -595,7 +461,7 @@ test("synthetic.storage_error carries store, shard_index (event store only) and 
     t:assert(by_store.event, "the event shard's corruption was recorded: " .. json.encode(rows))
     t:assert(by_store.log, "and the log store's")
     t:assert_eq(by_store.event.shard_index, 0, "an event-store error names its shard")
-    t:assert_eq(by_store.log.shard_index, NIL, "a log-store error has none")
+    t:assert_eq(by_store.log.shard_index, eventd.NIL, "a log-store error has none")
     for s, p in pairs(by_store) do
         t:assert(type(p.error) == "string" and #p.error > 0 and p.error:find("%a"), s .. ": the error is text: " .. tostring(p.error))
     end
@@ -609,12 +475,12 @@ test("every synthetic event carries a MessagePack map", {
     -- a gap.
     eventd.set(vm, "LogRetentionDays", "dword:9"):assert_ok()
     eventd.unset(vm, "LogRetentionDays")
-    stop()
+    eventd.stop(vm)
     local big = eventd.msgpack({ blob = eventd.bin(string.rep("g", 60000)) })
     local entries = {}
     for i = 1, 100 do entries[i] = { type = "pt.flood", payload = big } end
     kmes.emit_batch(vm, entries)
-    start()
+    eventd.start(vm)
     for _, ty in ipairs({ eventd.T.startup, eventd.T.shutdown, eventd.T.gap, eventd.T.config_change,
                           eventd.T.storage_error }) do
         local rows = {}
@@ -625,7 +491,7 @@ test("every synthetic event carries a MessagePack map", {
         end
         t:assert(#rows >= 1, ty .. " is present")
         for _, r in ipairs(rows) do
-            t:assert(decode(unhex(r[1])).map, ty .. ": the payload is one MessagePack map")
+            t:assert(decode(eventd.unhex(r[1])).map, ty .. ": the payload is one MessagePack map")
         end
     end
 end)

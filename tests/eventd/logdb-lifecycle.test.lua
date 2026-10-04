@@ -13,8 +13,9 @@
 -- directory, log directory and metric directory first (pipeline.rs:50-52)
 -- and the log database before binding any socket (pipeline.rs:117 then
 -- 123), so a log-store failure stops it before it touches anything the
--- service would have to clean up. The run is under `timeout`; the service
--- is started again afterwards with LogStorePath restored.
+-- service would have to clean up. The run is bounded (`eventd.run_by_hand`
+-- kills it from the agent after 30 seconds); the service is started again
+-- afterwards with LogStorePath restored.
 --
 -- Cases that the service survives (creation, reopening, quarantine) go
 -- through the service itself: stop, change the files, start.
@@ -31,69 +32,6 @@ local REQUIRED_SDDL = "O:SYG:SYD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
 -- ---------------------------------------------------------------------------
 -- Local helpers
 -- ---------------------------------------------------------------------------
-
-local function host_tmpdir()
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l")
-    p:close()
-    return dir
-end
-
-local function host_write(path, bytes)
-    local f = assert(io.open(path, "wb"))
-    f:write(bytes)
-    f:close()
-end
-
-local function host_read(path)
-    local f = assert(io.open(path, "rb"))
-    local s = f:read("a")
-    f:close()
-    return s
-end
-
---- A copy of guest database `db` with `script` applied on the host,
---- returned as bytes (its WAL folded in).
-local function host_derive(db, script)
-    local dir = host_tmpdir()
-    host_write(dir .. "/db", vm:read_file(db))
-    local okw, wal = pcall(vm.read_file, vm, db .. "-wal")
-    if okw and wal and #wal > 0 then host_write(dir .. "/db-wal", wal) end
-    host_write(dir .. "/edit.sql", script)
-    host_write(dir .. "/run.py", [[
-import sqlite3, sys
-d = sys.argv[1]
-c = sqlite3.connect(d + "/db")
-c.executescript(open(d + "/edit.sql").read())
-c.commit()
-c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-c.close()
-]])
-    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
-    local out = p:read("a")
-    local ok = p:close()
-    assert(ok, "host sqlite edit failed: " .. out)
-    local bytes = host_read(dir .. "/db")
-    os.execute("rm -rf '" .. dir .. "'")
-    return bytes
-end
-
-local function host_edit(db, script)
-    local bytes = host_derive(db, script)
-    vm:run("rm -f '" .. db .. "-wal' '" .. db .. "-shm'"):assert_ok()
-    vm:write_file(db, bytes)
-end
-
-local function stop_eventd()
-    vm:run("svctl stop eventd"):assert_ok()
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 60, interval = 0.25, desc = "eventd to stop" })
-end
-
-local function start_eventd()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
-end
 
 local SAVED_PATH = vm:run("reg get '" .. eventd.KEY .. "' LogStorePath").stdout:gsub("%s+$", "")
 
@@ -114,10 +52,11 @@ local function scratch_dir(name)
 end
 
 --- Run eventd by hand (the service must be stopped). Returns exit code
---- and stderr.
+--- (124 when it was still running after 30 seconds and was killed) and
+--- stderr.
 local function hand_run()
-    local r = vm:run("timeout 30 /usr/sbin/eventd")
-    return r.exit_code, r.stderr .. r.stdout
+    local r = eventd.run_by_hand(vm, {}, { timeout = 30 })
+    return r.killed and 124 or r.exit_code, r.output
 end
 
 local function sha(path)
@@ -134,15 +73,6 @@ local function wal_salt(db)
     return (string.unpack(">I4", wal, 17))
 end
 
-local function rw_fds(pid, path)
-    local out = vm:run("for f in /proc/" .. pid .. "/fd/*; do [ \"$(readlink $f)\" = " .. path
-        .. " ] && sed -n 's/^flags:[[:space:]]*//p' /proc/" .. pid .. "/fdinfo/${f##*/}; done").stdout
-    local rw, ro = 0, 0
-    for flags in out:gmatch("%d+") do
-        if tonumber(flags, 8) & 3 == 2 then rw = rw + 1 else ro = ro + 1 end
-    end
-    return rw, ro
-end
 
 -- ---------------------------------------------------------------------------
 -- Path
@@ -172,11 +102,11 @@ test("logs.db has one read-write connection; queries read through their own", {
     spec = "eventd *logdb.one-read-write-connection-owned-by-the-log-writer-and-any-number-of-read-only-ones",
 }, function(t)
     local pid = eventd.pid(vm)
-    local rw = rw_fds(pid, eventd.DB.logs)
+    local rw = eventd.fds_on(vm, pid, eventd.DB.logs)
     t:assert_eq(rw, 1, "one read-write descriptor on logs.db")
     -- Queries read concurrently with the writer and leave no writer behind.
     for _ = 1, 3 do eventd.rows(vm, "LOGS SINCE 1h ago TAKE 50") end
-    t:assert_eq((rw_fds(pid, eventd.DB.logs)), 1, "still exactly one after queries")
+    t:assert_eq((eventd.fds_on(vm, pid, eventd.DB.logs)), 1, "still exactly one after queries")
 end)
 
 test("retention reaches logs.db only through the log writer", {
@@ -187,7 +117,7 @@ test("retention reaches logs.db only through the log writer", {
     -- while it runs: never a second read-write connection.
     local origin = eventd.marker("ret")
     local recs = {}
-    local old = math.tointeger(tonumber((vm:run("date +%s%N").stdout:gsub("%s", ""))) - 40 * 86400 * 10 ^ 9)
+    local old = math.tointeger(eventd.guest_ns(vm) - 40 * 86400 * 10 ^ 9)
     for i = 1, 3000 do recs[i] = { origin = origin, is_error = false, message = "r" .. i, timestamp = old + i } end
     eventd.send_log(vm, recs)
     eventd.wait_rows(vm, "LOGS FROM " .. origin .. " TAKE 10000", function(rs) return #rs == 3000 end)
@@ -195,7 +125,7 @@ test("retention reaches logs.db only through the log writer", {
     eventd.set(vm, "RetentionDeleteBatchRows", "dword:100"):assert_ok()
     local most = 0
     for _ = 1, 20 do
-        most = math.max(most, (rw_fds(pid, eventd.DB.logs)))
+        most = math.max(most, (eventd.fds_on(vm, pid, eventd.DB.logs)))
     end
     wait_until(function()
         return #eventd.sql(vm, eventd.DB.logs, "SELECT 1 FROM logs WHERE origin = '" .. origin .. "' LIMIT 1") == 0
@@ -218,10 +148,10 @@ test("a log store that does not exist is created with its schema, indexes and en
 }, function(t)
     -- synchronous=NORMAL is per connection and leaves no mark in the
     -- file; everything else creation does is in it.
-    stop_eventd()
+    eventd.stop(vm)
     local db = eventd.DB.logs
     vm:run("rm -f '" .. db .. "' '" .. db .. "-wal' '" .. db .. "-shm'"):assert_ok()
-    start_eventd()
+    eventd.start(vm)
     t:assert(vm:stat(db), "logs.db was created")
     local header = vm:read_file(db)
     t:assert_eq(header:byte(19) .. "," .. header:byte(20), "2,2", "in WAL mode")
@@ -247,11 +177,11 @@ test("an existing log store is reopened in WAL mode", {
     -- Take the file out of WAL mode offline (journal_mode is persistent),
     -- and the next open puts it back. synchronous=NORMAL is per connection
     -- and not visible from outside.
-    stop_eventd()
-    host_edit(eventd.DB.logs, "PRAGMA journal_mode=DELETE;")
+    eventd.stop(vm)
+    eventd.edit_store(vm, eventd.DB.logs, "PRAGMA journal_mode=DELETE;")
     local header = vm:read_file(eventd.DB.logs)
     t:assert_eq(header:byte(19) .. "," .. header:byte(20), "1,1", "precondition: a rollback-journal file")
-    start_eventd()
+    eventd.start(vm)
     header = vm:read_file(eventd.DB.logs)
     t:assert_eq(header:byte(19) .. "," .. header:byte(20), "2,2", "opening switched it to WAL")
 end)
@@ -323,7 +253,7 @@ test("a missing, relative or unprotected log directory fails startup, and none i
         { "a symbolic link as the directory", "/run/pt-link" },
         { "a symbolic link above it", "/run/pt-runlink/pt-good" },
     }
-    stop_eventd()
+    eventd.stop(vm)
     local ok, err = pcall(function()
         for _, c in ipairs(cases) do
             set_log_path(c[2])
@@ -338,7 +268,7 @@ test("a missing, relative or unprotected log directory fails startup, and none i
         set_log_path(good)
     end)
     restore_log_path()
-    start_eventd()
+    eventd.start(vm)
     if not ok then error(err, 0) end
 end)
 
@@ -356,8 +286,8 @@ test("a log store with a missing or unknown schema version fails startup and is 
     }
     local dir = scratch_dir("pt-schema")
     local derived = {}
-    for i, c in ipairs(cases) do derived[i] = host_derive(eventd.DB.logs, c[2]) end
-    stop_eventd()
+    for i, c in ipairs(cases) do derived[i] = eventd.derive_store(vm, eventd.DB.logs, c[2]) end
+    eventd.stop(vm)
     local ok, err = pcall(function()
         set_log_path(dir)
         for i, c in ipairs(cases) do
@@ -372,7 +302,7 @@ test("a log store with a missing or unknown schema version fails startup and is 
         end
     end)
     restore_log_path()
-    start_eventd()
+    eventd.start(vm)
     if not ok then error(err, 0) end
 end)
 
@@ -391,7 +321,7 @@ local function quarantine_case(t, name, check)
     vm:write_file(dir .. "/logs.db-wal", "wal junk")
     vm:write_file(dir .. "/logs.db-shm", "shm junk")
     set_log_path(dir)
-    local from = math.tointeger(tonumber((vm:run("date +%s%N").stdout:gsub("%s", ""))))
+    local from = eventd.guest_ns(vm)
     local ok, err = pcall(function()
         eventd.restart(vm)
         local names = {}

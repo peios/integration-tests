@@ -39,77 +39,6 @@ local BOOT_OLD = "0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F"
 -- Local helpers
 -- ---------------------------------------------------------------------------
 
-local function host_tmpdir()
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l")
-    p:close()
-    return dir
-end
-
-local function host_write(path, bytes)
-    local f = assert(io.open(path, "wb"))
-    f:write(bytes)
-    f:close()
-end
-
-local function host_read(path)
-    local f = assert(io.open(path, "rb"))
-    local s = f:read("a")
-    f:close()
-    return s
-end
-
-local function host_edit(db, script)
-    local dir = host_tmpdir()
-    host_write(dir .. "/db", vm:read_file(db))
-    local okw, wal = pcall(vm.read_file, vm, db .. "-wal")
-    if okw and wal and #wal > 0 then host_write(dir .. "/db-wal", wal) end
-    host_write(dir .. "/edit.sql", script)
-    host_write(dir .. "/run.py", [[
-import sqlite3, sys
-d = sys.argv[1]
-c = sqlite3.connect(d + "/db")
-c.executescript(open(d + "/edit.sql").read())
-c.commit()
-c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-c.close()
-]])
-    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
-    local out = p:read("a")
-    local ok = p:close()
-    assert(ok, "host sqlite edit failed: " .. out)
-    local bytes = host_read(dir .. "/db")
-    os.execute("rm -rf '" .. dir .. "'")
-    vm:run("rm -f '" .. db .. "-wal' '" .. db .. "-shm'"):assert_ok()
-    vm:write_file(db, bytes)
-end
-
-local function stop_eventd()
-    vm:run("svctl stop eventd"):assert_ok()
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 60, interval = 0.25, desc = "eventd to stop" })
-end
-
-local function start_eventd()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
-end
-
-local function now_ns()
-    return math.tointeger(tonumber((vm:run("date +%s%N").stdout:gsub("%s", ""))))
-end
-
-local function boot_pcds_hex()
-    local u = vm:run("cat /proc/sys/kernel/random/boot_id").stdout:gsub("%s", ""):gsub("-", "")
-    local b = {}
-    for i = 1, 32, 2 do b[#b + 1] = u:sub(i, i + 1) end
-    local out = {}
-    for _, i in ipairs({ 4, 3, 2, 1, 6, 5, 8, 7, 9, 10, 11, 12, 13, 14, 15, 16 }) do
-        out[#out + 1] = b[i]
-    end
-    return table.concat(out):upper()
-end
-
 local SHARD = {
     eventd.STORE.events .. "/shard-0000.db",
     eventd.STORE.events .. "/shard-0001.db",
@@ -164,17 +93,6 @@ local function wal_state(db)
     return n, salt1
 end
 
---- eventd's descriptors on `path`: read-write and read-only counts.
-local function fds_on(pid, path)
-    local out = vm:run("for f in /proc/" .. pid .. "/fd/*; do [ \"$(readlink $f)\" = " .. path
-        .. " ] && sed -n 's/^flags:[[:space:]]*//p' /proc/" .. pid .. "/fdinfo/${f##*/}; done").stdout
-    local rw, ro = 0, 0
-    for flags in out:gmatch("%d+") do
-        if tonumber(flags, 8) & 3 == 2 then rw = rw + 1 else ro = ro + 1 end
-    end
-    return rw, ro
-end
-
 local flip = 0
 local function retention_pass()
     flip = flip + 1
@@ -196,9 +114,9 @@ test("events past EventRetentionDays go from every shard, KMES, synthetic and ga
     eventd.set(vm, "RetentionDeleteBatchRows", "dword:100"):assert_ok()
     eventd.set(vm, "RetentionCheckIntervalMinutes", "dword:1"):assert_ok()
     vm:clock():sleep("3s")
-    local now = now_ns()
+    local now = eventd.guest_ns(vm)
     local old, young = now - 31 * DAY, now - 29 * DAY
-    stop_eventd()
+    eventd.stop(vm)
     for idx, shard in ipairs(SHARD) do
         local script = ""
         for _, age in ipairs({ { "old", old }, { "young", young } }) do
@@ -213,9 +131,9 @@ test("events past EventRetentionDays go from every shard, KMES, synthetic and ga
             -- so its WAL holds only what retention does to it.
             script = script .. rows_sql(BOOT_OLD, "pt.retain.bulk", 1000, old, 1, 0, 5000)
         end
-        host_edit(shard, script)
+        eventd.edit_store(vm, shard, script)
     end
-    start_eventd()
+    eventd.start(vm)
     local c0, s0 = wal_state(SHARD[2])
     -- The timer was restarted with the process: a minute, not at once.
     vm:clock():sleep("15s")
@@ -260,16 +178,16 @@ test("size retention takes whole old boots, oldest-ending first, across shards, 
     -- by newest event A is older, by oldest event B is. 150 rows of each
     -- per shard, and 150 per shard of this boot's own, a day old.
     -- (The age half of "either threshold" is the test above.)
-    local now = now_ns()
-    local current = boot_pcds_hex()
-    stop_eventd()
+    local now = eventd.guest_ns(vm)
+    local current = eventd.boot_pcds_hex(vm)
+    eventd.stop(vm)
     for idx, shard in ipairs(SHARD) do
-        host_edit(shard,
+        eventd.edit_store(vm, shard,
             rows_sql(BOOT_A, "pt.size.a", 150, now - 5 * DAY, DAY // 75, 0, 10000 * idx)
             .. rows_sql(BOOT_B, "pt.size.b", 150, now - 6 * DAY, (4 * DAY) // 150, 0, 20000 * idx)
             .. rows_sql(current, "pt.size.c", 150, now - DAY, 1000000000, nil, 0))
     end
-    start_eventd()
+    eventd.start(vm)
     local function counts()
         return count_all("event_type = 'pt.size.a'"), count_all("event_type = 'pt.size.b'"),
             count_all("event_type = 'pt.size.c'")
@@ -351,7 +269,7 @@ test("every store has its one read-write connection, and a pass adds none while 
     local pid = eventd.pid(vm)
     local dbs = { SHARD[1], SHARD[2], eventd.DB.logs, eventd.DB.metrics }
     for _, db in ipairs(dbs) do
-        t:assert_eq((fds_on(pid, db)), 1, db .. ": one read-write connection")
+        t:assert_eq((eventd.fds_on(vm, pid, db)), 1, db .. ": one read-write connection")
     end
     eventd.emit(vm, "pt.retain.tick", { n = 1 })
     vm:clock():sleep("1s")
@@ -359,7 +277,7 @@ test("every store has its one read-write connection, and a pass adds none while 
     retention_pass()
     local most = 0
     for _ = 1, 15 do
-        for _, db in ipairs(dbs) do most = math.max(most, (fds_on(pid, db))) end
+        for _, db in ipairs(dbs) do most = math.max(most, (eventd.fds_on(vm, pid, db))) end
     end
     vm:clock():sleep("2s")
     for i = 1, 5 do eventd.emit(vm, "pt.retain.tick", { n = i }) end
@@ -376,13 +294,13 @@ test("the retention coordinator holds the one read-write connection to a histori
     spec = "eventd *eventretain.the-coordinator-measures-read-only-and-owns-read-write-connections-only-to-historical-shards",
 }, function(t)
     eventd.set(vm, "StorageShards", "dword:1"):assert_ok()
-    stop_eventd()
-    host_edit(SHARD[2], rows_sql(BOOT_OLD, "pt.retain.hist.old", 1, now_ns() - 31 * DAY, 1))
-    start_eventd()
+    eventd.stop(vm)
+    eventd.edit_store(vm, SHARD[2], rows_sql(BOOT_OLD, "pt.retain.hist.old", 1, eventd.guest_ns(vm) - 31 * DAY, 1))
+    eventd.start(vm)
     local pid = eventd.pid(vm)
     t:assert_eq(#eventd.shards(vm), 2, "shard-0001 is still there, now historical")
-    t:assert_eq((fds_on(pid, SHARD[1])), 1, "the active shard has its writer's connection")
-    local rw = fds_on(pid, SHARD[2])
+    t:assert_eq((eventd.fds_on(vm, pid, SHARD[1])), 1, "the active shard has its writer's connection")
+    local rw = eventd.fds_on(vm, pid, SHARD[2])
     t:assert_eq(count(SHARD[2], "event_type = 'pt.retain.hist.old'"), 1, "the expired row is planted")
     retention_pass()
     local gone = pcall(wait_until, function()

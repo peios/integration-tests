@@ -620,9 +620,10 @@ local sql_once
 function M.sql(vm, db, query)
     -- The two files are read one after the other, so a writer committing
     -- in between can leave a copy SQLite rejects. That is a torn copy,
-    -- not a broken store: take another, a few times, before giving up.
+    -- not a broken store: take another, several times, before giving up.
+    -- A store under a flood tears often, so the budget is generous.
     local err
-    for _ = 1, 4 do
+    for _ = 1, 10 do
         local ok, rows = pcall(sql_once, vm, db, query)
         if ok then return rows end
         err = rows

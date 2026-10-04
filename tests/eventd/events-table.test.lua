@@ -49,27 +49,6 @@ local craft = eventd.boot({ name = "ev-events-craft" })
 
 local SHARD0 = eventd.STORE.events .. "/shard-0000.db"
 
---- The guest's realtime clock, in nanoseconds.
-local function guest_now(v)
-    return math.tointeger(tonumber(v:run("date +%s%N").stdout:match("%d+")))
-end
-
---- The current boot ID in PCDS binary layout, as uppercase hex (sqlite's
---- hex()): the first three groups of the canonical form byte-reversed.
-local function boot_pcds_hex(v)
-    local c = v:run("cat /proc/sys/kernel/random/boot_id").stdout:gsub("%s", ""):gsub("-", "")
-    local function rev(h)
-        local out = {}
-        for i = #h - 1, 1, -2 do out[#out + 1] = h:sub(i, i + 1) end
-        return table.concat(out)
-    end
-    return (rev(c:sub(1, 8)) .. rev(c:sub(9, 12)) .. rev(c:sub(13, 16)) .. c:sub(17)):upper()
-end
-
-local function hex(s)
-    return (s:gsub(".", function(ch) return string.format("%02X", ch:byte()) end))
-end
-
 --- Emit one tagged event and return its evctl record once it is stored.
 local function emit_stored(v, who, event_type, payload, tag)
     local r = eventd.emit(who, event_type, payload)
@@ -119,69 +98,6 @@ local function column_decl(v, db, tbl)
     return out
 end
 
-local function host_tmpdir()
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l")
-    p:close()
-    return dir
-end
-
-local function host_write(path, bytes)
-    local f = assert(io.open(path, "wb"))
-    f:write(bytes)
-    f:close()
-end
-
---- Copy guest database `src` to the host, run `script` (SQL, several
---- statements) against it there, and write the result to guest `dst`
---- (default: back over `src`). eventd must be stopped: a stopped eventd
---- has checkpointed and removed its WAL, so the main file is the whole
---- database.
-local function rewrite(v, src, script, dst)
-    local dir = host_tmpdir()
-    host_write(dir .. "/db", v:read_file(src))
-    host_write(dir .. "/q.sql", script)
-    host_write(dir .. "/run.py", [[
-import sqlite3, sys
-d = sys.argv[1]
-c = sqlite3.connect(d + "/db")
-c.executescript(open(d + "/q.sql").read())
-c.commit()
-c.close()
-]])
-    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
-    local out = p:read("a")
-    local ok = p:close()
-    local f = assert(io.open(dir .. "/db", "rb"))
-    local bytes = f:read("a")
-    f:close()
-    os.execute("rm -rf '" .. dir .. "'")
-    assert(ok, "host sqlite rewrite failed: " .. out)
-    v:write_file(dst or src, bytes)
-end
-
-local function stop(v)
-    v:run("svctl stop eventd"):assert_ok()
-    wait_until(function() return eventd.pid(v) == nil end,
-        { timeout = 30, interval = 0.25, desc = "eventd to stop" })
-end
-
---- Start eventd and wait until it answers. Readiness is probed with a
---- typed query: an untyped one checks access to every catalogued type,
---- and the catalogue-size case fills a catalogue with names too long for
---- that check (they are never queried untyped).
-local function start(v)
-    v:run("svctl start eventd")
-    wait_until(function()
-        return eventd.query(v, "EVENTS " .. eventd.T.startup .. " TAKE 1").ok
-    end, { timeout = 90, interval = 0.5, desc = "eventd to answer after a start" })
-end
-
---- SIGSTOP / SIGCONT eventd, so that events emitted meanwhile reach its
---- drain thread together and are committed as one batch.
-local function freeze(v, pid) v:syscall(62, { args = { pid, 19 } }) end
-local function thaw(v, pid) v:syscall(62, { args = { pid, 18 } }) end
-
 --- A crafted shard: shard-0000's schema with every row removed, then
 --- `script` applied. Built from a stopped shard-0000.
 local EMPTY = "DELETE FROM events; DELETE FROM event_types; DELETE FROM receipt_ranges; " ..
@@ -226,7 +142,7 @@ test("boot_id is the current boot as a 16-byte PCDS-layout GUID", {
     local tag = eventd.marker("boot")
     local r = emit_stored(vm, vm, "pt.ev.boot", { tag = tag }, tag)
     local row = stored_row(vm, "pt.ev.boot", r.sequence)
-    local want = boot_pcds_hex(vm)
+    local want = eventd.boot_pcds_hex(vm)
     t:assert_eq(#row.boot_id, 32, "sixteen bytes")
     t:assert_eq(row.boot_id, want, "the kernel boot ID with its first three groups byte-reversed")
     t:assert_eq(synthetic_row(vm, eventd.T.startup).boot_id, want,
@@ -240,9 +156,9 @@ test("timestamp is epoch nanoseconds: the emission time for a real event, eventd
     t:assert_eq(decl.timestamp.type, "INTEGER", "timestamp is an INTEGER")
     t:assert_eq(decl.timestamp.notnull, 1, "declared NOT NULL")
     local tag = eventd.marker("ts")
-    local before = guest_now(vm)
+    local before = eventd.guest_ns(vm)
     local r = eventd.emit(vm, "pt.ev.ts", { tag = tag })
-    local after = guest_now(vm)
+    local after = eventd.guest_ns(vm)
     t:assert_eq(r.ret, 0, "emitted")
     local rows = eventd.wait_rows(vm, 'EVENTS pt.ev.ts WHERE tag == "' .. tag .. '" SINCE 10m ago',
         function(rs) return #rs == 1 end)
@@ -250,7 +166,7 @@ test("timestamp is epoch nanoseconds: the emission time for a real event, eventd
     t:assert(row.timestamp >= before and row.timestamp <= after,
         "stamped at emission, inside the emit call: " .. before .. " <= " .. row.timestamp .. " <= " .. after)
     -- A synthetic one: a config change is generated now, by eventd.
-    local cbefore = guest_now(vm)
+    local cbefore = eventd.guest_ns(vm)
     eventd.set(vm, "LogRetentionDays", "dword:12"):assert_ok()
     local crow
     wait_until(function()
@@ -260,7 +176,7 @@ test("timestamp is epoch nanoseconds: the emission time for a real event, eventd
         return crow ~= nil
     end, { timeout = 30, interval = 0.25, desc = "a config_change record" })
     eventd.unset(vm, "LogRetentionDays")
-    t:assert(crow[1] >= cbefore and crow[1] <= guest_now(vm),
+    t:assert(crow[1] >= cbefore and crow[1] <= eventd.guest_ns(vm),
         "the synthetic record is stamped from eventd's clock when generated: " .. crow[1])
 end)
 
@@ -277,7 +193,7 @@ test("sequence is the per-CPU header sequence of a real event and null for synth
     t:assert_eq(stored_row(vm, "pt.ev.seq", rb.sequence).cpu_id, 0, "both on the one CPU")
     -- Per boot: this boot's receipts start at sequence 1.
     local first = eventd.sql(vm, SHARD0, "SELECT min(first_sequence) FROM receipt_ranges WHERE hex(boot_id) = '" ..
-        boot_pcds_hex(vm) .. "'")
+        eventd.boot_pcds_hex(vm) .. "'")
     t:assert_eq(first[1][1], 1, "the boot's sequence space begins at 1")
     t:assert_eq(synthetic_row(vm, eventd.T.startup).sequence, "null", "a synthetic record has a null sequence")
 end)
@@ -377,7 +293,7 @@ test("payload is the raw bytes for a KMES event and a MessagePack map for a synt
     local r = emit_stored(vm, vm, "pt.ev.payload", { raw = bytes }, tag)
     local row = stored_row(vm, "pt.ev.payload", r.sequence)
     t:assert_eq(row.types.payload, "blob", "stored as a blob")
-    t:assert_eq(row.payload, hex(bytes), "the bytes emitted")
+    t:assert_eq(row.payload, eventd.hex(bytes, true), "the bytes emitted")
     local s = synthetic_row(vm, eventd.T.startup)
     t:assert_eq(s.payload_type, "blob", "a synthetic payload is a blob too")
     local first = tonumber(s.payload:sub(1, 2), 16)
@@ -396,7 +312,7 @@ test("every KMES header field is stored in its own column, not in the payload bl
                          "effective_token_guid", "true_token_guid", "process_guid" }) do
         t:assert(row[c] ~= nil and row[c] ~= "", c .. " has a value of its own")
     end
-    t:assert_eq(row.payload, hex(bytes), "and the payload carries only what was emitted")
+    t:assert_eq(row.payload, eventd.hex(bytes, true), "and the payload carries only what was emitted")
 end)
 
 test("a userspace emitter cannot make a record that event_type alone reads as synthetic", {
@@ -444,7 +360,7 @@ test("a KMES payload is stored byte for byte, never decoded, re-encoded or valid
     local rows = eventd.wait_rows(vm, 'EVENTS pt.ev.raw WHERE tag == "' .. tag .. '" SINCE 10m ago',
         function(rs) return #rs == 1 end)
     local row = stored_row(vm, "pt.ev.raw", rows[1].sequence)
-    t:assert_eq(row.payload, hex(bytes), "the stored blob is the emitted bytes exactly")
+    t:assert_eq(row.payload, eventd.hex(bytes, true), "the stored blob is the emitted bytes exactly")
 end)
 
 test("payload fields are flattened only when read: the blob keeps the nesting, a query sees the path", {
@@ -455,7 +371,7 @@ test("payload fields are flattened only when read: the blob keeps the nesting, a
     local r = emit_stored(vm, vm, "pt.ev.flat", { raw = bytes }, tag)
     t:assert_eq(r["outer.inner"], 9, "a query presents the flattened path: " .. json.encode(r))
     local row = stored_row(vm, "pt.ev.flat", r.sequence)
-    t:assert_eq(row.payload, hex(bytes), "the stored blob is still the nested map")
+    t:assert_eq(row.payload, eventd.hex(bytes, true), "the stored blob is still the nested map")
     local hit = eventd.rows(vm, 'EVENTS pt.ev.flat WHERE outer.inner == 9 WHERE tag == "' .. tag .. '" SINCE 10m ago')
     t:assert_eq(#hit, 1, "and a predicate on the path matches it")
 end)
@@ -470,7 +386,7 @@ test("a payload field named like a header column is hidden from queries but kept
     t:assert_eq(r.cpu_id, 0, "and the header's cpu_id")
     local none = eventd.rows(vm, 'EVENTS pt.ev.collide WHERE cpu_id == 77 SINCE 10m ago')
     t:assert_eq(#none, 0, "the payload's cpu_id matches no predicate")
-    t:assert_eq(stored_row(vm, "pt.ev.collide", r.sequence).payload, hex(bytes),
+    t:assert_eq(stored_row(vm, "pt.ev.collide", r.sequence).payload, eventd.hex(bytes, true),
         "while the blob still holds both colliding fields")
 end)
 
@@ -514,7 +430,7 @@ test("a receipt range has the four documented columns, keyed on all four, positi
     local tag = eventd.marker("rc")
     local r = emit_stored(vm, vm, "pt.ev.receipt", { tag = tag }, tag)
     local cover = eventd.sql(vm, SHARD0, "SELECT length(boot_id), first_sequence, last_sequence FROM receipt_ranges " ..
-        "WHERE hex(boot_id) = '" .. boot_pcds_hex(vm) .. "' AND cpu_id = 0 AND first_sequence <= " ..
+        "WHERE hex(boot_id) = '" .. eventd.boot_pcds_hex(vm) .. "' AND cpu_id = 0 AND first_sequence <= " ..
         r.sequence .. " AND last_sequence >= " .. r.sequence)
     t:assert_eq(#cover, 1, "one receipt for this boot and CPU 0 covers sequence " .. r.sequence)
     t:assert_eq(cover[1][1], 16, "its boot_id is sixteen bytes")
@@ -587,13 +503,13 @@ end
 local instrumented = false
 local function instrument()
     if instrumented then return end
-    stop(craft)
-    rewrite(craft, SHARD0,
+    eventd.stop(craft)
+    eventd.edit_store(craft, SHARD0,
         "INSERT INTO event_types VALUES ('" .. PRELOADED .. "'); " ..
         "CREATE TABLE pt_catlog (event_type TEXT); " ..
         "CREATE TRIGGER pt_catlog_trigger BEFORE INSERT ON event_types " ..
         "BEGIN INSERT INTO pt_catlog VALUES (NEW.event_type); END;")
-    start(craft)
+    eventd.start(craft)
     instrumented = true
 end
 
@@ -645,9 +561,9 @@ test("a new type is catalogued once with its first event, however many of it sha
         local entries = {}
         for i = 1, 3 do entries[i] = { type = ty, payload = eventd.msgpack({ tag = tag }) } end
         local pid = eventd.pid(craft)
-        freeze(craft, pid)
+        eventd.freeze(craft, pid)
         local r = kmes.emit_batch(craft, entries)
-        thaw(craft, pid)
+        eventd.thaw(craft, pid)
         t:assert_eq(r.emitted, 3, "three emitted")
         local rows = eventd.wait_rows(craft, 'EVENTS ' .. ty .. ' WHERE tag == "' .. tag .. '" SINCE 10m ago',
             function(rs) return #rs == 3 end)
@@ -672,14 +588,14 @@ test("catalogue pages count toward the event store's live size", {
 }, function(t)
     -- Before the ring flood below, so that the stored events are small.
     instrument()
-    stop(craft)
+    eventd.stop(craft)
     -- About 6 MB of catalogue and nothing else, in a historical shard: 600
     -- names of 10,000 characters. (Typed queries only from here on: an
     -- untyped one fails its access check on a name this long.)
-    rewrite(craft, SHARD0, EMPTY ..
+    eventd.edit_store(craft, SHARD0, EMPTY ..
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 600) " ..
-        "INSERT INTO event_types SELECT 'pt.pad.' || i || '.' || hex(zeroblob(5000)) FROM n;", HIST)
-    start(craft)
+        "INSERT INTO event_types SELECT 'pt.pad.' || i || '.' || hex(zeroblob(5000)) FROM n;", { to = HIST })
+    eventd.start(craft)
     local function live(db)
         local r = eventd.sql(craft, db, "SELECT (SELECT page_count FROM pragma_page_count()) - " ..
             "(SELECT freelist_count FROM pragma_freelist_count()), (SELECT page_size FROM pragma_page_size())")
@@ -715,21 +631,21 @@ test("planning finds types through the catalogues of every shard, never by scann
         .. " eventd *events.planning-never-scans-the-events-table-for-distinct-types",
 }, function(t)
     instrument()
-    local now = guest_now(craft)
-    local boot = boot_pcds_hex(craft)
-    stop(craft)
+    local now = eventd.guest_ns(craft)
+    local boot = eventd.boot_pcds_hex(craft)
+    eventd.stop(craft)
     -- A historical shard (index 5 >= the one active shard) with two rows:
     -- one whose type is catalogued there, one whose type is in no
     -- catalogue anywhere.
-    local payload = hex(eventd.msgpack({ tag = HTAG }))
+    local payload = eventd.hex(eventd.msgpack({ tag = HTAG }), true)
     local function ins(ty, seq)
         return "INSERT INTO events (boot_id, timestamp, cpu_id, sequence, origin_class, event_type, " ..
             "effective_token_guid, true_token_guid, process_guid, payload) VALUES (X'" .. boot .. "', " ..
             now .. ", 0, " .. seq .. ", 0, '" .. ty .. "', zeroblob(16), zeroblob(16), zeroblob(16), X'" .. payload .. "'); "
     end
-    rewrite(craft, SHARD0, EMPTY ..
+    eventd.edit_store(craft, SHARD0, EMPTY ..
         ins("pt.hist.cat" .. HTAG, 900001) .. ins("pt.hist.uncat" .. HTAG, 900002) ..
-        "INSERT INTO event_types VALUES ('pt.hist.cat" .. HTAG .. "');", HIST)
+        "INSERT INTO event_types VALUES ('pt.hist.cat" .. HTAG .. "');", { to = HIST })
     -- While it is down, overrun the ring so that the restart finds a gap
     -- (used by the gap cases below): 100 events of ~60 KB through a 4 MiB
     -- buffer.
@@ -738,7 +654,7 @@ test("planning finds types through the catalogues of every shard, never by scann
     for i = 1, 100 do entries[i] = { type = "pt.flood", payload = big } end
     local fr = kmes.emit_batch(craft, entries)
     GAP_FLOODED = fr.emitted == 100
-    start(craft)
+    eventd.start(craft)
     local stored = eventd.sql(craft, HIST, "SELECT count(*) FROM events WHERE event_type LIKE 'pt.hist.%'")
     t:assert_eq(stored[1][1], 2, "both rows are in the historical shard")
     local cat = eventd.rows(craft, "EVENTS pt.hist.cat" .. HTAG .. " SINCE 1h ago")
@@ -768,7 +684,7 @@ test("a receipt accounts for every stored event and every gap it commits with", 
     spec = "eventd *events.a-receipt-commits-in-the-transaction-that-stores-its-rows-or-gap-record",
 }, function(t)
     t:assert(GAP_FLOODED, "the ring was overrun while eventd was down")
-    local boot = boot_pcds_hex(craft)
+    local boot = eventd.boot_pcds_hex(craft)
     local uncovered = eventd.sql(craft, SHARD0,
         "SELECT e.sequence FROM events e WHERE hex(e.boot_id) = '" .. boot .. "' AND e.sequence IS NOT NULL " ..
         "AND NOT EXISTS (SELECT 1 FROM receipt_ranges r WHERE r.boot_id = e.boot_id AND r.cpu_id = e.cpu_id " ..
@@ -798,15 +714,15 @@ local orphan_planted
 local function plant_orphan()
     if orphan_planted ~= nil then return orphan_planted end
     instrument()
-    local old = guest_now(craft) - 40 * 86400 * 1000000000
-    stop(craft)
-    rewrite(craft, SHARD0,
+    local old = eventd.guest_ns(craft) - 40 * 86400 * 1000000000
+    eventd.stop(craft)
+    eventd.edit_store(craft, SHARD0,
         "INSERT INTO events (boot_id, timestamp, cpu_id, sequence, origin_class, event_type, " ..
         "effective_token_guid, true_token_guid, process_guid, payload) VALUES (X'" .. OLD_BOOT .. "', " ..
         old .. ", 0, 1, 0, '" .. ORPHAN .. "', zeroblob(16), zeroblob(16), zeroblob(16), X'80'); " ..
         "INSERT INTO event_types VALUES ('" .. ORPHAN .. "'); " ..
         "INSERT INTO receipt_ranges VALUES (X'" .. OLD_BOOT .. "', 0, 1, 1);")
-    start(craft)
+    eventd.start(craft)
     orphan_planted = eventd.sql(craft, SHARD0,
         "SELECT count(*) FROM events WHERE event_type = '" .. ORPHAN .. "'")[1][1] == 1
     -- Any configuration change requests a retention pass; the default
@@ -868,18 +784,18 @@ test("startup merges overlapping and adjacent receipts across every readable sha
         .. " eventd *events.startup-merge-correctness-never-depends-on-compaction",
 }, function(t)
     instrument()
-    local boot = boot_pcds_hex(craft)
-    stop(craft)
+    local boot = eventd.boot_pcds_hex(craft)
+    eventd.stop(craft)
     local frag = eventd.sql(craft, SHARD0, "SELECT first_sequence, last_sequence FROM receipt_ranges WHERE hex(boot_id) = '" ..
         boot .. "' AND cpu_id = 0 ORDER BY first_sequence")
     t:assert(#frag > 1, "the active shard's own receipts are uncompacted fragments: " .. #frag .. " rows")
     local s = frag[#frag][2]
     -- In another shard: a range overlapping the active shard's coverage
     -- and running far past it.
-    rewrite(craft, SHARD0, EMPTY ..
+    eventd.edit_store(craft, SHARD0, EMPTY ..
         "INSERT INTO receipt_ranges VALUES (X'" .. boot .. "', 0, " .. (s - 5) .. ", " .. (s + 5000) .. ");",
-        eventd.STORE.events .. "/shard-0006.db")
-    start(craft)
+        { to = eventd.STORE.events .. "/shard-0006.db" })
+    eventd.start(craft)
     local rows = eventd.rows(craft, "EVENTS " .. eventd.T.startup .. " TAKE 1")
     local rp = rows[1].resume_points
     t:assert_eq(rp[1].cpu_id, 0, "CPU 0's resume point")

@@ -25,79 +25,8 @@ local vm = eventd.boot({ name = "ev-bootpart" })
 -- Local helpers
 -- ---------------------------------------------------------------------------
 
-local function host_tmpdir()
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l")
-    p:close()
-    return dir
-end
-
-local function host_write(path, bytes)
-    local f = assert(io.open(path, "wb"))
-    f:write(bytes)
-    f:close()
-end
-
-local function host_read(path)
-    local f = assert(io.open(path, "rb"))
-    local s = f:read("a")
-    f:close()
-    return s
-end
-
---- Apply `script` to a guest database while eventd is stopped (see the
---- file header).
-local function host_edit(db, script)
-    local dir = host_tmpdir()
-    host_write(dir .. "/db", vm:read_file(db))
-    local okw, wal = pcall(vm.read_file, vm, db .. "-wal")
-    if okw and wal and #wal > 0 then host_write(dir .. "/db-wal", wal) end
-    host_write(dir .. "/edit.sql", script)
-    host_write(dir .. "/run.py", [[
-import sqlite3, sys
-d = sys.argv[1]
-c = sqlite3.connect(d + "/db")
-c.executescript(open(d + "/edit.sql").read())
-c.commit()
-c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-c.close()
-]])
-    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
-    local out = p:read("a")
-    local ok = p:close()
-    assert(ok, "host sqlite edit failed: " .. out)
-    local bytes = host_read(dir .. "/db")
-    os.execute("rm -rf '" .. dir .. "'")
-    vm:run("rm -f '" .. db .. "-wal' '" .. db .. "-shm'"):assert_ok()
-    vm:write_file(db, bytes)
-end
-
-local function stop_eventd()
-    vm:run("svctl stop eventd"):assert_ok()
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 60, interval = 0.25, desc = "eventd to stop" })
-end
-
-local function start_eventd()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
-end
-
 local function kernel_boot_id()
-    return (vm:run("cat /proc/sys/kernel/random/boot_id").stdout:gsub("%s", ""))
-end
-
---- The kernel boot ID in the PCDS byte layout (the first three fields
---- little-endian), as SQLite's hex() prints it.
-local function boot_pcds_hex()
-    local u = kernel_boot_id():gsub("-", "")
-    local b = {}
-    for i = 1, 32, 2 do b[#b + 1] = u:sub(i, i + 1) end
-    local out = {}
-    for _, i in ipairs({ 4, 3, 2, 1, 6, 5, 8, 7, 9, 10, 11, 12, 13, 14, 15, 16 }) do
-        out[#out + 1] = b[i]
-    end
-    return table.concat(out):upper()
+    return eventd.boot_id(vm)
 end
 
 local function startups()
@@ -151,7 +80,7 @@ test("every stored event, log line and metric sample carries the kernel's boot I
     eventd.wait_rows(vm, "LOGS FROM " .. tag .. " SINCE 10m ago", function(rs) return #rs == 1 end)
     eventd.wait_rows(vm, "METRIC " .. tag .. " SINCE 10m ago", function(rs) return #rs == 1 end)
 
-    local want = boot_pcds_hex()
+    local want = eventd.boot_pcds_hex(vm)
     local stores = {
         { "events", eventd.shards(vm)[1], "events" },
         { "logs", eventd.DB.logs, "logs" },
@@ -198,13 +127,13 @@ test("the metric boot ID is a sample column, not part of a series' identity", {
     local name = eventd.marker("m")
     eventd.send_metric(vm, { name = name, type = "gauge", value = 1 })
     eventd.wait_rows(vm, "METRIC " .. name .. " SINCE 10m ago", function(rs) return #rs == 1 end)
-    stop_eventd()
-    host_edit(eventd.DB.metrics, string.format([[
+    eventd.stop(vm)
+    eventd.edit_store(vm, eventd.DB.metrics, string.format([[
 INSERT INTO samples (series_id, boot_id, timestamp, value)
 SELECT id, X'00112233445566778899AABBCCDDEEFF', (SELECT max(timestamp) FROM samples) - 1000000, 2
 FROM series WHERE name = '%s';
 ]], name))
-    start_eventd()
+    eventd.start(vm)
     local series = eventd.sql(vm, eventd.DB.metrics,
         "SELECT count(*) FROM series WHERE name = '" .. name .. "'")
     t:assert_eq(series[1][1], 1, "one series")
@@ -228,7 +157,7 @@ SELECT count(*) FROM (SELECT boot_id, cpu_id, sequence FROM events
 WHERE sequence IS NOT NULL GROUP BY boot_id, cpu_id, sequence HAVING count(*) > 1)]])
         t:assert_eq(dup[1][1], 0, shard .. ": no (boot_id, cpu_id, sequence) appears twice")
         local within = eventd.sql(vm, shard, "SELECT count(*) FROM (SELECT cpu_id, sequence FROM events "
-            .. "WHERE sequence IS NOT NULL AND hex(boot_id) = '" .. boot_pcds_hex()
+            .. "WHERE sequence IS NOT NULL AND hex(boot_id) = '" .. eventd.boot_pcds_hex(vm)
             .. "' GROUP BY cpu_id, sequence HAVING count(*) > 1)")
         t:assert_eq(within[1][1], 0, shard .. ": within this boot, (cpu_id, sequence) alone is unique")
     end
@@ -247,7 +176,7 @@ test("the boot's first eventd start covers from before sequence 1 and says resta
     t:assert(first, "a startup record exists")
     t:assert_eq(first.restart, false, "the boot's first start carries restart false")
     t:assert_eq(first.boot_id:lower(), "{" .. kernel_boot_id():lower() .. "}", "under the new boot ID")
-    local boot = boot_pcds_hex()
+    local boot = eventd.boot_pcds_hex(vm)
     local low = eventd.sql(vm, eventd.shards(vm)[1],
         "SELECT min(first_sequence) FROM receipt_ranges WHERE cpu_id = 0 AND hex(boot_id) = '" .. boot .. "'")
     t:assert_eq(low[1][1], 1, "coverage for the CPU begins at sequence 1, so nothing before it was missed")
@@ -257,7 +186,7 @@ test("a restart in the same boot keeps the boot ID, merges coverage and says res
     spec = "eventd *bootpart.committed-rows-or-receipts-for-the-boot-mean-a-restart"
         .. " eventd *bootpart.a-restart-merges-and-reconciles-coverage-keeps-the-boot-id-and-emits-restart-true",
 }, function(t)
-    local boot = boot_pcds_hex()
+    local boot = eventd.boot_pcds_hex(vm)
     local before = covered_through(boot)
     eventd.restart(vm)
     local s = startups()
@@ -273,18 +202,18 @@ end)
 test("neither the sequence checkpoints nor the last shutdown payload steer recovery", {
     spec = "eventd *bootpart.sequence-checkpoints-and-the-previous-shutdown-payload-are-not-consulted-for-recovery",
 }, function(t)
-    local boot = boot_pcds_hex()
-    stop_eventd()
+    local boot = eventd.boot_pcds_hex(vm)
+    eventd.stop(vm)
     local covered = covered_through(boot)
-    host_edit(eventd.DB.meta,
+    eventd.edit_store(vm, eventd.DB.meta,
         "UPDATE sequence_checkpoints SET sequence = 999999999 WHERE hex(boot_id) = '" .. boot .. "';")
     local lie = eventd.msgpack({ last_sequences = { { cpu_id = 0, sequence = 999999999 } } })
-    local hex = lie:gsub(".", function(c) return string.format("%02X", c:byte()) end)
+    local hex = eventd.hex(lie, true)
     for _, shard in ipairs(eventd.shards(vm)) do
-        host_edit(shard, "UPDATE events SET payload = X'" .. hex .. "' WHERE event_type = '"
+        eventd.edit_store(vm, shard, "UPDATE events SET payload = X'" .. hex .. "' WHERE event_type = '"
             .. eventd.T.shutdown .. "';")
     end
-    start_eventd()
+    eventd.start(vm)
     local last = startups()
     last = last[#last]
     local resume = resume_of(last, 0)
@@ -296,16 +225,16 @@ end)
 test("committed receipt ranges, not stored rows, decide where ingestion resumes", {
     spec = "eventd *bootpart.committed-receipt-ranges-are-the-sequence-authority",
 }, function(t)
-    local boot = boot_pcds_hex()
-    stop_eventd()
+    local boot = eventd.boot_pcds_hex(vm)
+    eventd.stop(vm)
     local covered = covered_through(boot)
     -- Take away every KMES row of this boot but leave the receipts. If the
     -- rows were the authority, startup would find nothing ingested and
     -- take the ring's survivors again.
     for _, shard in ipairs(eventd.shards(vm)) do
-        host_edit(shard, "DELETE FROM events WHERE sequence IS NOT NULL AND hex(boot_id) = '" .. boot .. "';")
+        eventd.edit_store(vm, shard, "DELETE FROM events WHERE sequence IS NOT NULL AND hex(boot_id) = '" .. boot .. "';")
     end
-    start_eventd()
+    eventd.start(vm)
     local last = startups()
     last = last[#last]
     t:assert_eq(last.restart, true, "the receipts alone made it a restart")
@@ -324,11 +253,11 @@ test("committed event rows alone show that eventd ran before in this boot", {
 }, function(t)
     eventd.emit(vm, "pt.bootpart.rows", { n = 1 })
     eventd.wait_rows(vm, "EVENTS pt.bootpart.rows SINCE 10m ago", function(rs) return #rs >= 1 end)
-    stop_eventd()
+    eventd.stop(vm)
     for _, shard in ipairs(eventd.shards(vm)) do
-        host_edit(shard, "DELETE FROM receipt_ranges;")
+        eventd.edit_store(vm, shard, "DELETE FROM receipt_ranges;")
     end
-    start_eventd()
+    eventd.start(vm)
     local last = startups()
     last = last[#last]
     t:assert_eq(last.restart, true, "with no receipt at all, the rows made it a restart")
@@ -341,11 +270,11 @@ test("first start and restart are told apart by the stored data, not a persisted
     -- away and nothing else: the metadata database, the log and metric
     -- stores and every registry value stay. If any of them carried a
     -- "started this boot" flag, the next start would still be a restart.
-    stop_eventd()
+    eventd.stop(vm)
     for _, shard in ipairs(eventd.shards(vm)) do
         vm:run("rm -f '" .. shard .. "' '" .. shard .. "-wal' '" .. shard .. "-shm'"):assert_ok()
     end
-    start_eventd()
+    eventd.start(vm)
     local s = startups()
     t:assert_eq(#s, 1, "the fresh shard holds only the new startup record")
     t:assert_eq(s[1].restart, false, "and it reports a first start")
@@ -366,17 +295,17 @@ test("startup looks for the current boot in historical shards too", {
     for i = 1, 1100 do eventd.emit(vm, "pt.bootpart.hist", { i = i }) end
     eventd.wait_rows(vm, "EVENTS pt.bootpart.hist SINCE 10m ago TAKE 5000",
         function(rs) return #rs == 1100 end)
-    local boot = boot_pcds_hex()
+    local boot = eventd.boot_pcds_hex(vm)
     local shard1 = eventd.STORE.events .. "/shard-0001.db"
     local evidence = eventd.sql(vm, shard1,
         "SELECT (SELECT count(*) FROM events WHERE hex(boot_id) = '" .. boot .. "') + "
         .. "(SELECT count(*) FROM receipt_ranges WHERE hex(boot_id) = '" .. boot .. "')")
     t:assert(evidence[1][1] > 0, "precondition: shard-0001 holds this boot's records")
-    stop_eventd()
+    eventd.stop(vm)
     eventd.unset(vm, "StorageShards"):assert_ok()
     local shard0 = eventd.STORE.events .. "/shard-0000.db"
     vm:run("rm -f '" .. shard0 .. "' '" .. shard0 .. "-wal' '" .. shard0 .. "-shm'"):assert_ok()
-    start_eventd()
+    eventd.start(vm)
     local s = startups()
     table.sort(s, function(a, b) return a.timestamp < b.timestamp end)
     t:assert_eq(s[#s].restart, true,

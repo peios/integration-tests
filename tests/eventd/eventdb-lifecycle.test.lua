@@ -18,7 +18,7 @@
 --     bad-historical cases end with eventd running.
 --
 -- Databases are edited between a stop and a start by copying them to the
--- host and back (`rewrite`); a stopped eventd has removed its WAL, so the
+-- host and back (`eventd.edit_store`); a stopped eventd has removed its WAL, so the
 -- main file is the whole database.
 --
 -- Not reachable from a guest: `PRAGMA synchronous` is a property of a
@@ -41,14 +41,7 @@ local vm = eventd.boot({ name = "ev-db" })
 -- so that a failing start is only ever a failed start.
 local bad = eventd.boot({
     name = "ev-db-bad",
-    config = {},
-    config_keys = {
-        { path = [[Machine\System\Services]] },
-        { path = [[Machine\System\Services\eventd]], values = {
-            { name = "ErrorControl", type = "dword", data = 0 },
-            { name = "RestartMaxRetries", type = "dword", data = 1000 },
-        } },
-    },
+    noncritical = { restart = false, max_retries = 1000 },
 })
 
 local STORE = eventd.STORE.events
@@ -60,74 +53,6 @@ local SERVICE_SID_BIN = token.sid(5, 80, 1963885778, 1835409261, 1671587836, 227
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
-
-local function host_tmpdir()
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l")
-    p:close()
-    return dir
-end
-
-local function host_write(path, bytes)
-    local f = assert(io.open(path, "wb"))
-    f:write(bytes)
-    f:close()
-end
-
---- Copy guest database `src` to the host, run `script` there, and write
---- the result to guest `dst` (default `src`). eventd must be stopped.
-local function rewrite(v, src, script, dst)
-    local dir = host_tmpdir()
-    host_write(dir .. "/db", v:read_file(src))
-    host_write(dir .. "/q.sql", script)
-    host_write(dir .. "/run.py", [[
-import sqlite3, sys
-d = sys.argv[1]
-c = sqlite3.connect(d + "/db")
-c.executescript(open(d + "/q.sql").read())
-c.commit()
-c.close()
-]])
-    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
-    local out = p:read("a")
-    local ok = p:close()
-    local f = assert(io.open(dir .. "/db", "rb"))
-    local bytes = f:read("a")
-    f:close()
-    os.execute("rm -rf '" .. dir .. "'")
-    assert(ok, "host sqlite rewrite failed: " .. out)
-    v:write_file(dst or src, bytes)
-end
-
-local function stop(v)
-    v:run("svctl stop eventd"):assert_ok()
-    wait_until(function() return eventd.pid(v) == nil end,
-        { timeout = 30, interval = 0.25, desc = "eventd to stop" })
-end
-
-local function start(v)
-    v:run("svctl start eventd")
-    eventd.ready(v)
-end
-
---- Start eventd expecting it to fail; returns the state it reached.
---- Leaves it stopped with its restart budget reset.
-local function start_fails(v)
-    v:run("svctl start eventd")
-    local state
-    pcall(wait_until, function()
-        state = eventd.status(v).state
-        return state ~= "starting" and state ~= "activating"
-    end, { timeout = 30, interval = 0.25, desc = "eventd's start to resolve" })
-    local answered = eventd.query(v, "EVENTS TAKE 1").ok
-    v:run("svctl stop eventd")
-    v:run("svctl reset eventd")
-    return state, answered
-end
-
-local function guest_now(v)
-    return math.tointeger(tonumber(v:run("date +%s%N").stdout:match("%d+")))
-end
 
 local function exists(v, path)
     return v:run("test -e '" .. path .. "'").exit_code == 0
@@ -145,17 +70,10 @@ local function has(list, x)
     return false
 end
 
---- eventd's descriptors on `file`: list of {fd, flags} (flags octal text).
+--- eventd's descriptors on `file`: list of {fd, flags, ino}.
 local function fds_on(v, file)
-    local pid = eventd.pid(v)
-    local out = {}
-    local r = v:run("for f in /proc/" .. pid .. "/fd/*; do t=$(readlink $f); " ..
-        "if [ \"$t\" = '" .. file .. "' ]; then echo ${f##*/} $(grep '^flags' /proc/" .. pid ..
-        "/fdinfo/${f##*/} | awk '{print $2}') $(stat -L -c %i $f); fi; done")
-    for fd, flags, ino in r.stdout:gmatch("(%d+) (%d+) (%d+)") do
-        out[#out + 1] = { fd = tonumber(fd), flags = tonumber(flags, 8), ino = ino }
-    end
-    return out
+    local _, _, on = eventd.fds_on(v, nil, file, { ino = true })
+    return on
 end
 
 local O_ACCMODE, O_RDONLY, O_RDWR = 3, 0, 2
@@ -189,11 +107,11 @@ end
 
 --- A shard copy emptied of rows, with one event of `ty` tagged `tag`.
 local function planted_shard(v, ty, tag)
-    local payload = eventd.msgpack({ tag = tag }):gsub(".", function(c) return string.format("%02X", c:byte()) end)
+    local payload = eventd.hex(eventd.msgpack({ tag = tag }), true)
     return "DELETE FROM events; DELETE FROM event_types; DELETE FROM receipt_ranges; " ..
         "INSERT INTO events (boot_id, timestamp, cpu_id, sequence, origin_class, event_type, " ..
         "effective_token_guid, true_token_guid, process_guid, payload) VALUES (zeroblob(16), " ..
-        guest_now(v) .. ", 0, 1, 0, '" .. ty .. "', zeroblob(16), zeroblob(16), zeroblob(16), X'" .. payload .. "'); " ..
+        eventd.guest_ns(v) .. ", 0, 1, 0, '" .. ty .. "', zeroblob(16), zeroblob(16), zeroblob(16), X'" .. payload .. "'); " ..
         "INSERT INTO event_types VALUES ('" .. ty .. "');"
 end
 
@@ -441,12 +359,12 @@ test("the query path opens every valid shard-NNNN.db, whatever its number, and n
 }, function(t)
     local tags = { n9 = eventd.marker("q9"), short = eventd.marker("qs"), other = eventd.marker("qo"),
                    meta = eventd.marker("qm") }
-    stop(vm)
-    rewrite(vm, SHARD0, planted_shard(vm, "pt.db.found", tags.n9), STORE .. "/shard-0009.db")
-    rewrite(vm, SHARD0, planted_shard(vm, "pt.db.found", tags.short), STORE .. "/shard-9.db")
-    rewrite(vm, SHARD0, planted_shard(vm, "pt.db.found", tags.other), STORE .. "/other.db")
-    rewrite(vm, SHARD0, planted_shard(vm, "pt.db.found", tags.meta), STORE .. "/shard-0009.db.bak")
-    start(vm)
+    eventd.stop(vm)
+    eventd.edit_store(vm, SHARD0, planted_shard(vm, "pt.db.found", tags.n9), { to = STORE .. "/shard-0009.db" })
+    eventd.edit_store(vm, SHARD0, planted_shard(vm, "pt.db.found", tags.short), { to = STORE .. "/shard-9.db" })
+    eventd.edit_store(vm, SHARD0, planted_shard(vm, "pt.db.found", tags.other), { to = STORE .. "/other.db" })
+    eventd.edit_store(vm, SHARD0, planted_shard(vm, "pt.db.found", tags.meta), { to = STORE .. "/shard-0009.db.bak" })
+    eventd.start(vm)
     t:assert_eq(found(vm, "pt.db.found", tags.n9), 1, "shard-0009.db, with 0002..0008 absent, is read")
     t:assert_eq(found(vm, "pt.db.found", tags.short), 0, "shard-9.db is not a shard")
     t:assert_eq(found(vm, "pt.db.found", tags.other), 0, "other.db is not a shard")
@@ -468,24 +386,25 @@ test("the query path reads shards through read-only connections", {
     end, { timeout = 60, interval = 0.5, desc = "the bulk events to be stored" })
     local pid = eventd.pid(vm)
     local q = eventd.guest_tmp(vm, "EVENTS pt.db.bulk SINCE 1h ago", "bulk")
-    local script = eventd.guest_tmp(vm, table.concat({
-        "( for i in 1 2 3 4 5 6 7 8; do evctl --format jsonl --file " .. q .. " >/dev/null 2>&1; done ) &",
-        "end=$(($(date +%s) + 6))",
-        "while [ $(date +%s) -lt $end ]; do",
-        "  for f in /proc/" .. pid .. "/fd/*; do",
-        "    if [ \"$(readlink $f 2>/dev/null)\" = '" .. SHARD0 .. "' ]; then",
-        "      echo \"${f##*/} $(grep '^flags' /proc/" .. pid .. "/fdinfo/${f##*/} 2>/dev/null | awk '{print $2}') $(stat -L -c %i $f 2>/dev/null)\"",
-        "    fi",
-        "  done",
-        "done | sort -u",
-    }, "\n"), "sample")
     -- SQLite's unix VFS parks a closed descriptor while another
     -- connection in the process holds locks on the file and hands it to
     -- the next open with the same flags, so query connections show up as
     -- a recurring descriptor rather than a fresh one each time. Whatever
     -- the numbering: while queries run, the writer's is the only
     -- read-write descriptor on the shard, and the rest are read-only.
-    local out = vm:run("sh " .. script).stdout
+    local bg = vm:run_async("/bin/sh", { args = { "-c",
+        "for i in 1 2 3 4 5 6 7 8; do evctl --format jsonl --file " .. q .. " >/dev/null 2>&1; done" } })
+    local seen, lines = {}, {}
+    local stop_at = eventd.guest_ns(vm) + 6 * 1000000000
+    while eventd.guest_ns(vm) < stop_at do
+        for _, e in ipairs(select(3, eventd.fds_on(vm, pid, SHARD0, { ino = true }))) do
+            local l = string.format("%d %o %d", e.fd, e.flags, e.ino or 0)
+            if not seen[l] then seen[l] = true; lines[#lines + 1] = l end
+        end
+    end
+    pcall(function() bg:wait("120s") end)
+    table.sort(lines)
+    local out = table.concat(lines, "\n")
     local writer
     for _, f in ipairs(fds_on(vm, SHARD0)) do
         if f.flags & O_ACCMODE == O_RDWR then writer = f.fd end
@@ -505,10 +424,10 @@ end)
 test("an existing active shard is opened in WAL mode", {
     spec = "eventd *eventdb.an-active-shard-is-opened-in-wal-mode",
 }, function(t)
-    stop(vm)
-    rewrite(vm, SHARD0, "PRAGMA journal_mode=DELETE;")
+    eventd.stop(vm)
+    eventd.edit_store(vm, SHARD0, "PRAGMA journal_mode=DELETE;")
     t:assert_eq(eventd.sql(vm, SHARD0, "PRAGMA journal_mode")[1][1], "delete", "the file was left in rollback mode")
-    start(vm)
+    eventd.start(vm)
     t:assert_eq(eventd.sql(vm, SHARD0, "PRAGMA journal_mode")[1][1], "wal", "eventd opened it in WAL mode")
 end)
 
@@ -529,13 +448,13 @@ end
 test("EventStorePath has no default: missing or invalid, eventd does not start", {
     spec = "eventd *eventdb.eventstorepath-has-no-default-and-a-missing-or-invalid-value-fails-startup",
 }, function(t)
-    stop(bad)
+    eventd.stop(bad)
     set_store(bad, nil)
-    local missing, missing_answered = start_fails(bad)
+    local missing, missing_answered = eventd.start_fails(bad)
     set_store(bad, "var/state/eventd/events")
-    local relative, relative_answered = start_fails(bad)
+    local relative, relative_answered = eventd.start_fails(bad)
     set_store(bad, STD)
-    start(bad)
+    eventd.start(bad)
     t:assert(missing ~= "active" and not missing_answered, "with no EventStorePath it does not come up: " .. tostring(missing))
     t:assert(relative ~= "active" and not relative_answered, "with a relative one it does not either: " .. tostring(relative))
 end)
@@ -543,12 +462,12 @@ end)
 test("eventd never creates a store directory", {
     spec = "eventd *eventdb.eventd-never-creates-store-directories",
 }, function(t)
-    stop(bad)
+    eventd.stop(bad)
     set_store(bad, "/var/state/eventd/pt-absent/")
-    local state = start_fails(bad)
+    local state = eventd.start_fails(bad)
     local made = exists(bad, "/var/state/eventd/pt-absent")
     set_store(bad, STD)
-    start(bad)
+    eventd.start(bad)
     t:assert(state ~= "active", "it does not start: " .. tostring(state))
     t:assert(not made, "and /var/state/eventd/pt-absent was not created")
 end)
@@ -556,7 +475,7 @@ end)
 test("a missing, non-directory, symlinked or weakly protected store path fails startup", {
     spec = "eventd *eventdb.a-missing-non-directory-symlinked-or-weakly-protected-store-path-fails-startup",
 }, function(t)
-    stop(bad)
+    eventd.stop(bad)
     bad:run("touch /var/state/eventd/pt-file && ln -s /var/state/eventd /var/state/pt-link")
     bad:run("mkdir /var/state/eventd/pt-weak")
     local weak_sddl = access.sd({
@@ -581,10 +500,10 @@ test("a missing, non-directory, symlinked or weakly protected store path fails s
     local results = {}
     for _, c in ipairs(cases) do
         set_store(bad, c[2])
-        results[#results + 1] = { c[1], (start_fails(bad)) }
+        results[#results + 1] = { c[1], (eventd.start_fails(bad)) }
     end
     set_store(bad, STD)
-    start(bad)
+    eventd.start(bad)
     for _, r in ipairs(results) do
         t:assert(r[2] ~= "active", r[1] .. ": eventd does not start (" .. tostring(r[2]) .. ")")
     end
@@ -594,14 +513,14 @@ test("an active shard with a missing or unrecognised schema_version fails startu
     spec = "eventd *eventdb.a-missing-or-unrecognised-active-shard-schema-version-fails-startup"
         .. " eventd *events.a-shard-schema-is-never-migrated",
 }, function(t)
-    stop(bad)
-    rewrite(bad, SHARD0, "UPDATE metadata SET value = '99' WHERE key = 'schema_version';")
-    local unknown = start_fails(bad)
+    eventd.stop(bad)
+    eventd.edit_store(bad, SHARD0, "UPDATE metadata SET value = '99' WHERE key = 'schema_version';")
+    local unknown = eventd.start_fails(bad)
     local after = eventd.sql(bad, SHARD0, "SELECT value FROM metadata WHERE key = 'schema_version'")[1][1]
-    rewrite(bad, SHARD0, "DELETE FROM metadata WHERE key = 'schema_version';")
-    local missing = start_fails(bad)
-    rewrite(bad, SHARD0, "INSERT INTO metadata VALUES ('schema_version', '1');")
-    start(bad)
+    eventd.edit_store(bad, SHARD0, "DELETE FROM metadata WHERE key = 'schema_version';")
+    local missing = eventd.start_fails(bad)
+    eventd.edit_store(bad, SHARD0, "INSERT INTO metadata VALUES ('schema_version', '1');")
+    eventd.start(bad)
     t:assert(unknown ~= "active", "schema_version 99: no start (" .. tostring(unknown) .. ")")
     t:assert_eq(after, "99", "and the shard still says 99: nothing migrated it")
     t:assert(missing ~= "active", "no schema_version: no start (" .. tostring(missing) .. ")")
@@ -610,15 +529,15 @@ end)
 test("an active shard missing a required table or the timestamp index fails startup", {
     spec = "eventd *eventdb.an-active-shard-missing-required-tables-or-indexes-fails-startup",
 }, function(t)
-    stop(bad)
+    eventd.stop(bad)
     local saved = bad:read_file(SHARD0)
-    rewrite(bad, SHARD0, "DROP TABLE receipt_ranges;")
-    local no_table = start_fails(bad)
+    eventd.edit_store(bad, SHARD0, "DROP TABLE receipt_ranges;")
+    local no_table = eventd.start_fails(bad)
     bad:write_file(SHARD0, saved)
-    rewrite(bad, SHARD0, "DROP INDEX idx_events_timestamp;")
-    local no_index = start_fails(bad)
+    eventd.edit_store(bad, SHARD0, "DROP INDEX idx_events_timestamp;")
+    local no_index = eventd.start_fails(bad)
     bad:write_file(SHARD0, saved)
-    start(bad)
+    eventd.start(bad)
     t:assert(no_table ~= "active", "without receipt_ranges: no start (" .. tostring(no_table) .. ")")
     t:assert(no_index ~= "active", "without idx_events_timestamp: no start (" .. tostring(no_index) .. ")")
 end)
@@ -628,17 +547,16 @@ test("a historical shard that will not verify is logged and left out, never fail
         .. " eventd *eventdb.a-bad-historical-shard-is-logged-and-excluded-without-failing-startup-or-quarantine",
 }, function(t)
     local tags = { v99 = eventd.marker("h99"), notab = eventd.marker("hnt"), good = eventd.marker("hok") }
-    stop(bad)
-    rewrite(bad, SHARD0, planted_shard(bad, "pt.db.hist", tags.v99) ..
-        "UPDATE metadata SET value = '99' WHERE key = 'schema_version';", STORE .. "/shard-0003.db")
-    rewrite(bad, SHARD0, planted_shard(bad, "pt.db.hist", tags.notab) .. "DROP TABLE receipt_ranges;",
-        STORE .. "/shard-0004.db")
+    eventd.stop(bad)
+    eventd.edit_store(bad, SHARD0, planted_shard(bad, "pt.db.hist", tags.v99) ..
+        "UPDATE metadata SET value = '99' WHERE key = 'schema_version';", { to = STORE .. "/shard-0003.db" })
+    eventd.edit_store(bad, SHARD0, planted_shard(bad, "pt.db.hist", tags.notab) .. "DROP TABLE receipt_ranges;",
+        { to = STORE .. "/shard-0004.db" })
     local garbage = string.rep("not a database at all. ", 300)
     bad:write_file(STORE .. "/shard-0005.db", garbage)
-    rewrite(bad, SHARD0, planted_shard(bad, "pt.db.hist", tags.good), STORE .. "/shard-0006.db")
-    local since = guest_now(bad)
-    bad:run("svctl start eventd")
-    eventd.ready(bad)
+    eventd.edit_store(bad, SHARD0, planted_shard(bad, "pt.db.hist", tags.good), { to = STORE .. "/shard-0006.db" })
+    local since = eventd.guest_ns(bad)
+    eventd.start(bad)
     t:assert_eq(eventd.status(bad).state, "active", "eventd starts")
     t:assert_eq(found(bad, "pt.db.hist", tags.good), 1, "a good historical shard is read")
     t:assert_eq(found(bad, "pt.db.hist", tags.v99), 0, "the unrecognised-version one is not")
@@ -659,9 +577,9 @@ test("a historical shard that will not verify is logged and left out, never fail
     end
     t:assert(named["0003"] and named["0004"] and named["0005"],
         "each exclusion was logged: " .. json.encode(named))
-    stop(bad)
+    eventd.stop(bad)
     for _, n in ipairs({ "0003", "0004", "0005", "0006" }) do bad:run("rm -f " .. STORE .. "/shard-" .. n .. ".db*") end
-    start(bad)
+    eventd.start(bad)
 end)
 
 --- Quarantined copies of shard-0000's files: {[base] = suffix}.
@@ -680,11 +598,11 @@ test("SQLite-reported corruption in the active shard renames it aside, starts a 
         .. " eventd *eventdb.a-corrupt-required-store-is-renamed-aside-and-replaced-at-its-path"
         .. " eventd *eventdb.quarantine-is-logged-and-emits-a-storage-error-event-once-a-shard-is-writable",
 }, function(t)
-    stop(bad)
+    eventd.stop(bad)
     local body = string.rep("garbage database ", 500)
     bad:write_file(SHARD0, body)
-    local since = guest_now(bad)
-    start(bad)
+    local since = eventd.guest_ns(bad)
+    eventd.start(bad)
     local suffix, files = quarantined(bad)
     local ts = suffix["shard-0000.db"]
     t:assert(ts, "the database was renamed aside: " .. table.concat(files, " "))
@@ -719,7 +637,7 @@ test("quarantine moves the database, its WAL and its shared memory under one suf
     -- quarantine::database (quarantine.rs:14-21) looks for sidecars there
     -- are none to move. The WAL, which can hold the newest committed
     -- transactions, is the part lost.
-    stop(bad)
+    eventd.stop(bad)
     for _, f in ipairs(listing(bad, STORE)) do
         if f:find("corrupt", 1, true) then bad:run("rm -f " .. STORE .. "/" .. f) end
     end
@@ -728,7 +646,7 @@ test("quarantine moves the database, its WAL and its shared memory under one suf
     bad:write_file(SHARD0, body.db)
     bad:write_file(SHARD0 .. "-wal", body.wal)
     bad:write_file(SHARD0 .. "-shm", body.shm)
-    start(bad)
+    eventd.start(bad)
     local suffix, files = quarantined(bad)
     local ts = suffix["shard-0000.db"]
     t:assert(ts, "the database was renamed aside: " .. table.concat(files, " "))

@@ -73,77 +73,6 @@ local vm = eventd.boot({
 -- Local helpers
 -- ---------------------------------------------------------------------------
 
-local function host_tmpdir()
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l")
-    p:close()
-    return dir
-end
-
-local function host_write(path, bytes)
-    local f = assert(io.open(path, "wb"))
-    f:write(bytes)
-    f:close()
-end
-
-local function host_read(path)
-    local f = assert(io.open(path, "rb"))
-    local s = f:read("a")
-    f:close()
-    return s
-end
-
-local function host_edit(db, script)
-    local dir = host_tmpdir()
-    host_write(dir .. "/db", vm:read_file(db))
-    local okw, wal = pcall(vm.read_file, vm, db .. "-wal")
-    if okw and wal and #wal > 0 then host_write(dir .. "/db-wal", wal) end
-    host_write(dir .. "/edit.sql", script)
-    host_write(dir .. "/run.py", [[
-import sqlite3, sys
-d = sys.argv[1]
-c = sqlite3.connect(d + "/db")
-c.executescript(open(d + "/edit.sql").read())
-c.commit()
-c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-c.close()
-]])
-    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
-    local out = p:read("a")
-    local ok = p:close()
-    assert(ok, "host sqlite edit failed: " .. out)
-    local bytes = host_read(dir .. "/db")
-    os.execute("rm -rf '" .. dir .. "'")
-    vm:run("rm -f '" .. db .. "-wal' '" .. db .. "-shm'"):assert_ok()
-    vm:write_file(db, bytes)
-end
-
-local function stop_eventd()
-    vm:run("svctl stop eventd"):assert_ok()
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 60, interval = 0.25, desc = "eventd to stop" })
-end
-
-local function start_eventd()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
-end
-
-local function guest_now_ns()
-    return math.tointeger(tonumber((vm:run("date +%s%N").stdout:gsub("%s", ""))))
-end
-
-local function boot_pcds_hex()
-    local u = vm:run("cat /proc/sys/kernel/random/boot_id").stdout:gsub("%s", ""):gsub("-", "")
-    local b = {}
-    for i = 1, 32, 2 do b[#b + 1] = u:sub(i, i + 1) end
-    local out = {}
-    for _, i in ipairs({ 4, 3, 2, 1, 6, 5, 8, 7, 9, 10, 11, 12, 13, 14, 15, 16 }) do
-        out[#out + 1] = b[i]
-    end
-    return table.concat(out):upper()
-end
-
 local function shape(db, tbl)
     local parts = {}
     for _, c in ipairs(eventd.sql(vm, db,
@@ -264,7 +193,7 @@ test("a service's forwarded output is stored under its name, stderr marked as an
     if not (out and err) then return end
     t:assert_eq(out[5], 0, "stdout is not an error")
     t:assert_eq(err[5], 1, "stderr is")
-    t:assert_eq(out[2], boot_pcds_hex(), "boot_id is the kernel's, in PCDS layout")
+    t:assert_eq(out[2], eventd.boot_pcds_hex(vm), "boot_id is the kernel's, in PCDS layout")
     t:assert_eq(#out[7], 32, "peinit's correlation key is a 16-byte GUID: " .. out[7])
 
     local hook = rows_for("pt-logs/ExecStartPre[0]")
@@ -285,11 +214,11 @@ test("timestamp is epoch nanoseconds: the producer's when it gave one, else rece
     spec = "eventd *logs.timestamp-is-epoch-nanoseconds-from-the-producer-or-eventds-receipt-clock",
 }, function(t)
     local origin = eventd.marker("ts")
-    local before = guest_now_ns()
+    local before = eventd.guest_ns(vm)
     eventd.send_log(vm, { origin = origin, is_error = false, message = "given", timestamp = 1600000000123456789 })
     eventd.send_log(vm, { origin = origin, is_error = false, message = "receipt" })
     eventd.wait_rows(vm, "LOGS FROM " .. origin, function(rs) return #rs == 2 end)
-    local after = guest_now_ns()
+    local after = eventd.guest_ns(vm)
     local by = {}
     for _, r in ipairs(rows_for(origin)) do by[r[6]] = r[3] end
     t:assert_eq(by.given, 1600000000123456789, "the producer's timestamp, to the nanosecond")
@@ -383,9 +312,9 @@ test("queries find origins through the catalogue, not by scanning the rows", {
     local origin = eventd.marker("plan")
     for i = 1, 3 do eventd.send_log(vm, { origin = origin, is_error = false, message = "p" .. i }) end
     eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 3 end)
-    stop_eventd()
-    host_edit(eventd.DB.logs, "DELETE FROM log_origins WHERE origin = " .. sql_quote(origin) .. ";")
-    start_eventd()
+    eventd.stop(vm)
+    eventd.edit_store(vm, eventd.DB.logs, "DELETE FROM log_origins WHERE origin = " .. sql_quote(origin) .. ";")
+    eventd.start(vm)
     t:assert_eq(#rows_for(origin), 3, "precondition: the rows are still in the logs table")
     t:assert_eq(#eventd.rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago"), 0,
         "with the catalogue entry gone, a query does not find them")
@@ -402,7 +331,7 @@ test("an origin stays in the catalogue after retention deletes its last row", {
     spec = "eventd *logs.catalogue-entries-survive-ordinary-retention",
 }, function(t)
     local origin = eventd.marker("old")
-    local old = guest_now_ns() - 40 * 86400 * 10 ^ 9
+    local old = eventd.guest_ns(vm) - 40 * 86400 * 10 ^ 9
     eventd.send_log(vm, { origin = origin, is_error = false, message = "old", timestamp = math.tointeger(old) })
     eventd.wait_rows(vm, "LOGS FROM " .. origin, function(rs) return #rs == 1 end)
     -- Any applied configuration change also asks for a retention pass

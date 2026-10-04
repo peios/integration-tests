@@ -28,66 +28,6 @@ local DAY = 86400 * 1000000000
 -- Local helpers
 -- ---------------------------------------------------------------------------
 
-local function host_tmpdir()
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l")
-    p:close()
-    return dir
-end
-
-local function host_write(path, bytes)
-    local f = assert(io.open(path, "wb"))
-    f:write(bytes)
-    f:close()
-end
-
-local function host_read(path)
-    local f = assert(io.open(path, "rb"))
-    local s = f:read("a")
-    f:close()
-    return s
-end
-
-local function host_edit(db, script)
-    local dir = host_tmpdir()
-    host_write(dir .. "/db", vm:read_file(db))
-    local okw, wal = pcall(vm.read_file, vm, db .. "-wal")
-    if okw and wal and #wal > 0 then host_write(dir .. "/db-wal", wal) end
-    host_write(dir .. "/edit.sql", script)
-    host_write(dir .. "/run.py", [[
-import sqlite3, sys
-d = sys.argv[1]
-c = sqlite3.connect(d + "/db")
-c.executescript(open(d + "/edit.sql").read())
-c.commit()
-c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-c.close()
-]])
-    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
-    local out = p:read("a")
-    local ok = p:close()
-    assert(ok, "host sqlite edit failed: " .. out)
-    local bytes = host_read(dir .. "/db")
-    os.execute("rm -rf '" .. dir .. "'")
-    vm:run("rm -f '" .. db .. "-wal' '" .. db .. "-shm'"):assert_ok()
-    vm:write_file(db, bytes)
-end
-
-local function stop_eventd()
-    vm:run("svctl stop eventd"):assert_ok()
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 60, interval = 0.25, desc = "eventd to stop" })
-end
-
-local function start_eventd()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
-end
-
-local function now_ns()
-    return math.tointeger(tonumber((vm:run("date +%s%N").stdout:gsub("%s", ""))))
-end
-
 local function sql_quote(s) return "'" .. s:gsub("'", "''") .. "'" end
 
 local function count(where)
@@ -123,16 +63,6 @@ local function send_many(n, make)
     end
 end
 
-local function rw_fds(pid, path)
-    local out = vm:run("for f in /proc/" .. pid .. "/fd/*; do [ \"$(readlink $f)\" = " .. path
-        .. " ] && sed -n 's/^flags:[[:space:]]*//p' /proc/" .. pid .. "/fdinfo/${f##*/}; done").stdout
-    local rw = 0
-    for flags in out:gmatch("%d+") do
-        if tonumber(flags, 8) & 3 == 2 then rw = rw + 1 end
-    end
-    return rw
-end
-
 local function wal_state()
     local ok, bytes = pcall(vm.read_file, vm, eventd.DB.logs .. "-wal")
     if not ok or #bytes < 32 then return 0, nil end
@@ -156,7 +86,7 @@ test("lines older than LogRetentionDays go, fourteen days by default", {
         .. " eventd *logretain.the-default-log-retention-is-fourteen-days",
 }, function(t)
     local m = eventd.marker("age")
-    local now = now_ns()
+    local now = eventd.guest_ns(vm)
     local ages = { d1 = 1, d3 = 3, d13 = 13.9, d15 = 14.1, d40 = 40 }
     local recs = {}
     for name, days in pairs(ages) do
@@ -198,7 +128,7 @@ test("over LogRetentionMaxBytes the oldest lines go, by live size, across boots 
     -- first rule takes both from the old end. A few lines are past the age
     -- limit too.
     local m = eventd.marker("sz")
-    local now = now_ns()
+    local now = eventd.guest_ns(vm)
     local base = now - 10 * DAY
     local step = 2 * 60 * 1000000000 -- two minutes
     local body = string.rep("b", 300)
@@ -212,14 +142,14 @@ test("over LogRetentionMaxBytes the oldest lines go, by live size, across boots 
     end)
     wait_until(function() return count("instr(origin, " .. sql_quote(m) .. ") = 1") == 3005 end,
         { timeout = 60, interval = 0.5, desc = "the lines to be stored" })
-    stop_eventd()
-    host_edit(eventd.DB.logs, string.format([[
+    eventd.stop(vm)
+    eventd.edit_store(vm, eventd.DB.logs, string.format([[
 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000)
 INSERT INTO logs (boot_id, timestamp, origin, is_error, message, job_id)
 SELECT X'00112233445566778899AABBCCDDEEFF', %d + (2 * i + 1) * %d, '%sother', 0, '%s', NULL FROM n;
 INSERT OR IGNORE INTO log_origins VALUES ('%sother');
 ]], base, step, m, body, m))
-    start_eventd()
+    eventd.start(vm)
     local live0, file0 = sizes()
     local catalogue = eventd.sql(vm, eventd.DB.logs,
         "SELECT count(*) * 60 FROM log_origins WHERE instr(origin, " .. sql_quote(m) .. ") = 1")[1][1]
@@ -279,7 +209,7 @@ test("each retention transaction deletes at most RetentionDeleteBatchRows", {
         -- seconds of them.
         vm:clock():sleep("10s")
         local m = eventd.marker("bt")
-        local old = now_ns() - 30 * DAY
+        local old = eventd.guest_ns(vm) - 30 * DAY
         send_many(1000, function(i)
             return { origin = m, is_error = false, message = "x", timestamp = math.tointeger(old + i) }
         end)
@@ -304,7 +234,7 @@ test("retention plans read-only and deletes through the log writer, never a seco
         .. " eventd *logretain.log-retention-takes-no-writer-mutex-and-opens-no-second-read-write-connection",
 }, function(t)
     local m = eventd.marker("rw")
-    local old = now_ns() - 30 * DAY
+    local old = eventd.guest_ns(vm) - 30 * DAY
     send_many(5000, function(i)
         return { origin = m, is_error = false, message = "x", timestamp = math.tointeger(old + i) }
     end)
@@ -318,14 +248,14 @@ test("retention plans read-only and deletes through the log writer, never a seco
     local most, samples = 0, 0
     local deadline = os.time() + 150
     repeat
-        most = math.max(most, rw_fds(pid, eventd.DB.logs))
+        most = math.max(most, (eventd.fds_on(vm, pid, eventd.DB.logs)))
         samples = samples + 1
     until count("origin = " .. sql_quote(m)) == 0 or os.time() > deadline
     eventd.unset(vm, "RetentionDeleteBatchRows")
     t:assert_eq(count("origin = " .. sql_quote(m)), 0, "the pass deleted the lines")
     t:assert_eq(most, 1, "and logs.db never had more than its one read-write connection, over "
         .. samples .. " samples")
-    local threads = vm:run("cat /proc/" .. pid .. "/task/*/comm").stdout
+    local threads = select(2, eventd.thread_names(vm, pid))
     t:assert(threads:find("eventd-retentio", 1, true), "retention runs on a thread of its own")
 end)
 

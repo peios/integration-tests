@@ -130,9 +130,6 @@ local function wait_for(desc, fn, timeout)
     wait_until(fn, { timeout = timeout or 30, interval = 0.25, desc = desc })
 end
 
-local function freeze(v, pid) v:syscall(62, { args = { pid, 19 } }) end
-local function thaw(v, pid) v:syscall(62, { args = { pid, 18 } }) end
-
 --- Emit `n` events of `ty` with `payload`, 256 to a syscall.
 local function burst(v, ty, payload, n)
     local sent = 0
@@ -146,12 +143,16 @@ local function burst(v, ty, payload, n)
     return sent
 end
 
+--- `eventd.stored_count`, retried as `sql` is: a shard taking a flood can
+--- be caught mid-commit more often than `eventd.sql`'s own retries cover.
 local function stored(v, ty)
-    local n = 0
-    for _, s in ipairs(eventd.shards(v)) do
-        n = n + sql(v, s, "SELECT count(*) FROM events WHERE event_type = '" .. ty .. "'")[1][1]
+    local last
+    for _ = 1, 3 do
+        local ok, n = pcall(eventd.stored_count, v, ty)
+        if ok then return n end
+        last = n
     end
-    return n
+    error(last, 0)
 end
 
 -- ---------------------------------------------------------------------------
@@ -232,12 +233,7 @@ test("writers move every shard's indexes to the one global desired set, on their
     -- indexes were written through the writer's connection.
     local pid = eventd.pid(vm)
     for _, s in ipairs({ SHARD0, SHARD1 }) do
-        local out = vm:run("for f in /proc/" .. pid .. "/fd/*; do [ \"$(readlink $f)\" = '" .. s ..
-            "' ] && grep '^flags' /proc/" .. pid .. "/fdinfo/${f##*/}; done").stdout
-        local rw = 0
-        for flags in out:gmatch("flags:%s+(%d+)") do
-            if tonumber(flags, 8) & 3 == 2 then rw = rw + 1 end
-        end
+        local rw = (eventd.fds_on(vm, pid, s))
         t:assert_eq(rw, 1, s .. " has exactly one read-write connection")
     end
 end)
@@ -473,11 +469,30 @@ local function shed_burst()
     press:clock():sleep("11s")
     local boot_seq = sql(press, SHARD0, "SELECT COALESCE(max(last_sequence), 0) FROM receipt_ranges")[1][1]
     local pid = eventd.pid(press)
-    freeze(press, pid)
+    eventd.freeze(press, pid)
     local n = burst(press, "pt.ix.burst", eventd.msgpack({ k = 1 }), 300)
-    thaw(press, pid)
+    eventd.thaw(press, pid)
     wait_for("the burst to be stored", function() return stored(press, "pt.ix.burst") >= n end)
-    local have, ix = material(press)
+    -- The graduated check runs after each batch's commit (writer.rs
+    -- commit_batch), so the last batch's shed lands after its events are
+    -- already visible, and a loaded host can stretch that gap. Read the
+    -- material set once the shedding has shown and stopped moving, not at
+    -- the moment the count is reached; on timeout the last read is what
+    -- the case judges.
+    local have, ix, prev
+    pcall(wait_until, function()
+        local h, x = material(press)
+        local shed, key = 0, {}
+        for i, b in ipairs(h) do
+            if not b then shed = shed + 1 end
+            key[i] = b and "1" or "0"
+        end
+        key = table.concat(key)
+        local settled = key == prev and shed >= 2
+        have, ix, prev = h, x, key
+        return settled
+    end, { timeout = 60, interval = 1, desc = "the burst's shedding to show and settle" })
+    if not have then have, ix = material(press) end
     -- Batches of this burst: one receipt range per committed batch.
     local large = 0
     for _, r in ipairs(sql(press, SHARD0, "SELECT first_sequence, last_sequence FROM receipt_ranges " ..
@@ -548,9 +563,9 @@ test("a full batch with the ring past EmergencySheddingBufferPercent drops every
     -- writer's queue takes 4,096 of them; the rest stay in the ring, well
     -- over half of it, while the writer commits full batches of 100.
     local pid = eventd.pid(press)
-    freeze(press, pid)
+    eventd.freeze(press, pid)
     local n = burst(press, "pt.ix.flood", eventd.msgpack({ s = string.rep("e", 190) }), 13000)
-    thaw(press, pid)
+    eventd.thaw(press, pid)
     -- Wait for ingestion to settle (a ring this full may also lose a few
     -- to overwrite, so wait for the count to stop moving, not for n).
     local last, steady = -1, 0
