@@ -487,7 +487,7 @@ end)
 test("socket descriptors are verified before any socket accepts or receives", {
     spec = "eventd *bootstrap.socket-descriptors-are-verified-before-any-socket-accepts-or-receives",
     skip = true,
-    covered_by = "cargo:eventd TODO IngestionSocket::bind and QueryServer::bind fail with a Protection error when the descriptor read back differs from the one set, before returning the socket",
+    covered_by = "cargo:eventd eventd datagram::tests::a_socket_whose_descriptor_reads_back_differently_is_refused_before_it_can_receive",
 }, function() end)
 
 -- Route closed: KMES creates a ring for every possible CPU at
@@ -496,5 +496,5 @@ test("socket descriptors are verified before any socket accepts or receives", {
 test("discovering no KMES buffers fails startup", {
     spec = "eventd *bootstrap.discovering-no-kmes-buffers-fails-startup",
     skip = true,
-    covered_by = "cargo:eventd TODO kmes::attach_all returns KmesError::NoBuffers when every slot answers EINVAL",
+    covered_by = "cargo:eventd eventd kmes::tests::discovering_no_attachable_buffer_fails_startup",
 }, function() end)

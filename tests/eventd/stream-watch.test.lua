@@ -295,12 +295,12 @@ end)
 -- "On wraparound the next increment is treated as a wake for every
 --  handler and operation continues."
 -- Route closed: the counter is u64 and starts at zero with each process
--- (commit_signal.rs:15-21); 2^64 commits are not reachable. There is no
--- unit test of the wrap yet.
+-- (commit_signal.rs:15-21); 2^64 commits are not reachable. The unit test
+-- starts a signal at u64::MAX and wraps it under a waiting handler.
 test("a commit that wraps the generation still wakes waiting handlers", {
     spec = "eventd *stream.generation-wraparound-is-treated-as-a-wake-for-every-handler",
     skip = true,
-    covered_by = "cargo:eventd TODO commit_signal: a CommitSignal whose generation is u64::MAX; committed() wraps it to 0 and wait_for_change(u64::MAX, …) returns 0 at once",
+    covered_by = "cargo:eventd eventd commit_signal::tests::a_commit_that_wraps_the_generation_wakes_a_waiting_handler",
 }, function() end)
 
 -- ---------------------------------------------------------------------------

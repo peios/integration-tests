@@ -353,7 +353,7 @@ end)
 test("a failed peer-token read ends the connection without evaluating a query", {
     spec = "eventd *access.a-failed-peer-token-read-denies-the-query",
     skip = true,
-    covered_by = "cargo:eventd TODO a query connection whose Authorizer::from_peer fails is closed with no records and no evaluation (query::handle)",
+    covered_by = "cargo:eventd eventd query::security::tests::a_failed_peer_token_read_ends_the_connection_without_evaluating_its_query",
 }, function() end)
 
 test("a connection whose identity cannot be evaluated is refused, never served as someone else", {
@@ -491,7 +491,7 @@ end)
 test("EVENTD_CLEAR is bit 1, value 0x0002", {
     spec = "eventd *access.eventd-clear-is-bit-1-value-0x0002",
     skip = true,
-    covered_by = "cargo:eventd-client TODO access::EVENTD_CLEAR == 0x0002 and RIGHTS names it as bit 1",
+    covered_by = "cargo:eventd eventd-client access::tests::eventd_clear_is_bit_1_value_0x0002",
 }, function() end)
 
 -- Route closed: the only right GENERIC_WRITE could be seen to grant through
@@ -501,7 +501,7 @@ test("EVENTD_CLEAR is bit 1, value 0x0002", {
 test("GENERIC_WRITE maps to a mask that includes EVENTD_CLEAR", {
     spec = "eventd *access.generic-write-already-grants-eventd-clear",
     skip = true,
-    covered_by = "cargo:eventd-client TODO access::GENERIC_WRITE & EVENTD_CLEAR != 0",
+    covered_by = "cargo:eventd eventd-client access::tests::generic_write_already_grants_eventd_clear",
 }, function() end)
 
 test("no operation deletes records on a caller's behalf", {

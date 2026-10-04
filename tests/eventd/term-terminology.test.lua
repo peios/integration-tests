@@ -328,15 +328,11 @@ end)
 -- Shard reconfiguration (last: it changes the shard count)
 -- ---------------------------------------------------------------------------
 
--- PEI-1298 (TRM-historical-shard-read-write): eventd holds a historical shard open read-write, for age retention.
--- The retention coordinator opens every
--- historical shard with Shard::open, read-write (retention.rs:53-57), so that
--- age retention can delete from it (retain_before, retention.rs:126-132); only
--- the query path's own handles are read-only (shard.rs:502,528). Deleting aged
--- rows needs the write; unsure whether the book means "read-only to ingestion".
-test("a shard left by an earlier configuration is opened read-only and still queried", {
-    spec = "eventd *term.a-historical-shard-is-opened-read-only-and-still-queried",
-    tags = { "known-bug" },
+-- A historical shard takes no new events and is still queried; the one
+-- read-write descriptor on it is the retention coordinator's, and every
+-- other is read-only.
+test("a shard left by an earlier configuration takes no new events, is still queried, and has one writer", {
+    spec = "eventd *term.a-historical-shard-takes-no-new-events-is-still-queried-and-is-written-only-by-retention",
 }, function(t)
     local etype = "pt.hs" .. eventd.marker()
     emit_on(1, etype, { n = 1 })
@@ -347,6 +343,11 @@ test("a shard left by an earlier configuration is opened read-only and still que
     t:assert_eq(eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1m ago TAKE 1")[1].shard_count, 1,
         "eventd now runs one shard, so shard-0001.db is historical")
     t:assert_eq(#eventd.rows(vm, "EVENTS " .. etype .. " SINCE 10m ago"), 1, "and its event is still queried")
+    local later = "pt.hs" .. eventd.marker()
+    emit_on(1, later, { n = 2 })
+    eventd.wait_rows(vm, "EVENTS " .. later .. " SINCE 10m ago", function(rs) return #rs == 1 end)
+    t:assert_eq(json.encode(shards_holding(later)), '["shard-0000.db"]',
+        "an event from CPU 1 now goes to the one active shard, not the historical one")
     local modes = {}
     for line in vm:run("ls -l /proc/" .. pid .. "/fd").stdout:gmatch("[^\n]+") do
         local fd = line:match("(%d+) %-> /var/state/eventd/events/shard%-0001%.db$")
@@ -356,7 +357,11 @@ test("a shard left by an earlier configuration is opened read-only and still que
         end
     end
     t:assert(#modes >= 1, "eventd has shard-0001.db open")
-    for _, m in ipairs(modes) do t:assert_eq(m, 0, "every descriptor on it is O_RDONLY") end
+    local rw = 0
+    for _, m in ipairs(modes) do
+        if m == 2 then rw = rw + 1 else t:assert_eq(m, 0, "every other descriptor on it is O_RDONLY") end
+    end
+    t:assert_eq(rw, 1, "one descriptor on it is O_RDWR: the retention coordinator's")
 end)
 
 test("eventd-meta.db is not a shard and survives shard reconfiguration", {

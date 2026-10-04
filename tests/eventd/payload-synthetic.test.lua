@@ -517,16 +517,14 @@ test("a cpu_id predicate matches a gap record's column, not its payload field", 
     t:assert_eq(#eventd.rows(vm, q .. " WHERE cpu_id == 7 SINCE 1h ago"), 0, "cpu_id == 7 (the payload) does not")
 end)
 
-test("every synthetic payload field name is a query field, unless its value is nested", {
-    spec = "eventd *payload.synthetic-field-names-are-stable-query-fields-except-nested-values",
-    tags = { "known-bug" },
+test("every synthetic payload field name is a query field, unless nested or colliding with a header column", {
+    spec = "eventd *payload.synthetic-field-names-are-stable-query-fields-except-nested-values-and-header-collisions",
 }, function(t)
-    -- PEI-1298 (TRM-synthetic-fields-collide): startup's boot_id and gap's cpu_id are
-    -- top-level payload keys that collide with header columns, and eventd
-    -- suppresses a colliding key from the query surface (the flattening
-    -- rule §3.1 and §3.4 also state); the book's own §3.2 table then
-    -- describes the column, not the field. This case reads each scalar
-    -- top-level field back through a query and finds those two replaced.
+    -- Each scalar top-level field reads back through a query as itself,
+    -- except startup's boot_id and gap's cpu_id: those collide with header
+    -- columns, flattening suppresses them, and a query naming either reads
+    -- the column. The planted gap (column 1, payload 7) tells the two apart.
+    local COLLIDING = { boot_id = true, cpu_id = true }
     make_gap()
     plant_gap()
     local id0 = max_id()
@@ -534,15 +532,15 @@ test("every synthetic payload field name is a query field, unless its value is n
     config_change_after("LogRetentionDays", id0)
     eventd.unset(vm, "LogRetentionDays")
     --- Find `stored`'s record among a query's results by its non-colliding
-    --- scalar fields, then require every scalar field to read back as
-    --- itself.
+    --- scalar fields, then require every non-colliding scalar field to
+    --- read back as itself.
     local function check(event_type, stored)
         local rows = eventd.rows(vm, "EVENTS " .. event_type .. " SINCE 1h ago")
         local rec
         for _, r in ipairs(rows) do
             local all = true
             for k, v in pairs(stored.payload.map) do
-                if type(v) ~= "table" and v ~= NIL and k ~= "boot_id" and k ~= "cpu_id" and r[k] ~= v then
+                if type(v) ~= "table" and v ~= NIL and not COLLIDING[k] and r[k] ~= v then
                     all = false
                 end
             end
@@ -550,16 +548,19 @@ test("every synthetic payload field name is a query field, unless its value is n
         end
         t:assert(rec, event_type .. ": its record comes back through a query")
         for k, v in pairs(stored.payload.map) do
-            if type(v) ~= "table" and v ~= NIL then
+            if type(v) ~= "table" and v ~= NIL and not COLLIDING[k] then
                 t:assert_eq(rec[k], v, event_type .. ": payload field " .. k .. " is queryable as itself")
             end
         end
+        if stored.payload.map.cpu_id ~= nil then
+            t:assert_eq(rec.cpu_id, stored.cpu_id, event_type .. ": cpu_id reads the column")
+        end
     end
-    -- The planted gap record: column cpu_id 1, payload cpu_id 7. The
-    -- payload field is the one §3.2 names.
+    -- The planted gap record: column cpu_id 1, payload cpu_id 7. A query
+    -- presents the column.
     local planted = eventd.rows(vm, "EVENTS " .. eventd.T.gap .. " WHERE first_sequence == 987654321 SINCE 1h ago")
     t:assert_eq(#planted, 1, "the planted gap record is found")
-    t:assert_eq(planted[1].cpu_id, 7, "the gap payload's cpu_id is what a query presents as cpu_id")
+    t:assert_eq(planted[1].cpu_id, 1, "a query presents the gap's cpu_id column, not its payload field")
     check(eventd.T.config_change, newest(eventd.T.config_change))
     check(eventd.T.shutdown, newest(eventd.T.shutdown))
     check(eventd.T.startup, newest(eventd.T.startup))

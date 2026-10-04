@@ -51,16 +51,16 @@ test("a Tail reports the initial result once, whole, at watch, then each live ba
 test("a Tail reads its socket on a thread of its own, through a channel of at most capacity reports", {
     spec = "eventd *client.a-tail-reads-its-socket-on-its-own-thread",
     skip = true,
-    covered_by = "cargo:eventd TODO a Tail whose caller never calls updates() still drains the socket " ..
-        "until `capacity` reports are queued (the far end's writes complete), then stops reading",
+    covered_by = "cargo:eventd eventd-client " ..
+        "tests::a_tail_reads_its_socket_on_its_own_thread_until_capacity_reports_wait",
 }, function() end)
 
 -- Route closed: no program in the image uses Tail.
 test("a Tail its program stops reading is ended by eventd, and reports that it ended", {
     spec = "eventd *client.a-tail-a-program-stops-reading-is-ended-by-eventd",
     skip = true,
-    covered_by = "cargo:eventd TODO with capacity 1 and no reader, a stand-in eventd that closes the " ..
-        "stream once its write would block leads to Tailed::Ended as the next report, with bounded memory",
+    covered_by = "cargo:eventd eventd-client " ..
+        "tests::a_tail_its_program_stops_reading_is_ended_by_eventd_and_says_so",
 }, function() end)
 
 -- Route closed: text::string is a pure function no image program calls.
@@ -100,45 +100,44 @@ test("field_grants lists the object GUIDs of a descriptor's allowing object ACEs
 test("readable() weighs every pattern: a specific grant under a denying * is Some, not Nothing", {
     spec = "eventd *client.readable-considers-every-pattern",
     skip = true,
-    covered_by = "cargo:eventd TODO readable(Namespace::Logs) with `*` denying and `Logs\\x` granting the " ..
-        "caller returns Some { hidden: [\"*\"] }, and with `*` granting and `x` denying, Some { hidden: [\"x\"] }",
+    covered_by = "cargo:eventd eventd-client " ..
+        "access::tests::readable_weighs_every_pattern_not_only_the_wildcard",
 }, function() end)
 
 -- Route closed: readable() runs in the calling program; no image program calls it.
 test("readable() says Unknown, with the reason, when the policy cannot be read", {
     spec = "eventd *client.unreadable-policy-is-unknown-not-denied",
     skip = true,
-    covered_by = "cargo:eventd TODO readable() for a caller denied ENUMERATE_SUB_KEYS on " ..
-        "Security\\Logs returns Readable::Unknown(reason), never Nothing",
+    covered_by = "cargo:eventd eventd-client " ..
+        "access::tests::a_policy_that_cannot_be_read_is_unknown_with_its_reason_never_nothing",
 }, function() end)
 
 -- ---------------------------------------------------------------------------
 -- What eventd does with the text and the grants
 -- ---------------------------------------------------------------------------
 
--- PEI-1298 (TRM-bare-keyword-origin): a bare origin named WHERE or STREAM after FROM is read as the origin, not the clause.
--- FROM takes a comma list of identifiers and never
--- looks for a clause keyword there (query_language.rs:779-791), so an origin
--- called WHERE or STREAM written bare is read as the origin, not the clause.
--- The advice to quote holds (an event pattern written bare *is* read as a
--- clause: `EVENTS WHERE`), but the book's example does not.
-test("text a person typed must be quoted: bare, an origin called STREAM or WHERE is read as the clause", {
+test("text a person typed must be quoted: bare, an event type called WHERE is read as the clause", {
     spec = "eventd *client.text-a-person-typed-is-always-quoted",
-    tags = { "known-bug" },
 }, function(t)
+    -- After EVENTS the pattern is optional, so a bare WHERE begins the
+    -- clause; after LOGS FROM an origin is always expected, so the same
+    -- word bare is the origin. Quoted, each is a value in both places.
     for _, origin in ipairs({ "WHERE", "STREAM" }) do
         eventd.send_log(vm, { origin = origin, is_error = false, message = "origin " .. origin })
     end
     eventd.wait_rows(vm, 'LOGS FROM "STREAM" SINCE 10m ago', function(rs) return #rs >= 1 end)
     t:assert(#eventd.rows(vm, 'LOGS FROM "WHERE" SINCE 10m ago') >= 1, "quoted, WHERE is an origin")
     t:assert(#eventd.rows(vm, 'LOGS FROM "STREAM" SINCE 10m ago') >= 1, "quoted, STREAM is an origin")
-    local bare = eventd.query(vm, "LOGS FROM WHERE SINCE 10m ago")
-    t:assert(not (bare.ok and #bare.rows >= 1 and bare.rows[1].origin == "WHERE"),
-        "bare, WHERE is read as the clause, not as the origin: " .. json.encode(bare.rows[1]))
-    local p = vm:run_async("/usr/bin/evctl", { args = { "--format", "jsonl", "LOGS FROM STREAM" } })
-    local r = p:wait("3s")
-    t:assert(r.exit_code ~= 0 or not tostring(r.stdout):find('"origin":"STREAM"', 1, true),
-        "bare, STREAM is read as the clause and streams, rather than naming the origin: " .. tostring(r.stdout))
+    local quoted = eventd.query(vm, 'EVENTS "WHERE" SINCE 10m ago')
+    t:assert(quoted.ok, 'quoted, EVENTS "WHERE" names an event type: ' .. tostring(quoted.stderr))
+    local bare = eventd.query(vm, "EVENTS WHERE SINCE 10m ago")
+    t:assert(not bare.ok, "bare, EVENTS WHERE begins the clause, and SINCE is no predicate: "
+        .. json.encode(bare.rows))
+    for _, origin in ipairs({ "WHERE", "STREAM" }) do
+        local r = eventd.query(vm, "LOGS FROM " .. origin .. " SINCE 10m ago")
+        t:assert(r.ok and #r.rows >= 1 and r.rows[1].origin == origin,
+            "bare after LOGS FROM, " .. origin .. " is the origin: " .. tostring(r.stderr))
+    end
 end)
 
 test("records are visible with EVENTD_READ on the root, or on any field alone", {

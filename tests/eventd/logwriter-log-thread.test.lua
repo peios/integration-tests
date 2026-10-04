@@ -284,20 +284,16 @@ test("the log socket's receive buffer is four times the datagram ceiling", {
     t:assert_eq(rb, 4 * 256 * 1024, "SO_RCVBUF is 4 x 256 KiB")
 end)
 
--- PEI-1298 (TRM-log-queue-is-dgram-qlen): the book has the log socket's cushion be
--- SO_RCVBUF — "the receive queue ... until it fills, after which the
--- kernel discards them", "it is the whole cushion". For an AF_UNIX
--- datagram socket neither holds: a queued datagram is charged to its
--- *sender's* send buffer, and the receive queue is bounded by
--- net.unix.max_dgram_qlen datagrams (10 here), after which the kernel
--- refuses the next send with EAGAIN (or blocks a blocking sender) rather
--- than accepting and discarding it. eventd sizes SO_RCVBUF as the book
--- says (datagram.rs:195-216); the kernel just does not use it for this.
--- Whatever is lost is lost in the sender, by the sender's choice.
-test("while the socket is not drained, the 1 MiB receive queue fills and the kernel then discards", {
-    spec = "eventd *logwriter.the-socket-is-not-drained-during-a-batch-commit",
-    tags = { "known-bug" },
+-- With eventd stopped the socket is not drained. A Unix datagram socket's
+-- queue is counted in datagrams (net.unix.max_dgram_qlen; the kernel's
+-- full test is "more than qlen queued", so qlen + 1 fit), and once it is
+-- full a non-blocking send is refused with EAGAIN: nothing accepted is
+-- discarded.
+test("while the socket is not drained, its max_dgram_qlen queue fills and the kernel then refuses sends", {
+    spec = "eventd *logwriter.the-socket-is-not-drained-during-a-batch-commit"
+        .. " eventd *logwriter.a-full-receive-queue-of-max-dgram-qlen-datagrams-refuses-further-sends",
 }, function(t)
+    local qlen = tonumber(vm:read_file("/proc/sys/net/unix/max_dgram_qlen"):match("%d+"))
     local origin = eventd.marker("q")
     local addr, len = unixsock.sockaddr(eventd.SOCKET.log)
     local fd = unixsock.socket(vm, unixsock.AF_UNIX, unixsock.SOCK.DGRAM)
@@ -315,12 +311,12 @@ test("while the socket is not drained, the 1 MiB receive queue fills and the ker
     vm:syscall(3, fd)
     local stored = #eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago",
         function(rs) return #rs >= accepted end, { timeout = 20 })
-    t:assert(accepted >= 256,
-        "a 1 MiB queue absorbs at least 256 one-kilobyte datagrams: it took " .. accepted
-        .. " before refusing " .. refused)
-    t:assert(refused == 0 and stored < accepted,
-        "and the overflow is discarded by the kernel, not refused to the sender: refused "
-        .. refused .. ", stored " .. stored .. " of " .. accepted)
+    t:assert(accepted >= 1 and accepted <= qlen + 1,
+        "the queue holds at most max_dgram_qlen (" .. qlen .. ") + 1 datagrams, not a byte budget: it took "
+        .. accepted .. " before refusing " .. refused)
+    t:assert_eq(accepted + refused, 300, "every other send was refused to the sender with EAGAIN")
+    t:assert_eq(stored, accepted, "and nothing the queue accepted was discarded: stored " .. stored
+        .. " of " .. accepted)
 end)
 
 -- ---------------------------------------------------------------------------
@@ -466,7 +462,7 @@ end)
 test("the catalogue insert runs once per new origin per batch", {
     spec = "eventd *logwriter.the-origin-insert-runs-once-per-new-origin-per-batch",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd-core log_store: a batch of N rows of one new origin executes the log_origins INSERT once (count with a sqlite trace/profile hook)",
+    covered_by = "cargo:eventd eventd-core log_store::tests::the_origin_insert_runs_once_per_new_origin_per_batch",
 }, function() end)
 
 -- ---------------------------------------------------------------------------

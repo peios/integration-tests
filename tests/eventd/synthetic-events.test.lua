@@ -298,19 +298,33 @@ end
 -- The full-store tests run in order: the metric store full (while shard 0
 -- can still take a record about it), then shard 0, then both shards.
 
--- PEI-1298 (TRM-storage-error-only-for-corruption): a disk-full write failure takes
--- the capacity path, which requests retention and emits nothing
--- (metric_ingest.rs:332-335 and 405-408, log_ingest.rs:181-185 and 210-213,
--- writer.rs:247-250 and 488-491); only SQLite corruption reaches
--- storage_error (metric_ingest.rs:436, log_ingest.rs:240, writer.rs:383).
--- §9.2's disk-full section agrees with the code and names no
--- storage_error; §2.6's table says any failed write. Book looks wrong
--- (sure about the code; the intent reads as §9.2's).
-test("a failed write to the metric store is recorded as a storage error", {
-    spec = "eventd *synthetic.a-failed-write-to-any-store-emits-synthetic-storage-error",
-    tags = { "known-bug" },
+-- The metric store is first found corrupt (garbage in metrics.db at
+-- start), which is a storage error, and then made full, which is not:
+-- a write refused for space takes the capacity path, requesting
+-- retention and emitting nothing.
+test("a corrupt metric store is recorded as a storage error; a full one is not", {
+    spec = "eventd *synthetic.a-store-found-corrupt-and-quarantined-emits-synthetic-storage-error"
+        .. " eventd *storagefail.a-write-refused-for-want-of-space-emits-no-storage-error",
 }, function(t)
     local f = full_vm()
+    local function metric_errors()
+        local n = 0
+        for _, r in ipairs(eventd.rows(f, "EVENTS " .. eventd.T.storage_error .. " SINCE 1h ago")) do
+            if r.store == "metric" then n = n + 1 end
+        end
+        return n
+    end
+    local before = metric_errors()
+    vm:run("svctl stop eventd"):assert_ok()
+    vm:write_file(eventd.DB.metrics, string.rep("this is not a database. ", 400))
+    vm:run("rm -f " .. eventd.DB.metrics .. "-wal " .. eventd.DB.metrics .. "-shm"):assert_ok()
+    vm:run("svctl start eventd"):assert_ok()
+    eventd.ready(vm)
+    local _, corrupt = eventd.wait_rows(vm, "EVENTS " .. eventd.T.storage_error .. ' WHERE store == "metric" SINCE 1h ago',
+        function(rs) return #rs >= before + 1 end)
+    t:assert(corrupt, "the corrupt metric store is recorded as a storage_error naming the metric store")
+    local after_corrupt = metric_errors()
+
     vm:run("svctl stop eventd"):assert_ok()
     small_tmpfs(eventd.STORE.metrics, "2m")
     vm:run("svctl start eventd"):assert_ok()
@@ -332,9 +346,7 @@ test("a failed write to the metric store is recorded as a storage error", {
     local tail = eventd.rows(f, "METRIC " .. last .. " SINCE 10m ago")
     t:assert_eq(#tail, 0, "the last series was not stored: the metric writer's commits failed")
     f:run("sleep 2")
-    local errors = eventd.rows(f, "EVENTS " .. eventd.T.storage_error .. " SINCE 10m ago")
-    t:assert(#errors >= 1, "and a storage_error record names the failure")
-    t:assert_eq(errors[1] and errors[1].store, "metric", "for the metric store")
+    t:assert_eq(metric_errors(), after_corrupt, "and no storage_error records the writes refused for space")
 end)
 
 -- PEI-1292 (PEI-TBD-no-daemon-wide-fallback): only synthetic.shutdown tries the other

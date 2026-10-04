@@ -381,7 +381,7 @@ end)
 test("rising write pressure cancels an index build and the writer returns to batches", {
     spec = "eventd *index.rising-write-pressure-cancels-an-index-build-and-the-writer-returns-to-batches",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd-core shard::tests: converge_indexes on a populated shard with a cancel closure returning true yields IndexAction::Cancelled and leaves no index in sqlite_master",
+    covered_by = "cargo:eventd eventd-core shard::tests::a_cancelled_index_build_leaves_no_index_and_the_writer_takes_the_next_batch",
 }, function() end)
 
 -- Route closed: as above; the retry is the writer re-queueing its
@@ -389,7 +389,7 @@ test("rising write pressure cancels an index build and the writer returns to bat
 test("a cancelled build is retried at the next quiet period", {
     spec = "eventd *index.a-cancelled-index-build-is-retried-at-the-next-quiet-period",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd-core shard::tests: after a Cancelled converge_indexes, a second call with a cancel closure returning false yields Created(name) for the same index",
+    covered_by = "cargo:eventd eventd-core shard::tests::a_cancelled_index_build_is_created_when_retried",
 }, function() end)
 
 -- Route closed: the progress-handler period is internal to the
@@ -397,7 +397,7 @@ test("a cancelled build is retried at the next quiet period", {
 test("a progress handler checks for cancellation every thousand opcodes", {
     spec = "eventd *index.a-progress-handler-checks-for-cancellation-every-thousand-opcodes",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd-core shard::tests: count cancel-closure invocations during a converge_indexes build of a known-size shard and assert they track opcodes/1000",
+    covered_by = "cargo:eventd eventd-core shard::tests::an_index_build_checks_for_cancellation_every_thousand_opcodes",
 }, function() end)
 
 -- Route closed: sqlite_master records a CREATE INDEX without its IF NOT
@@ -407,7 +407,7 @@ test("a progress handler checks for cancellation every thousand opcodes", {
 test("indexes are created IF NOT EXISTS and dropped IF EXISTS", {
     spec = "eventd *index.indexes-are-created-if-not-exists-and-dropped-if-exists",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd-core shard::tests: create the index under its adaptive name through a second connection between the material read and the create, and assert converge_indexes still succeeds",
+    covered_by = "cargo:eventd eventd-core shard::tests::index_convergence_tolerates_an_index_created_or_dropped_since_its_material_read",
 }, function() end)
 
 -- Not observable: "may lag indefinitely" permits an outcome and

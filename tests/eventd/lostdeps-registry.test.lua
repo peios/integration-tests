@@ -189,37 +189,38 @@ end)
 test("without KACS new query connections are denied", {
     spec = "eventd *lostdeps.without-kacs-new-query-connections-are-denied",
     skip = true,
-    covered_by = "cargo:eventd TODO query::handle refuses a connection whose KACS_SO_PEER_TOKEN read fails (Authorizer::from_peer error)",
+    covered_by = "cargo:eventd eventd query::security::tests::a_failed_peer_token_read_ends_the_connection_without_evaluating_its_query",
 }, function() end)
 
 test("without KACS a query needing a fresh access check is denied", {
     spec = "eventd *lostdeps.without-kacs-a-query-needing-a-fresh-access-check-is-denied",
     skip = true,
-    covered_by = "cargo:eventd TODO an Authorizer whose access check fails denies the identifier rather than allowing it",
+    covered_by = "cargo:eventd eventd query::executor::tests::a_query_whose_fresh_access_check_fails_is_denied_not_allowed",
 }, function() end)
 
 test("cached access-check results last for the query that obtained them", {
     spec = "eventd *lostdeps.cached-access-check-results-stay-valid-for-the-query-that-obtained-them",
     skip = true,
-    covered_by = "cargo:eventd TODO executor AuthorizationCache reuses a verdict for the rest of its query without a second check",
+    covered_by = "cargo:eventd eventd query::executor::tests::a_verdict_is_reused_for_the_rest_of_its_query_without_a_second_check",
 }, function() end)
 
 test("without KACS event ingestion is unaffected", {
     spec = "eventd *lostdeps.without-kacs-event-ingestion-is-unaffected",
     skip = true,
-    covered_by = "cargo:eventd TODO the drain->writer path commits events with no KACS call (host test, no KACS)",
+    covered_by = "cargo:eventd eventd retention::tests::the_write_and_retention_paths_run_without_kacs",
 }, function() end)
 
-test("without KACS log and metric ingestion are unaffected", {
-    spec = "eventd *lostdeps.without-kacs-log-and-metric-ingestion-are-unaffected",
+test("without KACS log ingestion is unaffected, and a metric needing a fresh check is refused", {
+    spec = "eventd *lostdeps.without-kacs-log-ingestion-is-unaffected"
+        .. " eventd *lostdeps.without-kacs-a-metric-record-needing-a-fresh-publish-check-is-refused",
     skip = true,
-    covered_by = "cargo:eventd TODO log ingestion commits with no KACS call; metric ingestion's publish check failing is counted as an authorization error, not a stop",
+    covered_by = "cargo:eventd eventd log_ingest::tests::without_kacs_log_ingestion_commits_and_a_failed_metric_check_stops_nothing",
 }, function() end)
 
 test("query service resumes when KACS returns", {
     spec = "eventd *lostdeps.query-service-resumes-when-kacs-returns",
     skip = true,
-    covered_by = "cargo:eventd TODO a query connection after a failed peer-token read is served normally once the read succeeds",
+    covered_by = "cargo:eventd eventd query::security::tests::a_connection_after_a_failed_peer_token_read_is_served_once_the_read_succeeds",
 }, function() end)
 
 -- Not runtime behaviour: a statement that eventd uses no runtime

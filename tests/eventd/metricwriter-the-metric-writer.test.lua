@@ -395,18 +395,19 @@ test("a mismatch-free transaction does no diagnostic work (not observable)", {
 
 -- Route closed: the latency-triggered commit produces the same observable as
 -- the idle-queue trigger (the sample becomes queryable), so a query cannot
--- distinguish it; no unit test drives the latency clock.
+-- distinguish it. The unit test drives the commit decision with an injected
+-- clock, below the size cap and with samples still arriving.
 test("a batch commits once MetricMaxBatchLatencyMs has elapsed", {
     spec = "eventd *metricwriter.a-batch-commits-when-metricmaxbatchlatencyms-has-elapsed-since-its-first-sample",
     skip = true,
-    covered_by = "cargo:eventd TODO assert the metric batch commits on the latency deadline, distinct from the idle-queue commit",
+    covered_by = "cargo:eventd eventd metric_ingest::tests::a_batch_commits_once_its_latency_has_elapsed_since_its_first_sample",
 }, function() end)
 
 -- Route closed: the code defaults apply only when the registry value is
--- absent, so they are never written anywhere a guest can read; no unit test
--- pins these two numbers.
+-- absent, so they are never written anywhere a guest can read; the unit
+-- test pins the two numbers with neither value present.
 test("the metric batch defaults are 5000 samples and 1000 ms", {
     spec = "eventd *metricwriter.the-batch-defaults-are-5000-samples-and-1000-milliseconds",
     skip = true,
-    covered_by = "cargo:eventd TODO assert Config defaults MetricMaxBatchSize=5000 and MetricMaxBatchLatencyMs=1000",
+    covered_by = "cargo:eventd eventd config::tests::metric_batch_defaults_are_5000_samples_and_1000_milliseconds",
 }, function() end)

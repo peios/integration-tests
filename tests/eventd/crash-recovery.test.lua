@@ -378,20 +378,24 @@ test("the dump reports the last write error of each store", {
     end
 end)
 
--- PEI-1298 (PEI-TBD-sigpipe-ignored): eventd survives SIGPIPE. Nothing in eventd
--- installs that (pipeline.rs:539-551 handles TERM, INT, QUIT and HUP
--- only); the Rust runtime sets SIGPIPE to SIG_IGN before main.
-test("every other signal keeps its default action", {
-    spec = "eventd *crash.every-other-signal-keeps-its-default-behaviour",
-    tags = { "known-bug" },
+test("SIGPIPE is ignored, and every other signal keeps its default action", {
+    spec = "eventd *crash.every-other-signal-keeps-its-default-behaviour"
+        .. " eventd *crash.sigpipe-is-ignored",
 }, function(t)
-    -- SIGUSR1 and SIGPIPE both terminate a process by default.
-    for _, sig in ipairs({ "USR1", "PIPE" }) do
-        local pid = eventd.pid(vm)
-        vm:run("kill -" .. sig .. " " .. pid):assert_ok()
-        local died = pcall(wait_until, function() return gone(pid) end,
-            { timeout = 5, interval = 0.1, desc = "SIG" .. sig .. " to end eventd" })
-        if died then start() end
-        t:assert(died, "SIG" .. sig .. " ended eventd, as its default action does")
-    end
+    -- SIGUSR1 and SIGPIPE both terminate a process by default; eventd
+    -- ignores SIGPIPE and leaves SIGUSR1 alone.
+    local pid = eventd.pid(vm)
+    vm:run("kill -PIPE " .. pid):assert_ok()
+    local piped = pcall(wait_until, function() return gone(pid) end,
+        { timeout = 5, interval = 0.1, desc = "SIGPIPE to end eventd" })
+    if piped then start() end
+    t:assert(not piped, "SIGPIPE did not end eventd: it is ignored")
+    t:assert_eq(eventd.pid(vm), pid, "the same process is still running")
+
+    pid = eventd.pid(vm)
+    vm:run("kill -USR1 " .. pid):assert_ok()
+    local died = pcall(wait_until, function() return gone(pid) end,
+        { timeout = 5, interval = 0.1, desc = "SIGUSR1 to end eventd" })
+    if died then start() end
+    t:assert(died, "SIGUSR1 ended eventd, as its default action does")
 end)

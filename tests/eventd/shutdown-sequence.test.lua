@@ -278,7 +278,7 @@ end)
 test("every ring buffer is unmapped and its descriptor closed", {
     spec = "eventd *shutdown.every-ring-buffer-is-unmapped-and-its-descriptor-closed",
     skip = true,
-    covered_by = "cargo:eventd TODO pipeline::supervise joins every drain and drops the mapped rings (EventRing::drop unmaps and closes) before returning",
+    covered_by = "cargo:eventd eventd pipeline::tests::shutdown_joins_every_drain_and_releases_each_ring_it_returns",
 }, function() end)
 
 -- Last: after a held shutdown has been killed with events left unread in

@@ -174,21 +174,30 @@ test("synthetic.config_change is written when a value is applied at runtime", {
     t:assert_eq(rows[1] and rows[1].event_type, eventd.T.config_change, "as synthetic.config_change")
 end)
 
--- PEI-1298 (TRM-storage-error-not-for-full-disk): a log write refused for a full disk emits no synthetic.storage_error.
--- A write the store refuses for want of
--- space is classified as capacity, discarded and answered with a retention
--- request, with no storage_error (log_ingest.rs:210-213, request_retention
--- :224-228; metric_ingest and the writer do the same, and
--- log_store::tests::classifies_sqlite_full_as_capacity_failure pins the
--- classification). §9.2's disk-full section also names only the retention
--- run; a2 and §2.6 say any failed write. Unsure which side should move.
-test("synthetic.storage_error is written when a write to a store fails", {
-    spec = "eventd *constant.synthetic-storage-error-is-emitted-when-a-write-to-any-store-fails",
-    tags = { "known-bug" },
+test("synthetic.storage_error is written when a store is found corrupt, not when it is full", {
+    spec = "eventd *constant.synthetic-storage-error-is-emitted-when-a-store-is-found-corrupt-and-quarantined",
 }, function(t)
-    -- The log store on a 256 KiB tmpfs of its own, so that its writes fail
-    -- for space while the event store, which would hold the record, has room.
+    -- First the log store is found corrupt at start: garbage in logs.db.
+    -- Then it is put on a 256 KiB tmpfs of its own, so that its writes fail
+    -- for space while the event store, which would hold a record, has room.
     local fvm = eventd.boot({ name = "ev-full" })
+    local function log_errors()
+        local n = 0
+        for _, r in ipairs(eventd.rows(fvm, "EVENTS " .. eventd.T.storage_error .. " SINCE 1h ago")) do
+            if r.store == "log" then n = n + 1 end
+        end
+        return n
+    end
+    fvm:run("svctl stop eventd"):assert_ok()
+    fvm:write_file(eventd.DB.logs, string.rep("this is not a database. ", 400))
+    fvm:run("rm -f " .. eventd.DB.logs .. "-wal " .. eventd.DB.logs .. "-shm"):assert_ok()
+    fvm:run("svctl start eventd")
+    eventd.ready(fvm)
+    local _, corrupt = eventd.wait_rows(fvm, "EVENTS " .. eventd.T.storage_error .. ' WHERE store == "log" SINCE 1h ago',
+        function(rs) return #rs >= 1 end, { timeout = 20 })
+    t:assert(corrupt, "the corrupt log store is recorded as a storage_error naming the log store")
+    local after_corrupt = log_errors()
+
     fvm:run("svctl stop eventd"):assert_ok()
     local r = sys.mount(fvm, { source = "pt-full", target = eventd.STORE.logs, fstype = "tmpfs",
         data = "size=256k" })
@@ -205,10 +214,8 @@ test("synthetic.storage_error is written when a write to a store fails", {
     vm:run("sleep 2")
     local kept = #eventd.rows(fvm, "LOGS FROM " .. origin .. " SINCE 10m ago")
     t:assert(kept < 600, "the full store refused some of the writes: " .. kept .. " of 600 kept; " .. full)
-    local rows, ok = eventd.wait_rows(fvm, "EVENTS " .. eventd.T.storage_error .. " SINCE 1h ago",
-        function(rs) return #rs >= 1 end, { timeout = 20 })
-    t:assert(ok, "a storage_error records the failed log writes; the store: " .. full)
-    t:assert_eq(rows[1] and rows[1].store, "log", "naming the log store")
+    fvm:run("sleep 2")
+    t:assert_eq(log_errors(), after_corrupt, "no storage_error records the writes refused for space; the store: " .. full)
 end)
 
 -- ---------------------------------------------------------------------------

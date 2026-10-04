@@ -525,23 +525,17 @@ test("a top-level timestamp bound skips the rows it excludes, and one inside OR 
     end)
 end)
 
--- PEI-1298 (TRM-aggregation-pushdown): eventd never sends an aggregation to SQL. It
--- folds every row in Rust (HEAD executor.rs:294-297, 1997-2046; v0.1.5
--- aggregate_records over the materialised rows), which is exactly what
--- the TRM's own §6.4 describes ("Rows from every shard fold into one set
--- of groups as they are read"); §6.3's push-down was never built.
--- "Aggregation is pushed into SQL wherever the storage engine can express
---  it, which is most of the time for simple grouping over columns."
-test("counting by a header column answers as fast as SQL can count", {
-    spec = "eventd *sql.aggregation-is-pushed-into-sql-except-where-sql-cannot-reproduce-the-comparison",
-    tags = { "known-bug" },
+test("counting by a header column reads and folds every row rather than asking SQL to count", {
+    spec = "eventd *sql.aggregation-is-never-pushed-into-sql-and-rows-fold-in-eventd",
 }, function(t)
     with_config({ QueryTimeoutMs = 1000 }, function()
         -- A SQL GROUP BY over 900 000 rows of one column is a fraction of
-        -- a second; reading and decoding each row is several seconds.
-        local code, err = timed("EVENTS pt.mem.slow COUNT BY event_type")
-        t:assert_eq(code, 0, "COUNT BY event_type over 900 000 rows answered within a second: " .. err)
+        -- a second; reading and folding each row is several seconds, so
+        -- with a one-second timeout the count does not finish.
+        local code = timed("EVENTS pt.mem.slow COUNT BY event_type")
+        t:assert_eq(code, 1, "COUNT BY event_type over 900 000 rows runs out of its second")
     end)
+    t:assert(count_of("pt.mem.slow") >= 890000, "with the default timeout the same count completes")
 end)
 
 -- "SQLite work is interrupted through sqlite3_interrupt or an equivalent

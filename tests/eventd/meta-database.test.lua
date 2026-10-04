@@ -279,25 +279,21 @@ test("query counts stay in memory until the policy thread flushes them", {
     t:assert(counter("cpu_id"), "a header field is recorded as its column name")
 end)
 
--- PEI-1298 (TRM-config-change-recomputes-index-policy): the book has the database
--- written once per policy interval (a1: at least sixty minutes). eventd
--- also recomputes and writes it on every applied configuration change
--- (config.rs:1031-1032, `index_policy.try_send(PolicyMessage::Recompute)`)
--- and once more at shutdown (pipeline.rs:686, PolicyMessage::Stop runs a
--- final recompute). The extra writes are deliberate — a threshold change
--- should take effect without an hour's wait — and the book never says so.
-test("the metadata database is written only once per policy interval", {
-    spec = "eventd *meta.written-once-per-policy-interval-and-read-at-startup",
-    tags = { "known-bug" },
+test("the metadata database is written at an applied configuration change, ahead of the policy interval", {
+    spec = "eventd *meta.written-at-each-policy-run-including-config-changes-and-shutdown-and-read-at-startup"
+        .. " eventd *runtime.every-applied-change-requests-an-index-policy-run-and-a-retention-pass",
 }, function(t)
     local field = eventd.marker("g")
     query_on(field, 2)
+    vm:clock():sleep("2s")
+    t:assert_eq(counter(field), nil,
+        "with no policy interval elapsed and no change applied, the counters are not yet in the database")
     -- A configuration change unrelated to adaptive indexing, well inside
     -- the sixty-minute minimum interval.
     nudge_policy()
-    vm:clock():sleep("2s")
-    t:assert_eq(counter(field), nil,
-        "no policy interval has elapsed, so the counters are not yet in the database")
+    local c = counter(field)
+    t:assert(c, "the applied change ran the policy, which wrote the counters")
+    t:assert_eq(c and c[1], 2, "both queries are counted")
 end)
 
 test("the desired set ranks the most queried field first and marks payload expressions", {

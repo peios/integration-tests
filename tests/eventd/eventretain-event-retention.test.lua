@@ -338,7 +338,7 @@ end)
 -- ---------------------------------------------------------------------------
 
 test("every store has its one read-write connection, and a pass adds none while it checkpoints", {
-    spec = "eventd *eventretain.each-database-has-one-read-write-connection-owned-by-its-ingestion-writer"
+    spec = "eventd *eventretain.every-database-but-a-historical-shard-has-one-read-write-connection-owned-by-its-ingestion-writer"
         .. " eventd *eventretain.there-is-no-retention-writer-mutex-and-no-second-writer"
         .. " eventd *eventretain.the-pre-measurement-checkpoint-is-a-writer-owned-command"
         .. " eventd *eventretain.the-coordinator-requests-the-checkpoint-then-reads-page-counts-read-only"
@@ -369,29 +369,28 @@ test("every store has its one read-write connection, and a pass adds none while 
     t:assert(s0 ~= nil and s1 ~= s0, "and the pass checkpointed the shard, so its WAL started over")
 end)
 
--- PEI-1298 (TRM-historical-shard-retention-writer): the book has the coordinator own
--- no read-write connection and every database's one writer be its
--- ingestion writer. A historical shard has no ingestion writer, and the
--- retention thread opens each one read-write itself for its whole life
--- (retention.rs:53-57, `Shard::open`) and deletes through it directly
--- (retention.rs:130-140 retain_before, :276-279 retain_boot). That is a
--- coherent answer to a case the book never addresses (§3.3 says only that
--- historical shards are kept and opened read-only for queries). Unsure:
--- it may instead be a code fault that historical shards are writable at
--- all. Note also that a historical shard Shard::open rejects makes the
--- retention thread return Err at start, which supervise() treats as a
--- worker exit.
-test("the retention coordinator holds no read-write connection, historical shards included", {
-    spec = "eventd *eventretain.the-coordinator-measures-and-plans-read-only-and-owns-no-read-write-connection",
-    tags = { "known-bug" },
+-- A historical shard has no ingestion writer: the coordinator holds its one
+-- read-write connection and deletes from it directly. An expired row
+-- planted in shard-0001 before it becomes historical is gone after a pass.
+test("the retention coordinator holds the one read-write connection to a historical shard and deletes through it", {
+    spec = "eventd *eventretain.the-coordinator-measures-read-only-and-owns-read-write-connections-only-to-historical-shards",
 }, function(t)
     eventd.set(vm, "StorageShards", "dword:1"):assert_ok()
-    local pid = eventd.restart(vm)
+    stop_eventd()
+    host_edit(SHARD[2], rows_sql(BOOT_OLD, "pt.retain.hist.old", 1, now_ns() - 31 * DAY, 1))
+    start_eventd()
+    local pid = eventd.pid(vm)
     t:assert_eq(#eventd.shards(vm), 2, "shard-0001 is still there, now historical")
     t:assert_eq((fds_on(pid, SHARD[1])), 1, "the active shard has its writer's connection")
     local rw = fds_on(pid, SHARD[2])
+    t:assert_eq(count(SHARD[2], "event_type = 'pt.retain.hist.old'"), 1, "the expired row is planted")
+    retention_pass()
+    local gone = pcall(wait_until, function()
+        return count(SHARD[2], "event_type = 'pt.retain.hist.old'") == 0
+    end, { timeout = 60, interval = 0.5, desc = "the pass to delete from the historical shard" })
     eventd.unset(vm, "StorageShards")
-    t:assert_eq(rw, 0, "the historical shard, which has no ingestion writer, has no read-write connection")
+    t:assert_eq(rw, 1, "the historical shard, which has no ingestion writer, has one read-write connection")
+    t:assert(gone, "and the pass deleted the expired row through it")
 end)
 
 -- Permitted, not required, and not done: no code path joins a delete to
@@ -404,9 +403,10 @@ test("under urgent size pressure one bounded delete may join an open ingestion t
 
 -- Route closed: a pass runs over the three stores within milliseconds
 -- and nothing it leaves behind is timestamped, so the order is not
--- visible from outside. retention.rs has no unit tests to cite.
+-- visible from outside. The unit test runs one pass against stub writers
+-- that record the order commands reach them.
 test("the coordinator processes events, then logs, then metrics", {
     spec = "eventd *eventretain.the-coordinator-processes-events-then-logs-then-metrics",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd retention: one pass submits event commands, then log commands, then metric commands, in that order (stub writers recording arrival order)",
+    covered_by = "cargo:eventd eventd retention::tests::a_pass_processes_events_then_logs_then_metrics",
 }, function() end)

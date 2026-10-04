@@ -293,17 +293,17 @@ end)
 test("a live MaxBatchSize change becomes the next commit threshold", {
     spec = "eventd *runtime.a-live-maxbatchsize-change-atomically-updates-the-next-commit-threshold",
     skip = true,
-    covered_by = "cargo:eventd TODO writer::run reads MaxBatchSize from the shared config before each batch, so a change made between batches bounds the next one",
+    covered_by = "cargo:eventd eventd writer::tests::a_max_batch_size_change_between_batches_bounds_the_next_batch",
 }, function() end)
 
 test("a live MaxBatchSize change does not touch the handoff channels", {
     spec = "eventd *runtime.a-live-maxbatchsize-change-leaves-the-handoff-channels-untouched",
     skip = true,
-    covered_by = "cargo:eventd TODO the handoff queues are built from HANDOFF_SLOTS/HANDOFF_BYTES at startup and a MaxBatchSize reload leaves their slot and byte limits unchanged",
+    covered_by = "cargo:eventd eventd pipeline::tests::a_live_max_batch_size_change_leaves_the_handoff_limits_unchanged",
 }, function() end)
 
 test("log and metric batch changes affect only later transactions", {
     spec = "eventd *runtime.log-and-metric-batch-changes-affect-only-subsequent-transactions",
     skip = true,
-    covered_by = "cargo:eventd TODO log_ingest::run and metric_ingest::run read their batch size and latency per loop iteration, so a change bounds only batches begun after it",
+    covered_by = "cargo:eventd eventd log_ingest::tests::a_log_batch_size_change_applies_only_to_later_transactions",
 }, function() end)

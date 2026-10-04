@@ -126,15 +126,9 @@ end
 -- Record-level and field-level
 -- ---------------------------------------------------------------------------
 
-test("with no object ACEs, one root verdict serves a pattern, however many records and types it covers", {
-    spec = "eventd *accesscache.without-object-aces-a-root-verdict-is-cached-per-token-and-pattern",
-    tags = { "known-bug" },
+test("verdicts are keyed by identifier, not pattern: more records cost nothing, another type under the pattern does", {
+    spec = "eventd *accesscache.verdicts-are-cached-per-query-and-keyed-by-identifier-not-pattern",
 }, function(t)
-    -- PEI-1298 (TRM-cache-key-identifier): §7.5 keys the record-level cache by
-    -- (token, pattern); §7.4 step 4 and the twenty-types example key it by
-    -- identifier, and so does the code — AuthorizationCache's entries are
-    -- keyed (identifier, fields) (eventd/src/query/executor.rs:1642-1702),
-    -- so each event type under one pattern is checked on its own.
     local p = eventd.marker("ptroot")
     for _, s in ipairs({ "a", "b", "c" }) do
         for i = 1, 5 do emit(p .. "." .. s, { i = i }) end
@@ -153,19 +147,13 @@ test("with no object ACEs, one root verdict serves a pattern, however many recor
     emit(p .. ".d")
     wait_stored(p .. ".d", 1)
     local four = checks(ctx, q)
-    t:assert_eq(four, three, "a fourth type under the same pattern costs no more checks either")
-    t:assert(three <= 1, "one verdict per (token, pattern): " .. three .. " checks for one pattern")
+    t:assert(three >= 3 and three % 3 == 0, "three types under one pattern cost the same each: " .. three .. " checks")
+    t:assert_eq(four, three + three // 3, "a fourth type under the same pattern costs one type's checks more")
 end)
 
-test("events of twenty types take at most twenty checks: no more than one per type", {
-    spec = "eventd *accesscache.ten-thousand-events-of-twenty-types-take-at-most-twenty-checks",
-    tags = { "known-bug" },
+test("events of uniform types take two checks per type: the pre-check and one result check", {
+    spec = "eventd *accesscache.ten-thousand-events-of-twenty-uniform-types-take-at-most-forty-checks",
 }, function(t)
-    -- PEI-1298 (TRM-checks-per-identifier): §7.4 describes two checks per identifier
-    -- — step 4 before reading (cached in AuthorizationCache.identifiers,
-    -- executor.rs:1670-1685) and step 9 on the result
-    -- (AuthorizationCache.entries, :1687-1702) — so a uniform type costs
-    -- two. §7.5's bound counts one. Unsure which the book means to keep.
     local p = eventd.marker("pttwenty")
     local types = 4
     for k = 1, types do for i = 1, 10 do emit(p .. ".t" .. k, { i = i }) end end
@@ -173,12 +161,11 @@ test("events of twenty types take at most twenty checks: no more than one per ty
     local q = "EVENTS " .. p .. ".* SINCE 1h ago TAKE 10000"
     local ctx = audit_pattern("Events", p, { allow(READ) }, q)
     local n = checks(ctx, q)
-    t:assert(n >= 1, "the query was checked")
-    t:assert(n <= types, n .. " checks for " .. (types * 10) .. " events of " .. types .. " types")
+    t:assert_eq(n, 2 * types, n .. " checks for " .. (types * 10) .. " events of " .. types .. " types")
 end)
 
 test("with object ACEs, one verdict per field set: more records of known shapes cost nothing", {
-    spec = "eventd *accesscache.with-object-aces-a-verdict-is-cached-per-token-pattern-and-field-set",
+    spec = "eventd *accesscache.a-result-verdict-is-cached-per-identifier-and-field-set",
 }, function(t)
     local ty = eventd.marker("ptshapes")
     local shapes = { { a = 1 }, { b = 1 }, { a = 1, b = 1 } }
@@ -210,12 +197,9 @@ test("each distinct field set costs its own cache entry and check", {
     t:assert_eq(checks(ctx, q), one + 2, "two records of two new shapes cost two more checks")
 end)
 
-test("a log query takes one check per origin", {
-    spec = "eventd *accesscache.a-log-query-takes-one-check-per-origin",
-    tags = { "known-bug" },
+test("a log query takes two checks per origin", {
+    spec = "eventd *accesscache.a-log-query-takes-two-checks-per-origin",
 }, function(t)
-    -- PEI-1298 (TRM-checks-per-identifier): as above — the identifier check and the
-    -- result check are both made, so one origin costs two.
     local origin = eventd.marker("ptlogone")
     for i = 1, 10 do eventd.send_log(vm, { origin = origin, is_error = false, message = "m" .. i }) end
     wait_until(function()
@@ -224,7 +208,7 @@ test("a log query takes one check per origin", {
     local q = "LOGS FROM " .. origin .. " SINCE 1h ago TAKE 10000"
     local ctx = audit_pattern("Logs", origin, { allow(READ) }, q)
     local n = checks(ctx, q)
-    t:assert_eq(n, 1, "ten log records of one origin cost one check")
+    t:assert_eq(n, 2, "ten log records of one origin cost two checks: the pre-check and one result check")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -316,19 +300,15 @@ end)
 test("a failed registry watch discards the descriptor cache and fails closed for new resolutions", {
     spec = "eventd *accesscache.a-failed-registry-watch-discards-the-cache-and-fails-closed-for-new-resolutions",
     skip = true,
-    covered_by = "cargo:eventd TODO query::security: after DescriptorCache::fail_watch, resolve() of an identifier returns None and admin() returns None without reading the registry (default_descriptors_are_valid_and_cache_generation_advances asserts only that the cache turns unhealthy)",
+    covered_by = "cargo:eventd eventd query::security::tests::a_failed_watch_discards_the_cache_and_fails_closed_without_reading_the_registry",
 }, function() end)
 
--- Route closed: as above. PEI-1298 (TRM-failed-watch-keeps-resolved): §7.5 says a
--- failed watch both discards the descriptor cache and keeps answering
--- queries for descriptors already resolved; fail_watch clears every
--- resolution (eventd/src/query/security.rs:512-521), so the second half
--- cannot hold as the code stands. The book contradicts itself; the code
--- takes the fail-closed half.
-test("a failed watch degrades, but ingestion and queries on already-resolved descriptors continue", {
-    spec = "eventd *accesscache.a-failed-watch-degrades-but-ingestion-and-resolved-queries-continue",
+-- Route closed: as above. The unit test shows a descriptor resolved
+-- before the failure no longer resolves after it.
+test("a failed watch degrades: ingestion continues, and queries see no records until it recovers", {
+    spec = "eventd *accesscache.a-failed-watch-degrades-ingestion-continues-and-queries-see-no-records-until-it-recovers",
     skip = true,
-    covered_by = "cargo:eventd TODO query::security: after fail_watch, a descriptor resolved before the failure still resolves (fails today: fail_watch clears `resolved`)",
+    covered_by = "cargo:eventd eventd query::security::tests::a_failed_watch_discards_the_cache_and_fails_closed_without_reading_the_registry",
 }, function() end)
 
 -- ---------------------------------------------------------------------------

@@ -209,7 +209,7 @@ end)
 test("the drain, write and retention paths never call KACS", {
     spec = "eventd *deps.the-drain-write-and-retention-paths-never-call-kacs",
     skip = true,
-    covered_by = "cargo:eventd TODO the drain->writer->Shard::commit and retention paths run in a host test (no KACS) end to end",
+    covered_by = "cargo:eventd eventd retention::tests::the_write_and_retention_paths_run_without_kacs",
 }, function() end)
 
 test("eventd is Critical: a start it cannot complete ends in a reboot", {

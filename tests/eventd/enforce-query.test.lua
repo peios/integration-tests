@@ -265,14 +265,9 @@ end
 local AUDIT = access.acl({ access.ace(access.ACE.AUDIT, 0xf, EVERYONE,
     access.ACE_FLAG.SUCCESSFUL_ACCESS | access.ACE_FLAG.FAILED_ACCESS) })
 
-test("each result identifier is re-checked for EVENTD_READ with an audit context naming the identifier", {
+test("each result identifier is re-checked for EVENTD_READ with an audit context naming the pattern", {
     spec = "eventd *enforce.each-result-identifier-is-rechecked-for-eventd-read-with-field-guids",
-    tags = { "known-bug" },
 }, function(t)
-    -- PEI-1298 (TRM-audit-context-identifier): step 9 says the audit context names
-    -- the identifier; §7.4's own audit-trail section, and the code,
-    -- name the pattern the descriptor was resolved from
-    -- (eventd/src/query/security.rs:222-225, "{namespace}:{pattern}").
     local base = eventd.marker("ptstep9")
     local ty = base .. ".x.y"
     emit(ty, { n = 1 })
@@ -281,10 +276,10 @@ test("each result identifier is re-checked for EVENTD_READ with an audit context
     settle(since("EVENTS " .. ty), count(1))
     wait_until(function() return #audits("events:" .. base) >= 1 end,
         { timeout = 15, desc = "the result check's audit record" })
-    local by_identifier = audits("events:" .. ty)
-    t:assert(#by_identifier >= 1, "a check audited against the identifier " .. ty
-        .. "; found " .. #audits("events:" .. base) .. " against the pattern " .. base)
-    t:assert_eq(by_identifier[1].requested_access, READ, "for EVENTD_READ")
+    local by_pattern = audits("events:" .. base)
+    t:assert(#by_pattern >= 1, "the check is audited against the pattern " .. base)
+    t:assert_eq(#audits("events:" .. ty), 0, "and nothing against the identifier " .. ty)
+    t:assert_eq(by_pattern[1].requested_access, READ, "for EVENTD_READ")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -537,5 +532,5 @@ end)
 test("the token is read before anything else, and a failure denies the query", {
     spec = "eventd *enforce.the-token-is-obtained-first-and-failure-denies-the-query",
     skip = true,
-    covered_by = "cargo:eventd TODO query::handle reads the peer token before reading or parsing the request, and a failed read answers nothing",
+    covered_by = "cargo:eventd eventd query::security::tests::the_peer_token_is_read_before_the_request_and_a_failed_read_answers_nothing",
 }, function() end)

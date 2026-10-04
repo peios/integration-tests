@@ -332,7 +332,7 @@ test("a cache hit does not touch SQLite (not observable)", {
 test("a cache miss costs one SELECT and evicts the LRU entry (not observable)", {
     spec = "eventd *resolve.a-cache-miss-costs-one-select-and-evicts-the-lru-entry-when-full",
     skip = true,
-    covered_by = "cargo:eventd-core TODO assert a miss issues one SELECT and that a full cache evicts least-recently-used",
+    covered_by = "cargo:eventd eventd-core metric_store::tests::a_cache_miss_costs_one_select_and_evicts_the_lru_entry_when_full",
 }, function() end)
 
 -- §5.3: "The cache starts empty after a restart and is warmed on demand …

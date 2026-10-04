@@ -197,20 +197,14 @@ end)
 -- Logs
 -- ---------------------------------------------------------------------------
 
-test("the log socket carries the protected peinit-only DACL §7.6 gives", {
-    spec = "eventd *writepath.the-log-socket-gets-a-protected-dacl-before-the-first-receive",
-    tags = { "known-bug" },
+test("the log socket carries the protected peinit-only DACL §7.6 gives, and eventd's service SID owns it", {
+    spec = "eventd *writepath.the-log-socket-gets-a-protected-dacl-before-the-first-receive"
+        .. " eventd *writepath.the-log-socket-stays-owned-by-eventds-service-sid",
 }, function(t)
-    -- PEI-1298 (TRM-log-socket-owner): eventd sets only the DACL and adds
-    -- (A;;GA;;;OW), leaving the socket owned by eventd's own service SID:
-    -- "Preserve the virtual service owner: changing it to SYSTEM would
-    -- require a privilege the long-running daemon deliberately does not
-    -- hold" (eventd/src/datagram.rs:14-20, :161-170 at HEAD). The book's
-    -- O:SY G:SY and two-ACE DACL predate eventd's own service account.
     local d, all = dacl(eventd.SOCKET.log)
-    t:assert_eq(all:match("(O:[^\n]*)"), "O:SYG:SYD:P(D;;0x2;;;SU)(A;;GA;;;SY)",
-        "the log socket's descriptor is the one §7.6 gives: " .. all)
-    t:assert_eq(d, "D:P(D;;0x2;;;SU)(A;;GA;;;SY)", "its DACL")
+    t:assert_eq(d, "D:P(D;;0x2;;;SU)(A;;GA;;;SY)(A;;GA;;;OW)", "its DACL is the one §7.6 gives: " .. all)
+    t:assert_eq(all:match("O:(S%-[%d%-]+)"), "S-1-5-80-1963885778-1835409261-1671587836-2279113866-1994761124",
+        "and its owner is eventd's service SID: " .. all)
 end)
 
 test("a service cannot reach the log socket, even as SYSTEM, while peinit's own token can", {

@@ -339,9 +339,10 @@ test("under urgent size pressure one bounded delete may join an open transaction
 
 -- Route closed: a pass deletes from all three stores within milliseconds
 -- and leaves nothing timestamped, so which store went first is not
--- visible from outside. retention.rs has no unit tests to cite.
+-- visible from outside. The unit test runs one pass against stub writers
+-- that record the order commands reach them.
 test("log retention runs on the retention thread after events and before metrics", {
     spec = "eventd *logretain.log-retention-runs-on-the-retention-thread-after-events-and-before-metrics",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd retention: one pass submits event commands, then log commands, then metric commands, in that order (stub writers recording arrival order)",
+    covered_by = "cargo:eventd eventd retention::tests::a_pass_processes_events_then_logs_then_metrics",
 }, function() end)

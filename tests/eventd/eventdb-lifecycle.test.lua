@@ -227,18 +227,10 @@ test("the standard event store path is /var/state/eventd/events/", {
     t:assert(exists(vm, "/var/state/eventd/events/shard-0000.db"), "and eventd uses it")
 end)
 
-test("the eventd package declares its state directories as required peinit provisioned paths", {
-    spec = "eventd *eventdb.the-package-provisions-the-state-directory-and-its-three-store-directories",
-    tags = { "known-bug" },
+test("the package ships the state directory and three store directories; the three are required provisioned paths", {
+    spec = "eventd *eventdb.the-package-ships-the-state-directory-and-its-three-store-directories"
+        .. " eventd *eventdb.the-three-store-directories-are-required-peinit-provisioned-directories",
 }, function(t)
-    -- PEI-1298 (TRM-state-root-not-provisioned): eventd-config.reg declares required
-    -- ProvisionedPaths entries for events/, logs/ and metrics/ only
-    -- (registry.d/eventd-config.reg:24-100, "The package supplies the
-    -- three empty /var/state directories. The required ProvisionedPaths
-    -- entries establish their protected inheritable descriptor"); the
-    -- parent /var/state/eventd/ is a package file with an sd_override
-    -- (packages.pekit/dev.peios.eventd.package.pekit.toml:37), not a
-    -- provisioned path.
     local base = [[Machine\System\Init\ProvisionedPaths]]
     local required = {}
     for name in vm:run("reg ls '" .. base .. "' --keys-only").stdout:gmatch("[^\n]+") do
@@ -249,22 +241,18 @@ test("the eventd package declares its state directories as required peinit provi
         local kind = vals:match('Kind = REG_SZ "(.-)"')
         if path then required[path:gsub("/$", "")] = (req == "1" and kind == "directory") end
     end
-    for _, d in ipairs({ "/var/state/eventd", "/var/state/eventd/events", "/var/state/eventd/logs",
-                         "/var/state/eventd/metrics" }) do
+    t:assert(vm:run("test -d /var/state/eventd").exit_code == 0, "/var/state/eventd exists")
+    t:assert(required["/var/state/eventd"] == nil,
+        "/var/state/eventd is not a provisioned directory: " .. json.encode(required))
+    for _, d in ipairs({ "/var/state/eventd/events", "/var/state/eventd/logs", "/var/state/eventd/metrics" }) do
         t:assert(vm:run("test -d " .. d).exit_code == 0, d .. " exists")
         t:assert(required[d], d .. " is a required provisioned directory: " .. json.encode(required))
     end
 end)
 
-test("each store directory is protected, inheritable, full control to SYSTEM and Administrators only", {
-    spec = "eventd *eventdb.provisioned-store-directories-grant-full-control-only-to-system-and-administrators",
-    tags = { "known-bug" },
+test("each store directory is protected, inheritable, full control to SYSTEM, Administrators and eventd's service SID only", {
+    spec = "eventd *eventdb.store-directories-grant-full-control-only-to-system-administrators-and-eventds-service-sid",
 }, function(t)
-    -- PEI-1298 (TRM-store-dir-service-sid): since eventd runs as its own service
-    -- account (commit 5a77aab, "run eventd as its own service account"),
-    -- the package's descriptors and the one eventd demands
-    -- (directory.rs:12 REQUIRED_SDDL) add (A;OICI;GA;;;<eventd service
-    -- SID>). The book's descriptor predates that change.
     for _, d in ipairs({ "/var/state/eventd", "/var/state/eventd/events", "/var/state/eventd/logs",
                          "/var/state/eventd/metrics" }) do
         local sd = descriptor(vm, d)
@@ -277,8 +265,12 @@ test("each store directory is protected, inheritable, full control to SYSTEM and
             t:assert(a.flags & 3 == 3, d .. ": each is object- and container-inherit")
             sids[#sids + 1] = a.sid
         end
-        t:assert_eq(table.concat(sids, " "), "S-1-5-18 S-1-5-32-544",
-            d .. ": exactly SYSTEM then Administrators")
+        t:assert_eq(table.concat(sids, " "),
+            "S-1-5-18 S-1-5-32-544 S-1-5-80-1963885778-1835409261-1671587836-2279113866-1994761124",
+            d .. ": exactly SYSTEM, Administrators, then eventd's service SID")
+        for _, a in ipairs(sd.aces) do
+            t:assert_eq(a.mask, 0x10000000, d .. ": each grants GENERIC_ALL (" .. a.sid .. ")")
+        end
     end
 end)
 
@@ -368,14 +360,14 @@ end)
 test("a new shard's connection runs with synchronous=FULL", {
     spec = "eventd *eventdb.a-new-shard-is-created-with-synchronous-full",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd-core shard::tests: Shard::open on a new path, then PRAGMA synchronous on its connection returns 2 (FULL)",
+    covered_by = "cargo:eventd eventd-core shard::tests::a_new_shard_is_created_with_synchronous_full",
 }, function() end)
 
 -- Route closed: as above, for an existing shard.
 test("an active shard's connection is opened with synchronous=FULL", {
     spec = "eventd *eventdb.an-active-shard-is-opened-with-synchronous-full",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd-core shard::tests: Shard::open on an existing shard, then PRAGMA synchronous on its connection returns 2 (FULL)",
+    covered_by = "cargo:eventd eventd-core shard::tests::an_active_shard_is_opened_with_synchronous_full",
 }, function() end)
 
 test("each shard has one read-write connection, its writer's, held for the life of the process", {
@@ -754,5 +746,5 @@ end)
 test("a taken quarantine name gets the lowest free .N", {
     spec = "eventd *eventdb.a-taken-quarantine-name-gets-the-lowest-free-positive-integer-suffix",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd-core quarantine::tests: pre-create <db>.corrupt.<T> and <db>.corrupt.<T>.1 with an injected clock T, quarantine, and assert the files land at .corrupt.<T>.2",
+    covered_by = "cargo:eventd eventd-core quarantine::tests::a_taken_quarantine_name_gets_the_lowest_free_positive_suffix",
 }, function() end)

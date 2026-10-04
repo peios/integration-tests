@@ -552,12 +552,12 @@ end)
 -- Route closed: a hole needs a sparse possible-CPU mask, and a VM's
 -- possible CPUs are always dense 0..n-1 (KMES §2.4: holes occur only when
 -- nr_cpu_ids and the possible mask disagree); offline-but-possible CPUs
--- still have attachable rings. `kmes::attach_all` (kmes.rs:35) skips
--- EINVAL, but nothing exercises it without a kernel.
+-- still have attachable rings. `kmes::attach_all` walks the slots through
+-- `attach_slots`, which the unit test drives with a stand-in slot source.
 test("an EINVAL slot is skipped and enumeration continues past it", {
     spec = "eventd *kmes.an-einval-slot-is-a-hole-and-enumeration-continues",
     skip = true,
-    covered_by = "cargo:eventd TODO kmes::attach_all with a slot source answering [ok, EINVAL, ok] attaches slots 0 and 2",
+    covered_by = "cargo:eventd eventd kmes::tests::an_einval_slot_is_a_hole_and_enumeration_continues_past_it",
 }, function() end)
 
 -- Route closed: as above, a VM's CPU IDs are dense, so ordinal and logical
@@ -567,7 +567,7 @@ test("an EINVAL slot is skipped and enumeration continues past it", {
 test("sparse logical CPU IDs get dense ordinals for routing but are stored as themselves", {
     spec = "eventd *kmes.sparse-cpus-get-dense-ordinals-internally-but-keep-their-logical-cpu-id-externally",
     skip = true,
-    covered_by = "cargo:eventd TODO attachments for logical CPUs [0, 2, 5] route by ordinals 0..2 and stamp rows, receipts and gaps with 0, 2, 5",
+    covered_by = "cargo:eventd eventd pipeline::tests::sparse_cpus_route_by_dense_ordinal_but_store_their_logical_id",
 }, function() end)
 
 -- Route closed: every Peios kernel has at least one CPU and KMES gives
@@ -575,16 +575,16 @@ test("sparse logical CPU IDs get dense ordinals for routing but are stored as th
 test("finding no attachable ring fails startup", {
     spec = "eventd *kmes.discovering-zero-cpus-is-a-startup-failure",
     skip = true,
-    covered_by = "cargo:eventd TODO kmes::attach_all with every slot answering EINVAL returns KmesError::NoBuffers",
+    covered_by = "cargo:eventd eventd kmes::tests::discovering_no_attachable_buffer_fails_startup",
 }, function() end)
 
 -- Route closed: KMES never re-issues a sequence within a boot, so a guest
 -- cannot put a lower, unreceipted sequence in front of the drain thread.
--- The check is `Reconciler::observe` (reconcile.rs:40-51), surfaced by the
--- drain as a fatal KmesError::Sequence (kmes.rs:117-119); no unit test
--- covers the regression branch.
+-- The check is `Reconciler::observe` (eventd-core reconcile.rs), surfaced
+-- by the drain as a fatal KmesError::Sequence (kmes.rs `drain`); the unit
+-- test covers the regression branch of `observe`.
 test("a sequence regression under the same boot ID stops eventd", {
     spec = "eventd *kmes.a-sequence-regression-under-the-same-boot-id-stops-eventd",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd-core Reconciler::observe returns ReconcileError::Regression for an uncovered sequence below the next expected one",
+    covered_by = "cargo:eventd eventd-core reconcile::tests::an_uncovered_sequence_below_the_next_expected_one_is_a_regression",
 }, function() end)

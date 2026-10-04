@@ -209,7 +209,7 @@ end)
 test("a query whose resources cannot be allocated fails without blocking a writer", {
     spec = "eventd *exhaust.a-query-whose-resources-cannot-be-allocated-fails-without-blocking-a-writer",
     skip = true,
-    covered_by = "cargo:eventd TODO an executor whose read-only open fails returns QueryError to its client while a concurrent Shard::commit proceeds",
+    covered_by = "cargo:eventd eventd query::executor::tests::a_query_whose_store_cannot_be_opened_fails_without_blocking_a_writer",
 }, function() end)
 
 test("event handoff channels are bounded by fixed slot and byte limits", {
@@ -223,7 +223,7 @@ test("event handoff channels are bounded by fixed slot and byte limits", {
 test("the handoff limits do not follow a live MaxBatchSize change", {
     spec = "eventd *exhaust.handoff-limits-do-not-follow-live-maxbatchsize-changes",
     skip = true,
-    covered_by = "cargo:eventd TODO the handoff BoundedQueues keep HANDOFF_SLOTS/HANDOFF_BYTES after a MaxBatchSize reload",
+    covered_by = "cargo:eventd eventd pipeline::tests::a_live_max_batch_size_change_leaves_the_handoff_limits_unchanged",
 }, function() end)
 
 -- Not runtime behaviour: these rows of the memory table say which
@@ -253,17 +253,17 @@ test("SQLite page caches are bounded per connection", {
 test("rising write pressure cancels an index build and writing resumes", {
     spec = "eventd *exhaust.rising-write-pressure-cancels-an-index-build-and-event-writing-resumes",
     skip = true,
-    covered_by = "cargo:eventd TODO Shard::converge_indexes returns IndexAction::Cancelled and leaves no partial index when its cancel callback fires mid-build",
+    covered_by = "cargo:eventd eventd-core shard::tests::a_cancelled_index_build_leaves_no_index_and_the_writer_takes_the_next_batch",
 }, function() end)
 
 test("maintenance runs only as bounded low-priority commands at transaction boundaries", {
     spec = "eventd *exhaust.maintenance-runs-only-as-bounded-low-priority-commands-at-transaction-boundaries",
     skip = true,
-    covered_by = "cargo:eventd TODO writer::run handles a Maintenance message only after committing the batch before it, and each DeleteBefore removes at most its limit",
+    covered_by = "cargo:eventd eventd writer::tests::maintenance_runs_after_the_batch_before_it_commits_and_deletes_at_most_its_limit",
 }, function() end)
 
 test("ingestion wins before the next maintenance command", {
     spec = "eventd *exhaust.ingestion-takes-priority-over-the-next-maintenance-command",
     skip = true,
-    covered_by = "cargo:eventd TODO with events and a Maintenance command queued, writer::run commits the events first",
+    covered_by = "cargo:eventd eventd writer::tests::events_handed_off_while_a_command_runs_commit_before_the_next_command",
 }, function() end)

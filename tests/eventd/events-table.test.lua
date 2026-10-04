@@ -541,7 +541,7 @@ end)
 test("a real event emitted without identity stores the null GUID, not NULL", {
     spec = "eventd *events.a-null-guid-effective-token-means-a-real-event-emitted-without-identity",
     skip = true,
-    covered_by = "cargo:eventd TODO eventd-core shard::tests: commit a RealEvent with effective_token_guid [0;16] and assert the column is a 16-byte zero blob (typeof blob), not NULL",
+    covered_by = "cargo:eventd eventd-core shard::tests::a_real_event_without_identity_stores_the_null_guid_not_null",
 }, function() end)
 
 test("idx_events_timestamp is the one index a shard is created with", {

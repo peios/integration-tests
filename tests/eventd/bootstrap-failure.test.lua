@@ -321,31 +321,27 @@ test("KMES attachment needs SeSecurityPrivilege, and without KMES nothing starts
         "the failure is KMES attachment being refused: " .. json.encode(line))
 end)
 
--- PEI-1298 (TRM-bootstrap-phase-order): eventd reads the boot ID (Phase 4, step 13)
--- before it opens or creates a single store (Phase 3) — pipeline.rs:61
--- precedes the metadata and shard opens at :64-93 — and binds the log
--- socket (Phase 5) before it opens metrics.db (Phase 3, step 11),
--- pipeline.rs:123-133.
-test("the phases run in the book's order: storage is opened before the boot ID is read", {
-    spec = "eventd *bootstrap.startup-proceeds-through-seven-phases-in-order",
-    tags = { "known-bug" },
+test("the phases do not fix the order: the boot ID is read before any store is opened", {
+    spec = "eventd *bootstrap.the-seven-phases-group-the-work-rather-than-order-it-and-startup-completes-or-fails-entirely",
 }, function(t)
-    -- A fresh, correctly protected event store: Phase 3 would create
-    -- shard-0000.db and eventd-meta.db in it. A malformed boot ID then
-    -- fails Phase 4. In the book's order the Phase 3 files exist when
-    -- Phase 4 fails.
+    -- A fresh, correctly protected event store: opening the stores would
+    -- create shard-0000.db and eventd-meta.db in it. A malformed boot ID
+    -- fails startup first, because it is read before any store is
+    -- opened, so neither file exists when it fails.
     tmpfs("/run/pt-fresh-events", STORE_SDDL)
     tmpfs("/run/pt-bid-order", "O:SYG:SYD:(A;OICI;GA;;;SY)(A;OICI;GR;;;WD)", "64k")
     vm:write_file("/run/pt-bid-order/malformed", "not-a-uuid\n")
     eventd.set(vm, "EventStorePath", "sz:/run/pt-fresh-events"):assert_ok()
     vm:run("mount --bind /run/pt-bid-order/malformed /proc/sys/kernel/random/boot_id"):assert_ok()
+    local since = guest_now(vm)
     local status = attempt()
     vm:run("umount /proc/sys/kernel/random/boot_id"):assert_ok()
     local listing = vm:run("ls /run/pt-fresh-events").stdout
     eventd.set(vm, "EventStorePath", "sz:/var/state/eventd/events/"):assert_ok()
     repair()
-    t:assert_eq(status.state, "failed", "the malformed boot ID failed Phase 4")
-    t:assert(listing:find("eventd-meta.db", 1, true) and listing:find("shard-0000.db", 1, true),
-        "Phase 3 had already opened or created the stores when Phase 4 failed: "
+    t:assert_eq(status.state, "failed", "the malformed boot ID failed startup")
+    t:assert(stderr_line("not a canonical UUID", since), "and it was the boot ID that failed it")
+    t:assert(not listing:find("eventd-meta.db", 1, true) and not listing:find("shard-0000.db", 1, true),
+        "no store had been opened or created when the boot ID was read: "
         .. (listing == "" and "(empty)" or listing))
 end)
