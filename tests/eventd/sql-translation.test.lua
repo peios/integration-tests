@@ -22,131 +22,15 @@
 
 local eventd = require("helpers.eventd")
 local peinit = require("helpers.peinit")
-local sys = require("helpers.sys")
 local token = require("helpers.token")
-local us = require("helpers.unixsock")
 local pc = require("helpers.peinit_client")
 peinit.claim(1)
 
 local vm = eventd.boot({ name = "ev-sql" })
 
--- ---------------------------------------------------------------------------
--- A raw query-channel client, for what evctl hides: where one response
--- frame ends and the next begins, the order frames arrive in, a caller
--- other than SYSTEM, and a reader that stops reading. A frame is a u32
--- little-endian length and a MessagePack map (PSPU §3.15–§3.16).
--- ---------------------------------------------------------------------------
-
-local function mp_decode(s, i)
-    i = i or 1
-    local b = s:byte(i)
-    assert(b, "msgpack: ran off the end")
-    local function list(count, at)
-        local out = {}
-        for k = 1, count do out[k], at = mp_decode(s, at) end
-        return out, at
-    end
-    local function dict(count, at)
-        local out = {}
-        for _ = 1, count do
-            local k, v
-            k, at = mp_decode(s, at)
-            v, at = mp_decode(s, at)
-            out[k] = v
-        end
-        return out, at
-    end
-    local function bytes(len, at) return s:sub(at, at + len - 1), at + len end
-    local function num(fmt, size) return (string.unpack(fmt, s, i + 1)), i + 1 + size end
-    if b <= 0x7f then return b, i + 1 end
-    if b >= 0xe0 then return b - 0x100, i + 1 end
-    if b <= 0x8f then return dict(b - 0x80, i + 1) end
-    if b <= 0x9f then return list(b - 0x90, i + 1) end
-    if b <= 0xbf then return bytes(b - 0xa0, i + 1) end
-    if b == 0xc0 then return eventd.NIL, i + 1 end
-    if b == 0xc2 then return false, i + 1 end
-    if b == 0xc3 then return true, i + 1 end
-    if b == 0xc4 or b == 0xd9 then return bytes(s:byte(i + 1), i + 2) end
-    if b == 0xc5 or b == 0xda then return bytes((string.unpack(">I2", s, i + 1)), i + 3) end
-    if b == 0xc6 or b == 0xdb then return bytes((string.unpack(">I4", s, i + 1)), i + 5) end
-    if b == 0xca then return num(">f", 4) end
-    if b == 0xcb then return num(">d", 8) end
-    if b == 0xcc then return num(">I1", 1) end
-    if b == 0xcd then return num(">I2", 2) end
-    if b == 0xce then return num(">I4", 4) end
-    if b == 0xcf then return num(">i8", 8) end
-    if b == 0xd0 then return num(">i1", 1) end
-    if b == 0xd1 then return num(">i2", 2) end
-    if b == 0xd2 then return num(">i4", 4) end
-    if b == 0xd3 then return num(">i8", 8) end
-    if b == 0xdc then return list((string.unpack(">I2", s, i + 1)), i + 3) end
-    if b == 0xdd then return list((string.unpack(">I4", s, i + 1)), i + 5) end
-    if b == 0xde then return dict((string.unpack(">I2", s, i + 1)), i + 3) end
-    if b == 0xdf then return dict((string.unpack(">I4", s, i + 1)), i + 5) end
-    error(string.format("msgpack: unsupported tag 0x%02x", b))
-end
-
-local rq = {}
-
---- A token for an ordinary user, `rid` naming which one. In
---- Administrators because /run/eventd admits SYSTEM, Administrators and
---- eventd's own service SID and nothing else.
-function rq.user(w, rid)
-    local tok = pc.mint_admin(w, token.sid(5, 21, 1278, 6, 6, rid))
-    assert(tok, "minting user " .. rid)
-    return tok
-end
-
-function rq.open(w, tok)
-    local fd, err = pc.connect_as(w, eventd.SOCKET.query, us.SOCK.STREAM, tok)
-    assert(fd, "connect to the query socket: " .. tostring(err))
-    return { w = w, fd = fd, buf = "" }
-end
-
-function rq.send(c, text)
-    local body = eventd.msgpack({ query = text })
-    local r = us.sendmsg(c.w, c.fd, string.pack("<I4", #body) .. body)
-    assert(r.ret == 4 + #body, "sending the request: ret " .. tostring(r.ret))
-end
-
-local function fill(c, n)
-    while #c.buf < n do
-        local r = us.recvmsg(c.w, c.fd, 65536, { cmsg = 0 })
-        if r.ret < 0 then return false, us.errname(r.errno) end
-        if r.ret == 0 then return false, "eof" end
-        c.buf = c.buf .. r.data
-    end
-    return true
-end
-
-function rq.frame(c)
-    local ok, why = fill(c, 4)
-    if not ok then return nil, why end
-    local len = string.unpack("<I4", c.buf)
-    ok, why = fill(c, 4 + len)
-    if not ok then return nil, why end
-    local msg = mp_decode(c.buf:sub(5, 4 + len))
-    c.buf = c.buf:sub(5 + len)
-    msg.size = len
-    return msg
-end
-
-function rq.collect(c)
-    local out = { frames = {}, records = {} }
-    while true do
-        local m, why = rq.frame(c)
-        if not m then out.status = why; return out end
-        out.frames[#out.frames + 1] = m
-        if m.status == "ok" then
-            for _, r in ipairs(m.records) do out.records[#out.records + 1] = r end
-        else
-            out.status, out.error = m.status, m.error
-            return out
-        end
-    end
-end
-
-function rq.close(c) sys.close(c.w, c.fd) end
+-- The raw query channel (eventd.rq), for a caller other than SYSTEM:
+-- an ordinary user minted by `rq.user`.
+local rq = eventd.rq
 
 --- Run one query as user `rid` on a fresh connection.
 local function as_user(rid, text)
@@ -166,10 +50,6 @@ end
 -- ---------------------------------------------------------------------------
 -- Local helpers
 -- ---------------------------------------------------------------------------
-
-local function now_ns()
-    return math.tointeger(tonumber(vm:run("date +%s%N").stdout:match("%d+")))
-end
 
 local function emit(etype, payload)
     local r = eventd.emit(vm, etype, payload)
@@ -278,7 +158,7 @@ test("a log record is exactly its six fields, each one queryable, and no other n
 }, function(t)
     local o = eventd.marker("cols")
     local job = string.rep("\x11", 16)
-    local ts = now_ns() - 30 * 1000000000
+    local ts = eventd.guest_ns(vm) - 30 * 1000000000
     logs({ origin = o, is_error = true, message = "the line", timestamp = ts, job_id = eventd.bin(job) })
     local rows = eventd.wait_rows(vm, "LOGS FROM " .. o, function(rs) return #rs == 1 end)
     local keys = {}
@@ -305,7 +185,7 @@ test("a selector's series are read for the range, each in timestamp order", {
     spec = "eventd *sql.metric-selection-resolves-through-series-and-reads-samples-in-index-order",
 }, function(t)
     local name = "pt" .. eventd.marker("sel")
-    local ts = now_ns() - 300 * 1000000000
+    local ts = eventd.guest_ns(vm) - 300 * 1000000000
     -- Two series, each written newest first, and one sample outside the
     -- range.
     for _, s in ipairs({ { "a", 3 }, { "b", 4 }, { "a", 1 }, { "b", 2 } }) do
@@ -420,17 +300,6 @@ end)
 -- Where access control sits
 -- ---------------------------------------------------------------------------
 
---- eventd's identity for a field (eventd-core field.rs field_guid): the
---- UUIDv5 of the field path under eventd's namespace, in PCDS byte
---- order — which is Python's uuid5(...).bytes_le.
-local function field_guid(path)
-    local p = assert(io.popen("python3 -c \"import uuid,sys; print(uuid.uuid5(uuid.UUID("
-        .. "'e7d3a1b0-5c2f-4e8a-9b1d-0a6f3c8e2d4b'), sys.argv[1]).bytes_le.hex())\" '" .. path .. "'", "r"))
-    local hex = p:read("l")
-    p:close()
-    return (hex:gsub("..", function(h) return string.char(tonumber(h, 16)) end))
-end
-
 --- A self-relative descriptor owned by SYSTEM whose DACL is `aces`, each
 --- already packed; hex for `reg set … hex:`.
 local function descriptor_hex(aces)
@@ -439,7 +308,7 @@ local function descriptor_hex(aces)
     -- ACL revision 4: the DACL carries object ACEs.
     local acl = string.pack("<BBI2I2I2", 4, 0, 8 + #body, #aces, 0) .. body
     local header = string.pack("<BBI2I4I4I4I4", 1, 0, 0x8004, 20, 20 + #owner, 0, 20 + 2 * #owner)
-    return ((header .. owner .. owner .. acl):gsub(".", function(c) return string.format("%02x", c:byte()) end))
+    return eventd.hex(header .. owner .. owner .. acl)
 end
 
 local function allow_ace(sid, mask)
@@ -462,7 +331,7 @@ test("a field the query names must be readable for a record to count, and is cou
     local user = token.sid(5, 21, 1278, 6, 6, 1101)
     -- The user may read these records, except their is_error field.
     local sd = descriptor_hex({
-        deny_field_ace(user, 1, field_guid("is_error")),
+        deny_field_ace(user, 1, eventd.field_guid("is_error")),
         allow_ace(token.SID.LOCAL_SYSTEM, 1),
         allow_ace(user, 1),
     })
@@ -515,7 +384,7 @@ test("a caller who may not read an origin gets counts, order and pages computed 
     local sd = pc.descriptor_hex(token.SID.LOCAL_SYSTEM, { { sid = token.SID.LOCAL_SYSTEM, mask = 1 } })
     vm:run("reg set -p '" .. key .. "' @ hex:" .. sd):assert_ok()
     local ok, err = pcall(function()
-        local ts = now_ns() - 60 * 1000000000
+        local ts = eventd.guest_ns(vm) - 60 * 1000000000
         local batch = {}
         for i = 1, 10 do
             -- Interleaved in time: secret lines sit between public ones.

@@ -31,12 +31,6 @@ peinit.claim(2)
 
 local vm = eventd.boot({ name = "ev-resolve" })
 
-local function fnv(s)
-    local h = 0xcbf29ce484222325
-    for i = 1, #s do h = (h ~ s:byte(i)) * 0x100000001b3 end
-    return h & 0x7fffffffffffffff
-end
-
 local function series_row(v, name)
     return eventd.sql(v, eventd.DB.metrics,
         "SELECT id, labels, type, label_hash, boundaries_hash, boundaries FROM series WHERE name = '" .. name .. "'")
@@ -75,7 +69,7 @@ test("resolution computes the canonical label string and hashes it", {
         labels = { zone = "z", app = "a" } })
     local s = await_series(vm, name)
     t:assert_eq(s[1][2], "app=a,zone=z", "the canonical label string is key-sorted and joined")
-    t:assert_eq(s[1][4], fnv("app=a,zone=z"), "and label_hash is FNV-1a of that string")
+    t:assert_eq(s[1][4], eventd.hash_for_sql("app=a,zone=z"), "and label_hash is FNV-1a of that string")
 end)
 
 -- §5.3 step 3: producer order, never sorted; counters/gauges null.
@@ -90,9 +84,8 @@ test("a histogram keeps the producer boundary order, counters and gauges are nul
         counts = eventd.array{ 0, 1, 2 }, total_count = 2, sum = eventd.float(12.0),
     } })
     local hs = await_series(vm, h)
-    local want = (string.pack("<I4", 3) .. string.pack("<d", 1.5)
+    local want = eventd.hex(string.pack("<I4", 3) .. string.pack("<d", 1.5)
         .. string.pack("<d", 2.5) .. string.pack("<d", 10.0))
-        :gsub(".", function(c) return string.format("%02x", c:byte()) end)
     t:assert_eq(hs[1][6], want, "the blob holds the three boundaries in producer order")
 
     -- eventd never sorts: a non-increasing set is rejected, not reordered.
@@ -358,7 +351,7 @@ test("after a restart the cache starts empty and warms on demand, with no pre-wa
 
     eventd.set(vm, "HealthMetricIntervalSeconds", "dword:1"):assert_ok()
     eventd.restart(vm)
-    local restarted = tonumber(vm:run("date +%s%N").stdout:match("%d+"))
+    local restarted = eventd.guest_ns(vm)
     local function cached_after(since)
         local found
         wait_until(function()
@@ -379,7 +372,7 @@ test("after a restart the cache starts empty and warms on demand, with no pre-wa
     local later = os.time() * 1000000000
     for i = 1, 300 do again[i] = { name = stem .. "w" .. i, type = "gauge", value = i, timestamp = later + i } end
     eventd.send_metric(vm, eventd.array(again))
-    local mark = tonumber(vm:run("date +%s%N").stdout:match("%d+"))
+    local mark = eventd.guest_ns(vm)
     wait_until(function() return cached_after(mark) >= cold + 300 end,
         { timeout = 30, interval = 1, desc = "the cache to warm with the resampled series" })
     eventd.unset(vm, "HealthMetricIntervalSeconds")

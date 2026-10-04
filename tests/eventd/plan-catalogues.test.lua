@@ -20,70 +20,9 @@ peinit.claim(1)
 
 local vm = eventd.boot({ name = "ev-catalogue" })
 
-local function now_ns()
-    return math.tointeger(tonumber(vm:run("date +%s%N").stdout:match("%d+")))
-end
-
-local function host_dir()
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l")
-    p:close()
-    return dir
-end
-
-local function host_write(path, bytes)
-    local f = assert(io.open(path, "wb"))
-    f:write(bytes)
-    f:close()
-end
-
-local function host_read(path)
-    local f = assert(io.open(path, "rb"))
-    local bytes = f:read("a")
-    f:close()
-    return bytes
-end
-
---- Apply `statements` to the guest database `db` while eventd is
---- stopped: copy it out with its WAL, edit it on the host, fold the WAL
---- into the main file, and put the main file back without a WAL.
-local function edit_store(db, statements)
-    local dir = host_dir()
-    host_write(dir .. "/db", vm:read_file(db))
-    local okw, wal = pcall(vm.read_file, vm, db .. "-wal")
-    if okw and wal and #wal > 0 then host_write(dir .. "/db-wal", wal) end
-    host_write(dir .. "/edit.sql", statements)
-    host_write(dir .. "/run.py", [[
-import sqlite3, sys
-d = sys.argv[1]
-c = sqlite3.connect(d + "/db")
-c.executescript(open(d + "/edit.sql").read())
-c.commit()
-c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-c.execute("PRAGMA journal_mode=DELETE")
-c.close()
-]])
-    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
-    local out = p:read("a")
-    local ok = p:close()
-    assert(ok, "editing the store on the host failed: " .. out)
-    local edited = host_read(dir .. "/db")
-    os.execute("rm -rf '" .. dir .. "'")
-    vm:write_file(db, edited)
-    pcall(vm.unlink, vm, db .. "-wal")
-    pcall(vm.unlink, vm, db .. "-shm")
-end
-
-local function stop_eventd()
-    vm:run("svctl stop eventd"):assert_ok()
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 60, desc = "eventd to stop" })
-end
-
-local function start_eventd()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
-end
+-- Stores are edited while eventd is stopped with eventd.edit_store, in
+-- rollback-journal mode: copied out with the WAL, edited on the host, the
+-- WAL folded into the main file, and the main file put back without one.
 
 -- "Identifier discovery reads compact catalogues: the union of every
 --  shard's event_types, the log store's log_origins, and the metric
@@ -105,16 +44,18 @@ test("a type or origin missing from its catalogue is not found, though its recor
     eventd.wait_rows(vm, "EVENTS pt." .. m .. ".*", function(rs) return #rs == 2 end)
     eventd.wait_rows(vm, "LOGS FROM " .. gone_origin .. ", " .. kept_origin, function(rs) return #rs == 3 end)
 
-    stop_eventd()
+    eventd.stop(vm)
     local shard
     for _, path in ipairs(eventd.shards(vm)) do
         local n = eventd.sql(vm, path, "SELECT count(*) FROM events WHERE event_type = '" .. gone_type .. "'")
         if n[1][1] > 0 then shard = path end
     end
     t:assert(shard, "the gone type's event is in a shard")
-    edit_store(shard, "DELETE FROM event_types WHERE event_type = '" .. gone_type .. "';")
-    edit_store(eventd.DB.logs, "DELETE FROM log_origins WHERE origin = '" .. gone_origin .. "';")
-    start_eventd()
+    eventd.edit_store(vm, shard, "DELETE FROM event_types WHERE event_type = '" .. gone_type .. "';",
+        { journal = "delete" })
+    eventd.edit_store(vm, eventd.DB.logs, "DELETE FROM log_origins WHERE origin = '" .. gone_origin .. "';",
+        { journal = "delete" })
+    eventd.start(vm)
 
     -- The records are still there ...
     t:assert_eq(eventd.sql(vm, shard,
@@ -141,7 +82,7 @@ test("retention deletes an origin's last rows and its catalogue entry stays", {
 }, function(t)
     local origin = eventd.marker("old")
     local fresh = eventd.marker("new")
-    local old = now_ns() - 3 * 86400 * 1000000000
+    local old = eventd.guest_ns(vm) - 3 * 86400 * 1000000000
     eventd.send_log(vm, {
         { origin = origin, is_error = false, message = "old one", timestamp = old },
         { origin = origin, is_error = false, message = "old two", timestamp = old + 1 },
@@ -176,9 +117,10 @@ test("a catalogued name with no rows answers nothing, and a name committed after
 }, function(t)
     local ghost = eventd.marker("ghost")
     local later = eventd.marker("later")
-    stop_eventd()
-    edit_store(eventd.DB.logs, "INSERT INTO log_origins(origin) VALUES ('" .. ghost .. "');")
-    start_eventd()
+    eventd.stop(vm)
+    eventd.edit_store(vm, eventd.DB.logs, "INSERT INTO log_origins(origin) VALUES ('" .. ghost .. "');",
+        { journal = "delete" })
+    eventd.start(vm)
     t:assert_eq(eventd.sql(vm, eventd.DB.logs,
         "SELECT count(*) FROM log_origins WHERE origin = '" .. ghost .. "'")[1][1], 1,
         "the stale name is catalogued")

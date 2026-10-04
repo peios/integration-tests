@@ -19,114 +19,14 @@ local eventd = require("helpers.eventd")
 local peinit = require("helpers.peinit")
 local kmes = require("helpers.kmes")
 local sys = require("helpers.sys")
-local us = require("helpers.unixsock")
-local pc = require("helpers.peinit_client")
 peinit.claim(1, { cpus = 2 })
 
 -- Two vCPUs: two active shards by default.
 local vm = eventd.boot({ name = "ev-fanout", cpus = 2 })
 
--- ---------------------------------------------------------------------------
--- A raw query-channel client, for what evctl hides: where one response
--- frame ends and the next begins, the order frames arrive in, a caller
--- other than SYSTEM, and a reader that stops reading. A frame is a u32
--- little-endian length and a MessagePack map (PSPU §3.15–§3.16).
--- ---------------------------------------------------------------------------
-
-local function mp_decode(s, i)
-    i = i or 1
-    local b = s:byte(i)
-    assert(b, "msgpack: ran off the end")
-    local function list(count, at)
-        local out = {}
-        for k = 1, count do out[k], at = mp_decode(s, at) end
-        return out, at
-    end
-    local function dict(count, at)
-        local out = {}
-        for _ = 1, count do
-            local k, v
-            k, at = mp_decode(s, at)
-            v, at = mp_decode(s, at)
-            out[k] = v
-        end
-        return out, at
-    end
-    local function bytes(len, at) return s:sub(at, at + len - 1), at + len end
-    local function num(fmt, size) return (string.unpack(fmt, s, i + 1)), i + 1 + size end
-    if b <= 0x7f then return b, i + 1 end
-    if b >= 0xe0 then return b - 0x100, i + 1 end
-    if b <= 0x8f then return dict(b - 0x80, i + 1) end
-    if b <= 0x9f then return list(b - 0x90, i + 1) end
-    if b <= 0xbf then return bytes(b - 0xa0, i + 1) end
-    if b == 0xc0 then return eventd.NIL, i + 1 end
-    if b == 0xc2 then return false, i + 1 end
-    if b == 0xc3 then return true, i + 1 end
-    if b == 0xc4 or b == 0xd9 then return bytes(s:byte(i + 1), i + 2) end
-    if b == 0xc5 or b == 0xda then return bytes((string.unpack(">I2", s, i + 1)), i + 3) end
-    if b == 0xc6 or b == 0xdb then return bytes((string.unpack(">I4", s, i + 1)), i + 5) end
-    if b == 0xca then return num(">f", 4) end
-    if b == 0xcb then return num(">d", 8) end
-    if b == 0xcc then return num(">I1", 1) end
-    if b == 0xcd then return num(">I2", 2) end
-    if b == 0xce then return num(">I4", 4) end
-    if b == 0xcf then return num(">i8", 8) end
-    if b == 0xd0 then return num(">i1", 1) end
-    if b == 0xd1 then return num(">i2", 2) end
-    if b == 0xd2 then return num(">i4", 4) end
-    if b == 0xd3 then return num(">i8", 8) end
-    if b == 0xdc then return list((string.unpack(">I2", s, i + 1)), i + 3) end
-    if b == 0xdd then return list((string.unpack(">I4", s, i + 1)), i + 5) end
-    if b == 0xde then return dict((string.unpack(">I2", s, i + 1)), i + 3) end
-    if b == 0xdf then return dict((string.unpack(">I4", s, i + 1)), i + 5) end
-    error(string.format("msgpack: unsupported tag 0x%02x", b))
-end
-
-local rq = {}
-
-function rq.open(w, tok)
-    local fd, err = pc.connect_as(w, eventd.SOCKET.query, us.SOCK.STREAM, tok)
-    assert(fd, "connect to the query socket: " .. tostring(err))
-    return { w = w, fd = fd, buf = "" }
-end
-
-function rq.timeout(c, seconds)
-    c.w:syscall(us.NR.setsockopt, {
-        args = { c.fd, 1, 20, 0, 16 },
-        bufs = { string.pack("<i8i8", math.floor(seconds), math.floor((seconds % 1) * 1e6)) },
-        ptrs = { 3 },
-    })
-end
-
-function rq.send(c, text)
-    local body = eventd.msgpack({ query = text })
-    local r = us.sendmsg(c.w, c.fd, string.pack("<I4", #body) .. body)
-    assert(r.ret == 4 + #body, "sending the request: ret " .. tostring(r.ret))
-end
-
-local function fill(c, n)
-    while #c.buf < n do
-        local r = us.recvmsg(c.w, c.fd, 65536, { cmsg = 0 })
-        if r.ret < 0 then return false, us.errname(r.errno) end
-        if r.ret == 0 then return false, "eof" end
-        c.buf = c.buf .. r.data
-    end
-    return true
-end
-
-function rq.frame(c)
-    local ok, why = fill(c, 4)
-    if not ok then return nil, why end
-    local len = string.unpack("<I4", c.buf)
-    ok, why = fill(c, 4 + len)
-    if not ok then return nil, why end
-    local msg = mp_decode(c.buf:sub(5, 4 + len))
-    c.buf = c.buf:sub(5 + len)
-    msg.size = len
-    return msg
-end
-
-function rq.close(c) sys.close(c.w, c.fd) end
+-- The raw query channel (eventd.rq), for what evctl hides: the order
+-- frames arrive in, and a reader that stops reading.
+local rq = eventd.rq
 
 -- ---------------------------------------------------------------------------
 -- Local helpers
@@ -175,34 +75,10 @@ local function field(rows, name)
     return out
 end
 
-local function eventd_fds()
-    local pid = eventd.pid(vm)
-    local out = {}
-    for _, name in ipairs(vm:listdir("/proc/" .. pid .. "/fd")) do
-        local n = type(name) == "table" and name.name or name
-        local path = sys.readlink(vm, "/proc/" .. pid .. "/fd/" .. n)
-        local okf, info = pcall(vm.read_file, vm, "/proc/" .. pid .. "/fdinfo/" .. n)
-        if path and okf then
-            out[tonumber(n)] = { path = path, mode = tonumber(info:match("flags:%s*(%d+)"), 8) & 3 }
-        end
-    end
-    return out
-end
-
---- fd numbers open on `path` with access mode `mode`, sorted.
-local function fds_on(fds, path, mode)
-    local list = {}
-    for fd, d in pairs(fds) do
-        if d.path == path and d.mode == mode then list[#list + 1] = fd end
-    end
-    table.sort(list)
-    return list
-end
-
 local SHARD0 = eventd.STORE.events .. "/shard-0000.db"
 local SHARD1 = eventd.STORE.events .. "/shard-0001.db"
 -- The writers' descriptors as first seen, for the lifetime test at the end.
-local FIRST_FDS = eventd_fds()
+local FIRST_FDS = eventd.fds(vm, nil, { by_fd = true })
 
 -- ---------------------------------------------------------------------------
 -- Merging
@@ -389,11 +265,11 @@ test("each active shard's writer keeps the one read-write descriptor it started 
     pinned(0, "pt.fan.life", { { n = 1 } })
     pinned(1, "pt.fan.life", { { n = 2 } })
     eventd.wait_rows(vm, "EVENTS pt.fan.life", function(rs) return #rs >= 2 end)
-    local now = eventd_fds()
+    local now = eventd.fds(vm, nil, { by_fd = true })
     for _, path in ipairs({ SHARD0, SHARD1 }) do
-        local first = fds_on(FIRST_FDS, path, 2)
+        local first = eventd.fd_numbers(FIRST_FDS, path, 2)
         t:assert_eq(#first, 1, path .. ": one read-write descriptor at the start")
-        t:assert_eq(json.encode(fds_on(now, path, 2)), json.encode(first),
+        t:assert_eq(json.encode(eventd.fd_numbers(now, path, 2)), json.encode(first),
             path .. ": the same descriptor after every test so far")
     end
 end)
@@ -461,7 +337,7 @@ test("a held event query reads each database, active and historical, through one
     local c = rq.open(w)
     rq.send(c, "EVENTS pt.fan.hist")
     local first = rq.frame(c)
-    local during = eventd_fds()
+    local during = eventd.fds(vm, nil, { by_fd = true })
     rq.close(c)
     w:kill(); w:join()
     t:assert_eq(first and first.status, "ok", "the query was answering when held")
@@ -470,9 +346,9 @@ test("a held event query reads each database, active and historical, through one
     -- counted is the read-only descriptors open at once: one per
     -- database the held query reads.
     for _, path in ipairs({ SHARD0, SHARD1 }) do
-        t:assert_eq(#fds_on(during, path, 0), 1, path .. ": one read-only descriptor: " .. json.encode(during))
+        t:assert_eq(#eventd.fd_numbers(during, path, 0), 1, path .. ": one read-only descriptor: " .. json.encode(during))
     end
-    t:assert_eq(#fds_on(during, SHARD0, 1), 0, "nothing write-only")
+    t:assert_eq(#eventd.fd_numbers(during, SHARD0, 1), 0, "nothing write-only")
     eventd.unset(vm, "StorageShards")
     eventd.restart(vm)
 end)

@@ -61,7 +61,7 @@ test("a zero interval turns health metrics off", {
     -- Let any sample already being taken land, then take the cut-off from
     -- the guest's own clock.
     vm:run("sleep 2")
-    local cutoff = tonumber(vm:run("date +%s%N").stdout:match("%d+"))
+    local cutoff = eventd.guest_ns(vm)
     local stopped = true
     local ok = pcall(wait_until, function()
         local r = eventd.query(vm, "METRIC eventd.logs.stored SINCE 10m ago")
@@ -87,7 +87,7 @@ test("health counters restart from zero with eventd", {
         return high >= 50
     end, { timeout = 15, interval = 0.5, desc = "the stored counter to count the 50 samples" })
     eventd.restart(vm)
-    local restarted = tonumber(vm:run("date +%s%N").stdout:match("%d+"))
+    local restarted = eventd.guest_ns(vm)
     -- The first sample the new process takes.
     local first
     wait_until(function()
@@ -108,7 +108,6 @@ test("the health catalogue counts events, logs and metrics stored per shard/stor
         .. " eventd *health.index-sheds-count-indexes-dropped-by-reason"
         .. " eventd *health.store-bytes-is-bytes-on-disk-with-write-ahead-logs",
 }, function(t)
-    local function guest_ns() return tonumber(vm:run("date +%s%N").stdout:match("%d+")) end
     -- The latest sample of a labelled series taken after `since`.
     local function latest(name, label, value, since)
         local found
@@ -122,10 +121,10 @@ test("the health catalogue counts events, logs and metrics stored per shard/stor
     end
 
     -- events.stored counts events committed to the shard.
-    local t0 = guest_ns()
+    local t0 = eventd.guest_ns(vm)
     local before = latest("eventd.events.stored", "shard", "0", t0).value
     for i = 1, 30 do eventd.emit(vm, "pt.health", { n = i }) end
-    local t1 = guest_ns()
+    local t1 = eventd.guest_ns(vm)
     wait_until(function()
         return latest("eventd.events.stored", "shard", "0", t1).value >= before + 30
     end, { timeout = 20, interval = 1, desc = "the stored-events counter to count 30 more" })
@@ -146,7 +145,7 @@ test("the health catalogue counts events, logs and metrics stored per shard/stor
     -- after we measure metrics.db and its WAL is at least their sum.
     local function size(p) return tonumber(vm:run("wc -c < " .. p .. " 2>/dev/null || echo 0").stdout:match("%d+")) or 0 end
     local disk = size(eventd.DB.metrics) + size(eventd.DB.metrics .. "-wal")
-    local t2 = guest_ns()
+    local t2 = eventd.guest_ns(vm)
     local mbytes = latest("eventd.store.bytes", "store", "metrics", t2)
     t:assert(mbytes.value >= disk, "metrics store.bytes covers the database and its WAL: "
         .. mbytes.value .. " >= " .. disk)

@@ -31,14 +31,7 @@ local Q = " SINCE 1h ago "
 
 local vm = eventd.boot({
     name = "ev-rollup",
-    files = peinit.seed("zz-pt-eventd-svc", {
-        { path = [[Machine\System]] },
-        { path = [[Machine\System\Services]] },
-        { path = [[Machine\System\Services\eventd]], values = {
-            { name = "ErrorControl", type = "dword", data = 0 },
-            { name = "RestartPolicy", type = "dword", data = 0 },
-        } },
-    }),
+    noncritical = true,
 })
 eventd.set(vm, "AdaptiveRollupMinSamples", "dword:100")
 
@@ -103,26 +96,9 @@ end
 
 -- Stop eventd, apply `sql` to the store on the host, put it back, restart.
 local function edit_store(sql)
-    vm:run("svctl stop eventd")
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 30, interval = 0.25, desc = "eventd to stop" })
-    local p = assert(io.popen("mktemp -d", "r")); local dir = p:read("l"); p:close()
-    local function put(path, bytes) local f = assert(io.open(path, "wb")); f:write(bytes); f:close() end
-    put(dir .. "/db", vm:read_file(eventd.DB.metrics))
-    local okw, wal = pcall(vm.read_file, vm, eventd.DB.metrics .. "-wal")
-    if okw and wal and #wal > 0 then put(dir .. "/db-wal", wal) end
-    put(dir .. "/e.sql", sql)
-    local run = assert(io.popen("python3 -c 'import sqlite3,sys; d=sys.argv[1]; "
-        .. "c=sqlite3.connect(d+\"/db\"); c.executescript(open(d+\"/e.sql\").read()); c.commit(); "
-        .. "c.execute(\"PRAGMA wal_checkpoint(TRUNCATE)\"); c.close()' " .. dir .. " 2>&1", "r"))
-    local out = run:read("a")
-    assert(run:close(), "editing the store failed: " .. out)
-    local f = assert(io.open(dir .. "/db", "rb")); local bytes = f:read("a"); f:close()
-    os.execute("rm -rf '" .. dir .. "'")
-    vm:run("rm -f " .. eventd.DB.metrics .. "-wal " .. eventd.DB.metrics .. "-shm")
-    vm:write_file(eventd.DB.metrics, bytes)
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
+    eventd.stop(vm)
+    eventd.edit_store(vm, eventd.DB.metrics, sql)
+    eventd.start(vm)
 end
 
 -- SQL writing a complete, valid set of rollup rows for `name` over every

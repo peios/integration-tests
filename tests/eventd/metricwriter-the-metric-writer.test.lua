@@ -33,25 +33,14 @@ peinit.claim(1)
 
 local vm = eventd.boot({
     name = "ev-metricwriter",
-    files = peinit.seed("zz-pt-eventd-svc", {
-        { path = [[Machine\System]] },
-        { path = [[Machine\System\Services]] },
-        { path = [[Machine\System\Services\eventd]], values = {
-            { name = "ErrorControl", type = "dword", data = 0 },
-            { name = "RestartPolicy", type = "dword", data = 0 },
-        } },
-    }),
+    noncritical = true,
 })
 
 -- Distinct eventd stderr lines containing `needle` (the log store can hold a
 -- line more than once; see the report), as a list of messages.
 local function stderr_lines(needle)
-    local r = eventd.query(vm, 'LOGS FROM eventd CONTAINING "' .. needle .. '" SINCE 30m ago')
-    local seen, out = {}, {}
-    for _, row in ipairs(r.rows) do
-        local key = tostring(row.timestamp) .. row.message
-        if not seen[key] then seen[key] = true; out[#out + 1] = row.message end
-    end
+    local out = {}
+    for _, r in ipairs(eventd.stderr(vm, needle, { wait = false })) do out[#out + 1] = r.message end
     return out
 end
 
@@ -141,13 +130,11 @@ test("publication is gated by EVENTD_PUBLISH on the resolved name's descriptor",
     spec = "eventd *metricwriter.the-token-must-hold-eventd-publish-on-the-metric-name-descriptor",
 }, function(t)
     local access = require("helpers.access")
-    local function hex(s) return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)) end
     local denied = eventd.marker("mwpub")
     local allowed = eventd.marker("mwok")
     -- Read only (0x01), no publish (0x08), for the agent's SYSTEM identity.
     local sd = access.simple({ access.ace(access.ACE.ALLOWED, 0x01, token.SID.LOCAL_SYSTEM) })
-    vm:run("reg set -p '" .. eventd.SECURITY .. "\\Metrics\\" .. denied .. "' @ hex:" .. hex(sd))
-        :assert_ok()
+    eventd.put_descriptor(vm, "Metrics", denied, sd)
     eventd.send_metric(vm, { name = denied, type = "gauge", value = 1 })
     eventd.send_metric(vm, { name = allowed, type = "gauge", value = 1 })
     -- Once the allowed one is stored, the denied one has had its chance.
@@ -364,18 +351,14 @@ test("SIGQUIT reports the mismatch total and latest conflict", {
     local after = eventd.marker("mwquitok")
     eventd.send_metric(vm, { name = after, type = "gauge", value = 1 })
     eventd.wait_rows(vm, "METRIC " .. after .. " SINCE 10m ago", function(rs) return #rs == 1 end)
-    local pid = eventd.pid(vm)
-    vm:run("kill -QUIT " .. pid)
-    wait_until(function() return eventd.pid(vm) ~= pid end,
-        { timeout = 30, interval = 0.25, desc = "eventd to stop on SIGQUIT" })
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
-    local totals, latest
-    wait_until(function()
-        totals = stderr_lines("type_mismatches=")
-        latest = stderr_lines("last_metric_type_mismatch")
-        return #totals >= 1 and #latest >= 1
-    end, { timeout = 30, interval = 0.5, desc = "the SIGQUIT dump in the log store" })
+    local d = eventd.quit_dump(vm)
+    local totals, latest = {}, {}
+    for _, m in ipairs(d.messages) do
+        if m:find("type_mismatches=", 1, true) then totals[#totals + 1] = m end
+        if m:find("last_metric_type_mismatch", 1, true) then latest[#latest + 1] = m end
+    end
+    assert(#totals >= 1 and #latest >= 1, "the SIGQUIT dump in the log store: "
+        .. json.encode(d.messages) .. " " .. table.concat(d.partial, "; "))
     -- Earlier tests in this file discarded several samples for their type.
     t:assert(totals[#totals]:find("type_mismatches=%d+"), "the dump reports a mismatch total: " .. totals[#totals])
     local n = tonumber(totals[#totals]:match("type_mismatches=(%d+)"))

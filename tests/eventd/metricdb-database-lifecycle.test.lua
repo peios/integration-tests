@@ -28,19 +28,11 @@ local eventd = require("helpers.eventd")
 local peinit = require("helpers.peinit")
 peinit.claim(1)
 
-local SERVICE = [[Machine\System\Services\eventd]]
 local METRICS_DIR = "/var/state/eventd/metrics/"
 
 local vm = eventd.boot({
     name = "ev-metricdb",
-    files = peinit.seed("zz-pt-eventd-svc", {
-        { path = [[Machine\System]] },
-        { path = [[Machine\System\Services]] },
-        { path = SERVICE, values = {
-            { name = "ErrorControl", type = "dword", data = 0 },
-            { name = "RestartPolicy", type = "dword", data = 0 },
-        } },
-    }),
+    noncritical = true,
 })
 
 -- Ask peinit for a fresh eventd and return its status once the attempt has
@@ -64,51 +56,38 @@ local function assert_failed(t, status, why)
     t:assert(not answering(), why .. ": and nothing answers on the query socket")
 end
 
-local function repair()
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
-end
-
-local function stop()
-    vm:run("svctl stop eventd")
-    wait_until(function() return eventd.pid(vm) == nil end,
-        { timeout = 30, interval = 0.25, desc = "eventd to stop" })
-end
-
 -- Build a SQLite database on the host from `script` and return its bytes.
 local function host_db(script)
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l"); p:close()
-    local f = assert(io.open(dir .. "/s.sql", "w")); f:write(script); f:close()
+    local dir = eventd.host_tmpdir()
+    eventd.host_write(dir .. "/s.sql", script)
     local run = assert(io.popen("python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); "
         .. "c.executescript(open(sys.argv[2]).read()); c.commit(); c.close()' "
         .. dir .. "/db " .. dir .. "/s.sql 2>&1", "r"))
     local out = run:read("a")
     assert(run:close(), "building the crafted store failed: " .. out)
-    local g = assert(io.open(dir .. "/db", "rb")); local bytes = g:read("a"); g:close()
+    local bytes = eventd.host_read(dir .. "/db")
     os.execute("rm -rf '" .. dir .. "'")
     return bytes
 end
 
 -- Stop eventd and replace the store with `bytes` (nil: no store at all).
 local function install(bytes)
-    stop()
-    vm:run("rm -f " .. eventd.DB.metrics .. " " .. eventd.DB.metrics .. "-wal "
-        .. eventd.DB.metrics .. "-shm")
+    eventd.stop(vm)
+    eventd.remove_db(vm, eventd.DB.metrics)
     if bytes then vm:write_file(eventd.DB.metrics, bytes) end
 end
 
 -- After a failed crafted store, put a fresh one in place.
 local function fresh_store()
     install(nil)
-    repair()
+    eventd.start(vm)
 end
 
 -- A timestamp a minute behind the guest's clock: SINCE … ends at the guest's
 -- now, and the host clock can run ahead of it, putting a host-stamped sample
 -- in the query's future.
 local function guest_past_ns()
-    return tonumber(vm:run("date +%s%N").stdout:match("%d+")) - 60 * 1000000000
+    return eventd.guest_ns(vm) - 60 * 1000000000
 end
 
 local function file_size(path)
@@ -211,7 +190,7 @@ test("a missing or wrongly protected store directory fails startup, with no degr
     eventd.set(vm, "MetricStorePath", "sz:/var/state/eventd/pt-plain-metrics"):assert_ok()
     assert_failed(t, attempt(), "metric store directory with the wrong descriptor")
     eventd.set(vm, "MetricStorePath", "sz:" .. METRICS_DIR):assert_ok()
-    repair()
+    eventd.start(vm)
 end)
 
 -- §5.4 Path: "eventd does not create it or any parent directory, never
@@ -231,7 +210,7 @@ test("the store directory is never created and never reached through a symlink",
     eventd.set(vm, "MetricStorePath", "sz:/run/pt-metrics-varlink/metrics"):assert_ok()
     assert_failed(t, attempt(), "store reached through an intermediate symlink")
     eventd.set(vm, "MetricStorePath", "sz:" .. METRICS_DIR):assert_ok()
-    repair()
+    eventd.start(vm)
 end)
 
 -- §5.4 Opening step 2: "Version 1 is migrated transactionally to version 2
@@ -250,7 +229,7 @@ INSERT INTO series (id, name, labels, type, label_hash) VALUES (1, 'ptmigrated',
 INSERT INTO samples (series_id, boot_id, timestamp, value)
     VALUES (1, x'00000000000000000000000000000000', ]] .. now .. [[, 42.0);
 ]]))
-    repair()
+    eventd.start(vm)
     t:assert_eq(eventd.sql(vm, eventd.DB.metrics,
         "SELECT value FROM metadata WHERE key = 'schema_version'")[1][1], "2",
         "the store now records version 2")
@@ -277,7 +256,7 @@ INSERT INTO metadata VALUES ('created_at', '2026-01-01T00:00:00Z');
 INSERT INTO series (name, labels, type, label_hash) VALUES ('ptdup', '', 1, 5472609002491880229);
 INSERT INTO series (name, labels, type, label_hash) VALUES ('ptdup', '', 1, 5472609002491880229);
 ]]))
-    repair()
+    eventd.start(vm)
     t:assert_eq(eventd.sql(vm, eventd.DB.metrics,
         "SELECT COUNT(*) FROM series WHERE name = 'ptdup'")[1][1], 2,
         "the UNIQUE(name, labels, boundaries_hash) constraint let two identical gauge series in")
@@ -396,15 +375,6 @@ test("eventd holds exactly one read-write descriptor on metrics.db; the rest are
         .. " eventd *metricretain.retention-plans-read-only-and-submits-low-priority-deletes-to-the-writer",
 }, function(t)
     eventd.set(vm, "AdaptiveRollupMinSamples", "dword:100"):assert_ok()
-    local probe = [=[
-pid=$(svctl --json status eventd | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')
-for f in /proc/$pid/fd/*; do
-  case "$(readlink $f)" in
-    */metrics.db) sed -n 's/^flags:[[:space:]]*//p' /proc/$pid/fdinfo/${f##*/} ;;
-  esac
-done
-]=]
-    local path = eventd.guest_tmp(vm, probe, "fdprobe")
     local name = eventd.marker("mdbfd")
     local now = os.time() * 1000000000
     local recs = {}
@@ -416,12 +386,11 @@ done
         -- retention pass (kicked by a live change).
         vm:run("evctl 'METRIC " .. name .. " SINCE 10m ago AVG_OVER 10s' >/dev/null 2>&1 &")
         eventd.set(vm, "RetentionDeleteBatchRows", "dword:" .. (1000 + round))
-        local out = vm:run("sh " .. path).stdout
+        local _, _, on = eventd.fds_on(vm, nil, eventd.DB.metrics)
         local rw = 0
-        for flags in out:gmatch("%d+") do
+        for _, e in ipairs(on) do
             samples = samples + 1
-            local mode = tonumber(flags, 8) & 3
-            if mode == 2 then rw = rw + 1 elseif mode == 0 then saw_readonly = true end
+            if e.mode == 2 then rw = rw + 1 elseif e.mode == 0 then saw_readonly = true end
         end
         if rw > max_rw then max_rw = rw end
     end

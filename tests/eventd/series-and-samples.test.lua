@@ -33,15 +33,6 @@ peinit.claim(1)
 
 local vm = eventd.boot({ name = "ev-series" })
 
-local function fnv(s)
-    local h = 0xcbf29ce484222325
-    for i = 1, #s do
-        h = h ~ s:byte(i)
-        h = h * 0x100000001b3
-    end
-    return h & 0x7fffffffffffffff
-end
-
 local function series_row(name)
     local r = eventd.sql(vm, eventd.DB.metrics,
         "SELECT id, name, labels, type, label_hash, boundaries_hash, boundaries " ..
@@ -139,11 +130,11 @@ test("labels are key-sorted, comma-joined, and the empty set is the empty string
 
     local lr = await_series(labelled)
     t:assert_eq(lr[3], "core=0,host=srv1", "labels sorted by key and comma-joined")
-    t:assert_eq(lr[5], fnv("core=0,host=srv1"), "label_hash is FNV-1a of that string")
+    t:assert_eq(lr[5], eventd.hash_for_sql("core=0,host=srv1"), "label_hash is FNV-1a of that string")
 
     local br = await_series(bare)
     t:assert_eq(br[3], "", "the empty label set is the empty string")
-    t:assert_eq(br[5], fnv(""), "its label_hash is FNV-1a of the empty string")
+    t:assert_eq(br[5], eventd.hash_for_sql(""), "its label_hash is FNV-1a of the empty string")
 end)
 
 -- §5.2: "No escaping is performed and none is needed, because ingestion
@@ -176,12 +167,12 @@ test("the boundary blob is count-then-f64 little-endian, and hashes clear the hi
     local hr = await_series(hname)
     local blob = hr[7]
     t:assert_eq(blob:sub(1, 8), "02000000", "the blob starts with the u32 LE count 2")
-    local b1 = (string.pack("<d", 1.0)):gsub(".", function(c) return string.format("%02x", c:byte()) end)
-    local b2 = (string.pack("<d", 2.0)):gsub(".", function(c) return string.format("%02x", c:byte()) end)
+    local b1 = eventd.hex(string.pack("<d", 1.0))
+    local b2 = eventd.hex(string.pack("<d", 2.0))
     t:assert_eq(blob, "02000000" .. b1 .. b2, "then the two boundaries as LE f64 in producer order")
     -- boundaries_hash is FNV over the raw blob bytes.
     local raw = string.pack("<I4", 2) .. string.pack("<d", 1.0) .. string.pack("<d", 2.0)
-    t:assert_eq(hr[6], fnv(raw), "boundaries_hash is FNV-1a over the blob bytes")
+    t:assert_eq(hr[6], eventd.hash_for_sql(raw), "boundaries_hash is FNV-1a over the blob bytes")
 
     -- A canonical label string whose *raw* 64-bit FNV has the high bit set:
     -- the stored value must be that hash with bit 63 cleared, so it is
@@ -265,7 +256,7 @@ test("the histogram sample map has exactly the four keys, and equal histograms m
     local hex = rows[1][1]
     t:assert_eq(hex:sub(1, 2), "84", "the map is a 4-entry fixmap (exactly four keys)")
     for _, key in ipairs({ "boundaries", "counts", "total_count", "sum" }) do
-        local kh = (key:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+        local kh = eventd.hex(key)
         t:assert(hex:find(kh, 1, true), "the map carries the key " .. key)
     end
     t:assert_eq(rows[1][1], rows[2][1], "two equal histograms encode to identical bytes")

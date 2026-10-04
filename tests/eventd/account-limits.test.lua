@@ -25,143 +25,16 @@
 
 local eventd = require("helpers.eventd")
 local peinit = require("helpers.peinit")
-local sys = require("helpers.sys")
-local token = require("helpers.token")
-local us = require("helpers.unixsock")
-local pc = require("helpers.peinit_client")
 peinit.claim(1)
 
 local vm = eventd.boot({ name = "ev-account" })
 
--- ---------------------------------------------------------------------------
--- A raw query-channel client, for what evctl hides: where one response
--- frame ends and the next begins, the order frames arrive in, a caller
--- other than SYSTEM, and a reader that stops reading. A frame is a u32
--- little-endian length and a MessagePack map (PSPU §3.15–§3.16).
--- ---------------------------------------------------------------------------
-
-local function mp_decode(s, i)
-    i = i or 1
-    local b = s:byte(i)
-    assert(b, "msgpack: ran off the end")
-    local function list(count, at)
-        local out = {}
-        for k = 1, count do out[k], at = mp_decode(s, at) end
-        return out, at
-    end
-    local function dict(count, at)
-        local out = {}
-        for _ = 1, count do
-            local k, v
-            k, at = mp_decode(s, at)
-            v, at = mp_decode(s, at)
-            out[k] = v
-        end
-        return out, at
-    end
-    local function bytes(len, at) return s:sub(at, at + len - 1), at + len end
-    local function num(fmt, size) return (string.unpack(fmt, s, i + 1)), i + 1 + size end
-    if b <= 0x7f then return b, i + 1 end
-    if b >= 0xe0 then return b - 0x100, i + 1 end
-    if b <= 0x8f then return dict(b - 0x80, i + 1) end
-    if b <= 0x9f then return list(b - 0x90, i + 1) end
-    if b <= 0xbf then return bytes(b - 0xa0, i + 1) end
-    if b == 0xc0 then return eventd.NIL, i + 1 end
-    if b == 0xc2 then return false, i + 1 end
-    if b == 0xc3 then return true, i + 1 end
-    if b == 0xc4 or b == 0xd9 then return bytes(s:byte(i + 1), i + 2) end
-    if b == 0xc5 or b == 0xda then return bytes((string.unpack(">I2", s, i + 1)), i + 3) end
-    if b == 0xc6 or b == 0xdb then return bytes((string.unpack(">I4", s, i + 1)), i + 5) end
-    if b == 0xca then return num(">f", 4) end
-    if b == 0xcb then return num(">d", 8) end
-    if b == 0xcc then return num(">I1", 1) end
-    if b == 0xcd then return num(">I2", 2) end
-    if b == 0xce then return num(">I4", 4) end
-    if b == 0xcf then return num(">i8", 8) end
-    if b == 0xd0 then return num(">i1", 1) end
-    if b == 0xd1 then return num(">i2", 2) end
-    if b == 0xd2 then return num(">i4", 4) end
-    if b == 0xd3 then return num(">i8", 8) end
-    if b == 0xdc then return list((string.unpack(">I2", s, i + 1)), i + 3) end
-    if b == 0xdd then return list((string.unpack(">I4", s, i + 1)), i + 5) end
-    if b == 0xde then return dict((string.unpack(">I2", s, i + 1)), i + 3) end
-    if b == 0xdf then return dict((string.unpack(">I4", s, i + 1)), i + 5) end
-    error(string.format("msgpack: unsupported tag 0x%02x", b))
-end
-
-local rq = {}
-
---- A token for an ordinary user, `rid` naming which one. Each call is a
---- fresh logon session, so two tokens for one rid are one user in two
---- sessions. In Administrators because /run/eventd admits SYSTEM,
---- Administrators and eventd's own service SID and nothing else.
-function rq.user(w, rid)
-    local tok = pc.mint_admin(w, token.sid(5, 21, 1278, 6, 6, rid))
-    assert(tok, "minting user " .. rid)
-    return tok
-end
-
-function rq.open(w, tok)
-    local fd, err = pc.connect_as(w, eventd.SOCKET.query, us.SOCK.STREAM, tok)
-    assert(fd, "connect to the query socket: " .. tostring(err))
-    return { w = w, fd = fd, buf = "" }
-end
-
---- SO_RCVTIMEO, so a read nobody answers fails rather than hangs.
-function rq.timeout(c, seconds)
-    c.w:syscall(us.NR.setsockopt, {
-        args = { c.fd, 1, 20, 0, 16 },
-        bufs = { string.pack("<i8i8", math.floor(seconds), math.floor((seconds % 1) * 1e6)) },
-        ptrs = { 3 },
-    })
-end
-
-function rq.send_raw(c, bytes) return us.sendmsg(c.w, c.fd, bytes) end
-
-function rq.send(c, text)
-    local body = eventd.msgpack({ query = text })
-    local r = rq.send_raw(c, string.pack("<I4", #body) .. body)
-    assert(r.ret == 4 + #body, "sending the request: ret " .. tostring(r.ret))
-end
-
-local function fill(c, n)
-    while #c.buf < n do
-        local r = us.recvmsg(c.w, c.fd, 65536, { cmsg = 0 })
-        if r.ret < 0 then return false, us.errname(r.errno) end
-        if r.ret == 0 then return false, "eof" end
-        c.buf = c.buf .. r.data
-    end
-    return true
-end
-
-function rq.frame(c)
-    local ok, why = fill(c, 4)
-    if not ok then return nil, why end
-    local len = string.unpack("<I4", c.buf)
-    ok, why = fill(c, 4 + len)
-    if not ok then return nil, why end
-    local msg = mp_decode(c.buf:sub(5, 4 + len))
-    c.buf = c.buf:sub(5 + len)
-    msg.size = len
-    return msg
-end
-
-function rq.collect(c)
-    local out = { frames = {}, records = {} }
-    while true do
-        local m, why = rq.frame(c)
-        if not m then out.status = why; return out end
-        out.frames[#out.frames + 1] = m
-        if m.status == "ok" then
-            for _, r in ipairs(m.records) do out.records[#out.records + 1] = r end
-        else
-            out.status, out.error = m.status, m.error
-            return out
-        end
-    end
-end
-
-function rq.close(c) sys.close(c.w, c.fd) end
+-- The raw query channel (eventd.rq), for what evctl hides: where one
+-- response frame ends and the next begins, a caller other than SYSTEM
+-- (`rq.user` mints one; each call is a fresh logon session, so two tokens
+-- for one rid are one user in two sessions), and a reader that stops
+-- reading.
+local rq = eventd.rq
 
 -- ---------------------------------------------------------------------------
 -- Local helpers

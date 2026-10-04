@@ -22,10 +22,6 @@ peinit.claim(1, { cpus = 2 })
 -- is what gives this VM two.
 local vm = eventd.boot({ name = "ev-order", cpus = 2 })
 
-local function now_ns()
-    return math.tointeger(tonumber(vm:run("date +%s%N").stdout:match("%d+")))
-end
-
 --- Emit from a worker pinned to `cpu`. A worker serves its syscalls on
 --- one thread, so the affinity set by one call holds for the next.
 local function pinned_emit(cpu, etype, payload)
@@ -79,7 +75,7 @@ test("records equal in every visible key still come back in one order, and page 
     spec = "eventd *order.internal-tiebreaker-keys-are-appended-until-the-order-is-total",
 }, function(t)
     local o = eventd.marker("tie")
-    local ts = now_ns() - 60 * 1000000000
+    local ts = eventd.guest_ns(vm) - 60 * 1000000000
     -- Six lines identical in timestamp, error flag and text: only their
     -- insertion order tells them apart.
     for i = 1, 6 do
@@ -148,7 +144,7 @@ test("log records tied on the SORT keys come newest first, then by row id descen
     tags = { "known-bug" },
 }, function(t)
     local o = eventd.marker("logtie")
-    local ts = now_ns() - 60 * 1000000000
+    local ts = eventd.guest_ns(vm) - 60 * 1000000000
     -- The newer line is inserted first, so row id and time disagree.
     logs({ origin = o, is_error = false, message = "newer", timestamp = ts + 2000000000 })
     eventd.wait_rows(vm, "LOGS FROM " .. o, function(rs) return #rs == 1 end)
@@ -169,7 +165,7 @@ test("samples tied on timestamp and name are ordered by canonical labels before 
     tags = { "known-bug" },
 }, function(t)
     local name = "pt" .. eventd.marker("mtie")
-    local ts = now_ns() - 60 * 1000000000
+    local ts = eventd.guest_ns(vm) - 60 * 1000000000
     -- k=b is written first, so its sample id is the lower one.
     metrics({ name = name, type = "gauge", value = 2, labels = { k = "b" }, timestamp = ts })
     eventd.wait_rows(vm, "METRIC " .. name .. "[] SINCE 1h ago", function(rs) return #rs == 1 end)
@@ -237,7 +233,7 @@ test("records written out of time order come back in time order", {
     spec = "eventd *order.row-ids-only-break-ties-and-never-replace-timestamp-order",
 }, function(t)
     local o = eventd.marker("late")
-    local ts = now_ns() - 60 * 1000000000
+    local ts = eventd.guest_ns(vm) - 60 * 1000000000
     for _, rec in ipairs({ { "third", 3 }, { "first", 1 }, { "second", 2 } }) do
         logs({ origin = o, is_error = false, message = rec[1], timestamp = ts + rec[2] * 1000000000 })
         os.execute("sleep 0.3")
@@ -264,7 +260,7 @@ test("a late sample lands where its timestamp says in DELTA's pairs and in a win
     spec = "eventd *order.metric-computations-order-samples-by-timestamp-then-id-ascending",
 }, function(t)
     local name = "pt" .. eventd.marker("calc")
-    local ts = now_ns() - 120 * 1000000000
+    local ts = eventd.guest_ns(vm) - 120 * 1000000000
     -- Counter values 10, 20, 40 at t+1, t+2, t+3, written t+3 first.
     for _, rec in ipairs({ { 40, 3 }, { 10, 1 }, { 20, 2 } }) do
         metrics({ name = name, type = "counter", value = rec[1], timestamp = ts + rec[2] * 1000000000 })
