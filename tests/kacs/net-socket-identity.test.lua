@@ -187,7 +187,7 @@ test("a socket that never passed through the hooks reads as unstamped",
 test("the engine reads the stamp through pkm_kacs_socket_owner with a counted reference",
     { spec = "PKM *net.socket.owner-accessor",
       covered_by = "kunit:pkm_kunit_token",
-      skip = "pkm_kacs_socket_owner() and its _put() are a <linux/peios_pnp.h> " ..
+      skip = "pkm_kacs_socket_owner() and its _put() are a <linux/peios_ntfe.h> " ..
              "kernel API with no syscall surface; runs under " ..
              "pkm_kunit_socket_owner_query_is_a_counted_reference" },
     function(t) end)
