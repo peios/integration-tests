@@ -4,7 +4,7 @@
 -- answered, a refusal it waved through, a generation it refused, an
 -- event it could not keep. Each is provoked here and found where the
 -- list says; the two with no guest route are stubs naming the unit
--- test they need.
+-- test that runs them.
 --
 -- The last test reads the status the earlier ones left behind, so this
 -- file runs top to bottom.
@@ -53,14 +53,15 @@ test("a REJECT it could not send is counted in reject_degraded and flagged on it
 
 test("an evaluation it could not finish is counted in fail_closed and has an event",
     { spec = "PKM *ntfe-stream.confess-fail-closed",
-      covered_by = "kunit:TODO",
+      covered_by = "kunit:pkm_kunit_ntfe",
       skip = "evaluation fails only when a GFP_ATOMIC allocation is refused " ..
              "mid-walk (ntfe_rust_evaluate's -ENOMEM paths); this kernel has " ..
-             "no fault injection (CONFIG_FAULT_INJECTION is off) and no other " ..
-             "error return reaches the seats, so the guest cannot cause one. " ..
-             "Missing: a kunit case that fails the walk's allocation and " ..
-             "asserts the drop, fail_closed, and the `fail-closed` event with " ..
-             "the FAIL_CLOSED flag" },
+             "no fault injection (CONFIG_FAULT_INJECTION is off), so the guest " ..
+             "cannot cause one; runs under ntfe_kunit_eval_failure_fails_closed, " ..
+             "which forces peios_ntfe_policy_eval to answer -ENOMEM through a " ..
+             "KUnit-only seam and asserts the drop, fail_closed, and the " ..
+             "`fail-closed` event with the FAIL_CLOSED flag (the Rust " ..
+             "allocator's own refusal is not exercised)" },
     function(t) end)
 
 test("a frame it could not describe is counted in parse_errors",
@@ -148,14 +149,15 @@ test("a count it could not land is counted in count_key_absent or count_refused"
 
 test("an endpoint it could not attribute is counted in identity_unresolved and flagged on its event",
     { spec = "PKM *ntfe-stream.confess-identity-unresolved",
-      covered_by = "kunit:TODO",
+      covered_by = "kunit:pkm_kunit_ntfe",
       skip = "every guest task has a token, so every inet socket is stamped " ..
              "(kacs/socket.c pkm_kacs_socket_stamp_owner), and the inbound " ..
              "seat reads a loopback sender from the flow's extension, missing " ..
              "only on an allocation failure; no route leaves an endpoint " ..
-             "unattributed. ntfe_kunit_identity_facts asserts unresolved == 0 " ..
-             "only. Missing: a kunit case with an unstamped socket asserting " ..
-             "identity_unresolved and PEIOS_NTFE_EV_F_IDENTITY_UNRESOLVED" },
+             "unattributed; runs under ntfe_kunit_identity_unresolved: an " ..
+             "unstamped socket resolves as KERNEL + unresolved, counted in " ..
+             "identity_unresolved and flagged " ..
+             "PEIOS_NTFE_EV_F_IDENTITY_UNRESOLVED on its event" },
     function(t) end)
 
 test("a packet a current sentence answered is counted in flow_cached instead of judged",

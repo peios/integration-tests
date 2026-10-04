@@ -401,13 +401,13 @@ test("with no socket, an end is kernel when the stack handles the protocol and n
 
 test("SCTP reads kernel while its module is loaded",
     { spec = "PKM *ntfe-identity.sctp-reads-kernel",
-      covered_by = "kunit:TODO",
+      covered_by = "kunit:pkm_kunit_ntfe",
       skip = "the guest cannot load SCTP: CONFIG_IP_SCTP is a module and the " ..
              "kernel-only fixtures carry no sctp.ko, so no handler is ever " ..
              "registered for protocol 132 here (it reads `none`, by the same " ..
-             "rule). Missing: a pkm_kunit_ntfe case that registers an " ..
-             "inet_protos handler for an otherwise unhandled protocol (or " ..
-             "loads sctp) and checks a socketless packet of it resolves to " ..
+             "rule); runs under ntfe_kunit_identity_handler_reads_kernel, " ..
+             "which shows the rule with protocol 253 rather than SCTP itself: " ..
+             "with an inet_protos handler registered and no socket it reads " ..
              "PEIOS_NTFE_LOCAL_KERNEL, then `none` once it is unregistered" },
     function(t) end)
 

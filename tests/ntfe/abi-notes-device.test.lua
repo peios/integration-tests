@@ -253,13 +253,13 @@ test("a read into an unmapped buffer is EFAULT",
     end)
 
 test("a read that cannot allocate its batch is ENOMEM",
-    { spec = "PKM *ntfe-abi-notes.read-enomem", covered_by = "kunit:TODO",
+    { spec = "PKM *ntfe-abi-notes.read-enomem", covered_by = "kunit:pkm_kunit_ntfe",
       skip = "the batch is one GFP_KERNEL allocation of at most 64 records, which " ..
              "fails only under memory exhaustion; the kernel under test has no " ..
              "fault injection (CONFIG_FAULT_INJECTION is not set), so no guest " ..
-             "action makes it fail. No pkm_kunit_ntfe case covers it: wanted, a " ..
-             "case that fails the read's batch allocation and expects -ENOMEM " ..
-             "with the ring untouched" },
+             "action makes it fail; runs under " ..
+             "ntfe_kunit_device_allocation_enomem, which refuses the batch " ..
+             "through a KUnit-only seam and gets -ENOMEM with the ring untouched" },
     function(t) end)
 
 -- ---- poll() ----
@@ -342,12 +342,12 @@ test("the counters dump faults on a query or a buffer nobody mapped",
     end)
 
 test("the counters dump is ENOMEM when its record cannot be allocated",
-    { spec = "PKM *ntfe-abi-notes.counters-ioctl-enomem", covered_by = "kunit:TODO",
+    { spec = "PKM *ntfe-abi-notes.counters-ioctl-enomem", covered_by = "kunit:pkm_kunit_ntfe",
       skip = "the dump's one record is a GFP_KERNEL allocation that fails only " ..
              "under memory exhaustion; the kernel under test has no fault " ..
-             "injection (CONFIG_FAULT_INJECTION is not set). No pkm_kunit_ntfe " ..
-             "case covers it: wanted, a case failing that allocation and " ..
-             "expecting -ENOMEM" },
+             "injection (CONFIG_FAULT_INJECTION is not set); runs under " ..
+             "ntfe_kunit_device_allocation_enomem, which refuses that " ..
+             "allocation through a KUnit-only seam and gets -ENOMEM" },
     function(t) end)
 
 test("the flows dump writes what fits and says how many live flows it saw",
@@ -378,12 +378,12 @@ test("the flows dump faults on a query or a buffer nobody mapped",
     end)
 
 test("the flows dump is ENOMEM when its batch cannot be allocated",
-    { spec = "PKM *ntfe-abi-notes.flows-ioctl-enomem", covered_by = "kunit:TODO",
+    { spec = "PKM *ntfe-abi-notes.flows-ioctl-enomem", covered_by = "kunit:pkm_kunit_ntfe",
       skip = "the batch is one GFP_KERNEL allocation of 32 records, which fails " ..
              "only under memory exhaustion; the kernel under test has no fault " ..
-             "injection (CONFIG_FAULT_INJECTION is not set). No pkm_kunit_ntfe " ..
-             "case covers it: wanted, a case failing that allocation and " ..
-             "expecting -ENOMEM" },
+             "injection (CONFIG_FAULT_INJECTION is not set); runs under " ..
+             "ntfe_kunit_device_allocation_enomem, which refuses that " ..
+             "allocation through a KUnit-only seam and gets -ENOMEM" },
     function(t) end)
 
 test("the listeners dump faults on a query or a buffer nobody mapped",
@@ -398,12 +398,12 @@ test("the listeners dump faults on a query or a buffer nobody mapped",
     end)
 
 test("the listeners dump is ENOMEM when its batch cannot be allocated",
-    { spec = "PKM *ntfe-abi-notes.listeners-ioctl-enomem", covered_by = "kunit:TODO",
+    { spec = "PKM *ntfe-abi-notes.listeners-ioctl-enomem", covered_by = "kunit:pkm_kunit_ntfe",
       skip = "the batch is one GFP_KERNEL allocation of 32 records, which fails " ..
              "only under memory exhaustion; the kernel under test has no fault " ..
-             "injection (CONFIG_FAULT_INJECTION is not set). No pkm_kunit_ntfe " ..
-             "case covers it: wanted, a case failing that allocation and " ..
-             "expecting -ENOMEM" },
+             "injection (CONFIG_FAULT_INJECTION is not set); runs under " ..
+             "ntfe_kunit_device_allocation_enomem, which refuses that " ..
+             "allocation through a KUnit-only seam and gets -ENOMEM" },
     function(t) end)
 
 test("any other ioctl is ENOTTY",

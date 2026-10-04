@@ -97,13 +97,12 @@ test("a packet answered by its flow's cached sentence emits nothing",
 
 test("the viewer hides events about its own TCP port, and counts them",
     { spec = "PKM *ntfe-stream.viewer-hides-own-port-events",
-      covered_by = "cargo:TODO pnp/pnpd",
+      covered_by = "cargo:pnpd engine::tests::own_port_verdicts_are_hidden_and_counted",
       skip = "a statement about pnpd, the userspace viewer, which the " ..
              "kernel-only profile does not run; the kernel's stream carries " ..
              "every event, its own port's included. The filter is " ..
-             "pnp/pnpd/src/engine.rs Engine::push (own_hidden), which has no " ..
-             "test. Missing: a pnpd unit test pushing TCP events on and off " ..
-             "own_port and asserting what is kept and own_verdicts_hidden" },
+             "pnp/pnpd/src/engine.rs Engine::push (own_hidden); runs under " ..
+             "engine::tests::own_port_verdicts_are_hidden_and_counted" },
     function(t) end)
 
 -- ---- what an event says ----------------------------------------------

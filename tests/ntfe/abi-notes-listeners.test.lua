@@ -198,14 +198,13 @@ test("the owner fields are the socket's current stamp, as a flow's slot would ca
     end)
 
 test("a socket nobody stamped reads KERNEL with `owner_unresolved` set",
-    { spec = "PKM *ntfe-abi-notes.listener-rec-owner-current-stamp", covered_by = "kunit:TODO",
+    { spec = "PKM *ntfe-abi-notes.listener-rec-owner-current-stamp", covered_by = "kunit:pkm_kunit_ntfe",
       skip = "KACS leaves an inet socket unstamped only when the task that made " ..
              "it has no token (pkm_kacs_socket_stamp_owner); every guest process " ..
              "carries one and kernel sockets are stamped KERNEL, so no guest " ..
-             "socket is unstamped. No pkm_kunit_ntfe case covers the listener " ..
-             "mapping: wanted, a case filling a listener record from a socket " ..
-             "with owner kind UNSTAMPED and expecting owner_kind KERNEL with " ..
-             "owner_unresolved 1" },
+             "socket is unstamped; runs under ntfe_kunit_identity_unresolved, " ..
+             "whose never-stamped socket's listener record reads owner_kind " ..
+             "KERNEL with owner_unresolved set" },
     function(t) end)
 
 test("the walk is of the root namespace's tables only",

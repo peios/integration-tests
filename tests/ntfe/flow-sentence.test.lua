@@ -301,28 +301,30 @@ test("a flow with no extension has nowhere to hold a sentence and is evaluated o
 -- guest can arrange on demand.
 test("a sentence write zeroes the generation, writes the fields, and publishes the generation last",
     { spec = "PKM *ntfe-flow.sentence-write-publishes-generation-last",
-      covered_by = "kunit:TODO",
+      covered_by = "kunit:pkm_kunit_ntfe",
       skip = "the write's ordering is visible only to a reader racing it on another CPU, " ..
-             "which no guest traffic can schedule; wanted: a KUnit case in pkm/ntfe/kunit.c " ..
-             "that writes a sentence through peios_ntfe_flow_dispatch and checks that a " ..
-             "slot read mid-write (generation zeroed, fields set) is not applied" },
+             "which no guest traffic can schedule; runs under " ..
+             "ntfe_kunit_sentence_concurrency, which checks that a slot read mid-write " ..
+             "(generation zeroed, fields set) is not applied and the flow is evaluated" },
     function(t) end)
 
 test("a torn sentence reads as absent and the flow is simply evaluated",
     { spec = "PKM *ntfe-flow.torn-sentence-reads-absent",
-      covered_by = "kunit:TODO",
+      covered_by = "kunit:pkm_kunit_ntfe",
       skip = "a torn read needs a writer between the reader's two loads of the generation, " ..
-             "which no guest traffic can arrange; wanted: a KUnit case that sets a slot's " ..
-             "fields with generation 0 (and one whose generation changes between reads) and " ..
-             "checks the dispatch evaluates the forest (flow_judged moves, flow_cached does not)" },
+             "which no guest traffic can arrange; runs under " ..
+             "ntfe_kunit_sentence_concurrency, which exercises the generation-zero form " ..
+             "only (a slot with fields set and generation 0 is not applied, and the flow " ..
+             "is evaluated); a write landing between the reader's two loads needs a " ..
+             "second CPU at a precise instant and is covered by no test" },
     function(t) end)
 
 test("two packets of a new flow racing on two CPUs may both evaluate; the second write wins",
     { spec = "PKM *ntfe-flow.first-packet-race-second-write-wins",
-      covered_by = "kunit:TODO",
+      covered_by = "kunit:pkm_kunit_ntfe",
       skip = "the race needs a flow's first two packets in the hook concurrently on two CPUs, " ..
-             "which the guest cannot schedule deterministically; wanted: a KUnit case that " ..
-             "dispatches the same new flow twice with no sentence between the evaluations " ..
-             "(two snapshots, one ct) and checks both evaluated (effects counted twice) and " ..
-             "the slot holds the second outcome" },
+             "which the guest cannot schedule deterministically; runs under " ..
+             "ntfe_kunit_sentence_concurrency, which runs two first-packet evaluations of " ..
+             "one flow and checks both ran their effects and the slot holds the second " ..
+             "outcome" },
     function(t) end)

@@ -115,13 +115,14 @@ test("`backstop` is the attribution when nothing yielded a verdict",
     end)
 
 test("`fail-closed` is the attribution when evaluation failed",
-    { spec = "PKM *ntfe-abi-notes.event-attributed-reserved-values", covered_by = "kunit:TODO",
+    { spec = "PKM *ntfe-abi-notes.event-attributed-reserved-values", covered_by = "kunit:pkm_kunit_ntfe",
       skip = "evaluation fails only when an atomic allocation fails mid-walk " ..
              "(ntfe_rust_evaluate's -ENOMEM); the kernel under test has no fault " ..
-             "injection, so no guest packet makes it fail. No pkm_kunit_ntfe case " ..
-             "covers it: wanted, a case failing the evaluation's allocation and " ..
-             "expecting a DROP event with FAIL_CLOSED set and `attributed` " ..
-             "\"fail-closed\"" },
+             "injection, so no guest packet makes it fail; runs under " ..
+             "ntfe_kunit_eval_failure_fails_closed, which forces " ..
+             "peios_ntfe_policy_eval to answer -ENOMEM through a KUnit-only seam " ..
+             "and expects a DROP event with FAIL_CLOSED set and `attributed` " ..
+             "\"fail-closed\" (the Rust allocator's own refusal is not exercised)" },
     function(t) end)
 
 -- ---- effects ----

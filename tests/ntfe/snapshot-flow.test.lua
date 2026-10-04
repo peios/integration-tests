@@ -204,14 +204,14 @@ test("tags are written to and read from the flow's extension, and the Flow verdi
 
 test("the flow pointer stays valid for the hook because the skb holds the entry",
     { spec = "PKM *ntfe-snapshot.flow-pointer-valid-for-hook",
-      covered_by = "kunit:TODO",
+      covered_by = "kunit:pkm_kunit_ntfe",
       skip = "a lifetime argument: the guest cannot make an entry die while a hook " ..
              "holds its skb (no ctnetlink or other way to delete an entry in " ..
              "the kernel-only profile, and a correct kernel shows nothing either " ..
-             "way); wanted: a KUnit case that builds a snapshot from an skb holding " ..
-             "an entry, drops every other reference (nf_ct_delete), evaluates a " ..
-             "forest that reads and writes tags, and checks the entry is freed only " ..
-             "after the skb is" },
+             "way); runs under ntfe_kunit_flow_pointer_held_by_skb, which drops " ..
+             "every reference but the skb's, evaluates a forest that writes and " ..
+             "reads a tag through the snapshot's flow pointer, and checks the " ..
+             "entry is freed only with the skb" },
     function(t) end)
 
 test("`Related` is whether the flow was expected by another, not whether the packet is related",

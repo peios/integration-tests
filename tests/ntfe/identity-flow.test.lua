@@ -333,13 +333,11 @@ test("the flow holds a counted reference to each end's token and lets it go when
 
 test("of two CPUs racing to resolve a new flow, the first record stands and the loser lets go",
     { spec = "PKM *ntfe-identity.resolve-race-first-record-stands",
-      covered_by = "kunit:TODO",
+      covered_by = "kunit:pkm_kunit_ntfe",
       skip = "two CPUs reaching ntfe_flow_identity() for one flow's first " ..
              "packets at once cannot be arranged from the guest, and the " ..
              "outcome (one record, one reference) is identical to the " ..
-             "uncontended case. Missing: a pkm_kunit_ntfe case that records " ..
-             "an identity on a conntrack extension, then resolves the same " ..
-             "slot again through the losing branch, and checks the first " ..
-             "record stands and the second owner's token reference is " ..
-             "dropped (the token's refcount returns to its prior value)" },
+             "uncontended case; runs under ntfe_kunit_identity_resolve_race, " ..
+             "which checks the first record stands. The loser's reference " ..
+             "release is not asserted: KACS exposes no token reference count" },
     function(t) end)

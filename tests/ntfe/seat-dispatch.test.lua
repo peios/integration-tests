@@ -488,13 +488,14 @@ test("a frame too mangled to describe is counted and judged on its seat facts al
 
 test("an evaluation that fails drops the packet, counts fail_closed and reports it",
     { spec = "PKM *ntfe-seat.evaluation-failure-drops-counts-and-reports",
-      covered_by = "kunit:TODO",
+      covered_by = "kunit:pkm_kunit_ntfe",
       skip = "the only failure ntfe_rust_evaluate has is a refused GFP_ATOMIC " ..
              "allocation, and the kernel has no fault injection " ..
-             "(CONFIG_FAULT_INJECTION unset), so the guest cannot make one; no " ..
-             "kunit case drives judge()'s ret < 0 branch either. Missing case: " ..
-             "force the evaluation to return -ENOMEM and assert NF_DROP, " ..
-             "fail_closed +1, and an event attributed `fail-closed` with " ..
-             "PEIOS_NTFE_EV_F_FAIL_CLOSED, at a per-packet seat and in " ..
-             "peios_ntfe_flow_dispatch" },
+             "(CONFIG_FAULT_INJECTION unset), so the guest cannot make one; " ..
+             "runs under ntfe_kunit_eval_failure_fails_closed, which forces " ..
+             "peios_ntfe_policy_eval to answer -ENOMEM through a KUnit-only " ..
+             "seam and asserts NF_DROP, fail_closed +1, and an event " ..
+             "attributed `fail-closed` with PEIOS_NTFE_EV_F_FAIL_CLOSED, at a " ..
+             "per-packet seat and in peios_ntfe_flow_dispatch (which writes no " ..
+             "sentence); the Rust allocator's own refusal is not exercised" },
     function(t) end)

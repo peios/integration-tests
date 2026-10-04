@@ -250,11 +250,14 @@ test("every allocation in the lift and the evaluation is GFP_ATOMIC",
 
 test("an allocation failure in the evaluation fails the hook closed",
     { spec = "PKM *ntfe-eval.allocation-failure-fails-closed",
-      covered_by = "kunit:TODO",
+      covered_by = "kunit:pkm_kunit_ntfe",
       skip = "a guest cannot make a GFP_ATOMIC allocation fail: the kernel is built " ..
-             "without CONFIG_FAULT_INJECTION. Wanted: a pkm_kunit_ntfe case that makes " ..
-             "ntfe_rust_evaluate() return -ENOMEM for one packet and asserts NF_DROP, " ..
-             "fail_closed +1, and an event attributed `fail-closed` with FAIL_CLOSED set" },
+             "without CONFIG_FAULT_INJECTION; runs under " ..
+             "ntfe_kunit_eval_failure_fails_closed, which forces " ..
+             "peios_ntfe_policy_eval to answer -ENOMEM through a KUnit-only seam " ..
+             "and asserts NF_DROP, fail_closed +1, and an event attributed " ..
+             "`fail-closed` with FAIL_CLOSED set (the Rust allocator's own refusal " ..
+             "is not exercised)" },
     function(t) end)
 
 test("the store calls never sleep",

@@ -328,15 +328,16 @@ test("the refusal counters count answers sent, own answers waved through, and fa
 
 test("identity_unresolved counts endpoints that could not be attributed",
     { spec = "PKM *ntfe-stream.counters-identity",
-      covered_by = "kunit:TODO",
+      covered_by = "kunit:pkm_kunit_ntfe",
       skip = "no guest route makes an endpoint unattributable: every task the " ..
              "agent can run has a token, so every inet socket is stamped " ..
              "(kacs/socket.c), and the inbound seat reads a loopback sender " ..
              "from the flow's extension, which only an atomic allocation " ..
-             "failure leaves missing (no fault injection in this kernel). " ..
-             "Missing: a kunit case resolving an unstamped socket and an " ..
-             "extension-less loopback flow, asserting the counter, the event " ..
-             "flag and the record's slot flag" },
+             "failure leaves missing (no fault injection in this kernel); " ..
+             "runs under ntfe_kunit_identity_unresolved, which resolves an " ..
+             "unstamped socket (KERNEL + unresolved) and an extension-less " ..
+             "loopback flow's remote end (ABSENT + unresolved) and asserts " ..
+             "identity_unresolved and the event flag" },
     function(t) end)
 
 -- ---- the invariants ------------------------------------------------------
