@@ -162,26 +162,6 @@ local function user_query(w, text)
     return out
 end
 
-local function hex(bytes)
-    return (bytes:gsub(".", function(c) return string.format("%02x", c:byte()) end))
-end
-
-local function unhex(s)
-    return (s:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end))
-end
-
---- A descriptor's bytes, from a key's default value.
-local function read_descriptor(key)
-    local r = vm:run("reg get '" .. key .. "'")
-    local h = r.stdout:match("%(default%) = REG_BINARY (%x+)")
-    return h and unhex(h), r.stdout .. r.stderr
-end
-
-local function write_descriptor(key, sd)
-    vm:run("reg new '" .. key .. "'")
-    return eventd.set(vm, "@", "hex:" .. hex(sd), { key = key })
-end
-
 -- ---------------------------------------------------------------------------
 -- Where the keys live, and what eventd does with keys and values it cannot use
 -- ---------------------------------------------------------------------------
@@ -588,7 +568,7 @@ test("read-path descriptors are the default values of keys under Machine\\System
     spec = "eventd *config.read-path-descriptors-live-under-the-security-subtree",
 }, function(t)
     for _, sub in ipairs({ [[Events\*]], [[Logs\*]], [[Metrics\*]], [[Admin]] }) do
-        local sd, raw = read_descriptor(eventd.SECURITY .. "\\" .. sub)
+        local sd, raw = eventd.read_descriptor(vm, eventd.SECURITY .. "\\" .. sub)
         t:assert(sd and access.parse_sd(sd), "Security\\" .. sub .. " holds a descriptor: " .. raw)
     end
     -- A pattern key of its own governs reads of the origin it names.
@@ -599,7 +579,7 @@ test("read-path descriptors are the default values of keys under Machine\\System
     local seen_default, seen_guarded, seen_after
     token.as_principal(t, vm, reader(), function(w)
         seen_default = #user_query(w, "LOGS FROM " .. origin .. " SINCE 10m ago").rows
-        write_descriptor(key, access.simple({
+        eventd.write_descriptor(vm, key, access.simple({
             access.ace(access.ACE.ALLOWED, 0x1, token.SID.LOCAL_SYSTEM) })):assert_ok()
         local ok = pcall(wait_until, function()
             return #user_query(w, "LOGS FROM " .. origin .. " SINCE 10m ago").rows == 0
@@ -628,13 +608,13 @@ test("a descriptor change is in force for the next query, without a restart", {
     local before, denied, granted
     token.as_principal(t, vm, reader(), function(w)
         before = #user_query(w, "EVENTS " .. etype .. " SINCE 10m ago").rows
-        write_descriptor(key, access.simple({
+        eventd.write_descriptor(vm, key, access.simple({
             access.ace(access.ACE.ALLOWED, 0x1, token.SID.LOCAL_SYSTEM) })):assert_ok()
         -- "the next query": allow only the registry watch's own latency.
         denied = pcall(wait_until, function()
             return #user_query(w, "EVENTS " .. etype .. " SINCE 10m ago").rows == 0
         end, { timeout = 3, interval = 0.1 })
-        write_descriptor(key, access.simple({
+        eventd.write_descriptor(vm, key, access.simple({
             access.ace(access.ACE.ALLOWED, 0x1, token.SID.LOCAL_SYSTEM),
             access.ace(access.ACE.ALLOWED, 0x1, token.SID.TEST_USER) })):assert_ok()
         granted = pcall(wait_until, function()
@@ -652,7 +632,7 @@ test("Security\\Admin governs INDEX and grants it to SYSTEM and Administrators b
     spec = "eventd *config.security-admin-governs-eventd-administer-and-defaults-to-system-and-administrators",
 }, function(t)
     local key = eventd.SECURITY .. [[\Admin]]
-    local original = read_descriptor(key)
+    local original = eventd.read_descriptor(vm, key)
     local sd = access.parse_sd(original)
     local grants = {}
     for _, ace in ipairs(sd.dacl.aces) do
@@ -668,7 +648,7 @@ test("Security\\Admin governs INDEX and grants it to SYSTEM and Administrators b
     token.as_principal(t, vm, reader(), function(w)
         admin_ok = user_query(w, "EVENTS INDEX " .. eventd.marker("f")).ok
         -- The same Administrator, once Admin grants the right to SYSTEM only.
-        write_descriptor(key, access.simple({
+        eventd.write_descriptor(vm, key, access.simple({
             access.ace(access.ACE.ALLOWED, 0x4, token.SID.LOCAL_SYSTEM) })):assert_ok()
         pcall(wait_until, function()
             return not user_query(w, "EVENTS INDEX " .. eventd.marker("f")).ok
@@ -676,7 +656,7 @@ test("Security\\Admin governs INDEX and grants it to SYSTEM and Administrators b
         local r = user_query(w, "EVENTS INDEX " .. eventd.marker("f"))
         after_ok, after_msg = r.ok, tostring(r.stderr)
     end)
-    write_descriptor(key, original):assert_ok()
+    eventd.write_descriptor(vm, key, original):assert_ok()
     t:assert(admin_ok, "an Administrator may INDEX under the default")
     t:assert(not after_ok, "and may not once Security\\Admin stops granting it: " .. after_msg)
     t:assert(after_msg:find("EVENTD_ADMINISTER", 1, true), "refused for EVENTD_ADMINISTER: " .. after_msg)
@@ -685,7 +665,7 @@ end)
 test("the Admin descriptor is registry policy; eventd-meta.db holds no descriptor", {
     spec = "eventd *config.the-admin-descriptor-is-registry-policy-not-metadata-database-data",
 }, function(t)
-    local admin = read_descriptor(eventd.SECURITY .. [[\Admin]])
+    local admin = eventd.read_descriptor(vm, eventd.SECURITY .. [[\Admin]])
     local tables = eventd.sql(vm, eventd.DB.meta,
         "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
     local names = {}
@@ -694,7 +674,7 @@ test("the Admin descriptor is registry policy; eventd-meta.db holds no descripto
         local cols = eventd.sql(vm, eventd.DB.meta, "SELECT * FROM " .. name)
         for _, row in ipairs(cols) do
             for _, v in ipairs(row) do
-                t:assert(not tostring(v):lower():find(hex(admin), 1, true),
+                t:assert(not tostring(v):lower():find(eventd.hex(admin), 1, true),
                     "no row of " .. name .. " carries the Admin descriptor")
             end
         end

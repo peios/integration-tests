@@ -18,29 +18,8 @@ peinit.claim(1)
 
 local vm = eventd.boot({ name = "ev-const-fields" })
 
-local NAMESPACE = "e7d3a1b0-5c2f-4e8a-9b1d-0a6f3c8e2d4b"
 local A = access.ACE
 local SY, USER = token.SID.LOCAL_SYSTEM, token.SID.TEST_USER
-
-local function unhex(s)
-    return (s:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end))
-end
-local function hex(b)
-    return (b:gsub(".", function(c) return string.format("%02x", c:byte()) end))
-end
-
-local function field_guid(name)
-    local p = assert(io.popen("python3 -c 'import uuid; print(uuid.uuid5(uuid.UUID(\"" .. NAMESPACE ..
-        "\"), \"" .. name .. "\").bytes_le.hex())'", "r"))
-    local out = p:read("a")
-    p:close()
-    return unhex((out:gsub("%s+$", "")))
-end
-
-local function write_descriptor(key, bytes)
-    vm:run("reg new '" .. key .. "'")
-    eventd.set(vm, "@", "hex:" .. hex(bytes), { key = key }):assert_ok()
-end
 
 local NOTIFY = token.bit(token.PRIV.CHANGE_NOTIFY)
 local ENABLED = token.GROUP.MANDATORY | token.GROUP.ENABLED_BY_DEFAULT | token.GROUP.ENABLED
@@ -58,9 +37,9 @@ end
 --- Whether TEST_USER still sees `field` of the one record `query` returns
 --- once the descriptor at `key` grants the record and denies `guid`.
 local function user_sees_field(t, key, query, field, guid)
-    write_descriptor(key, access.simple({
+    eventd.write_descriptor(vm, key, access.simple({
         access.ace(A.DENIED_OBJECT, 0x1, USER, 0, { object_type = guid }),
-        access.ace(A.ALLOWED, 0x9, SY), access.ace(A.ALLOWED, 0x1, USER) }))
+        access.ace(A.ALLOWED, 0x9, SY), access.ace(A.ALLOWED, 0x1, USER) })):assert_ok()
     vm:run("sleep 0.5")
     local row
     token.as_principal(t, vm, reader(), function(w)
@@ -131,9 +110,9 @@ test("a payload field's name is its flattened dot path", {
         "and the query language names it so")
     local q = "EVENTS " .. etype .. " SINCE 10m ago"
     local key = eventd.SECURITY .. [[\Events\]] .. etype
-    local seen = user_sees_field(t, key, q, "outer.inner", field_guid("outer.inner"))
+    local seen = user_sees_field(t, key, q, "outer.inner", eventd.field_guid("outer.inner"))
     t:assert(not seen, "a deny on uuid_v5(ns, \"outer.inner\") governs it")
-    local seen2 = user_sees_field(t, key, q, "outer.inner", field_guid("inner"))
+    local seen2 = user_sees_field(t, key, q, "outer.inner", eventd.field_guid("inner"))
     t:assert(seen2, "one on uuid_v5(ns, \"inner\") does not")
 end)
 
@@ -153,9 +132,9 @@ test("a payload path that is suppressed, or collides with a header, is not a fie
     -- those paths have nothing to act on, and the record is untouched.
     local q = "EVENTS " .. etype .. " SINCE 10m ago"
     local key = eventd.SECURITY .. [[\Events\]] .. etype
-    t:assert(user_sees_field(t, key, q, "kept", field_guid("bad.key")),
+    t:assert(user_sees_field(t, key, q, "kept", eventd.field_guid("bad.key")),
         "a deny on uuid_v5(ns, \"bad.key\") leaves the record as it was")
-    t:assert(user_sees_field(t, key, q, "kept", field_guid("process_guid.inner")),
+    t:assert(user_sees_field(t, key, q, "kept", eventd.field_guid("process_guid.inner")),
         "and so does one on uuid_v5(ns, \"process_guid.inner\")")
 end)
 
@@ -168,8 +147,8 @@ test("a metric label's field name is the label key itself", {
     t:assert_eq(rows[1].core, "3", "the label is the field core: " .. json.encode(rows[1]))
     local key = eventd.SECURITY .. [[\Metrics\]] .. name
     local q = "METRIC " .. name .. " SINCE 10m ago"
-    t:assert(not user_sees_field(t, key, q, "core", field_guid("core")), "uuid_v5(ns, \"core\") governs it")
-    t:assert(user_sees_field(t, key, q, "core", field_guid("labels.core")), "uuid_v5(ns, \"labels.core\") does not")
+    t:assert(not user_sees_field(t, key, q, "core", eventd.field_guid("core")), "uuid_v5(ns, \"core\") governs it")
+    t:assert(user_sees_field(t, key, q, "core", eventd.field_guid("labels.core")), "uuid_v5(ns, \"labels.core\") does not")
 end)
 
 test("a metric whose label collides with a fixed field name is rejected", {

@@ -72,15 +72,12 @@ local function sql(db, query)
     error(last, 0)
 end
 
-local function freeze() vm:run("kill -STOP " .. eventd.pid(vm)):assert_ok() end
-local function thaw() vm:run("kill -CONT " .. eventd.pid(vm)):assert_ok() end
-
 --- A flood emitted while eventd is stopped, so the writer meets it as one
 --- backlog. Returns the first and last sequence once all are stored.
 local function backlog(event_type, n)
-    freeze()
+    eventd.freeze(vm)
     local ok, err = pcall(emit0, event_type, n)
-    thaw()
+    eventd.thaw(vm)
     if not ok then error(err, 0) end
     local r
     wait_until(function()
@@ -124,23 +121,6 @@ local function config_change(key, new_value)
     return found
 end
 
-local function threads()
-    local pid = assert(eventd.pid(vm), "eventd is running")
-    local out = {}
-    local r = vm:run("for d in /proc/" .. pid .. "/task/*; do echo ${d##*/} $(cat $d/comm); done")
-    for tid, comm in r.stdout:gmatch("(%d+) (%S+)") do
-        out[#out + 1] = { tid = tonumber(tid), comm = comm }
-    end
-    return out, pid
-end
-
-local function set_policy(tid, policy, priority)
-    local r = vm:syscall(144, {
-        args = { tid, policy, 0 }, bufs = { string.pack("<i4", priority or 0) }, ptrs = { 2 },
-    })
-    assert(r.ret == 0, "sched_setscheduler: errno " .. tostring(r.errno))
-end
-
 --- Run `fn` with shard 0's writer at SCHED_IDLE under four busy loops and
 --- the drain threads at SCHED_FIFO, so input keeps arriving while the
 --- writer barely runs. Writers are spawned in shard order, so the lowest
@@ -152,7 +132,7 @@ end
 --- needs.
 local function starved(fn, niced)
     local writers, drains = {}, {}
-    for _, th in ipairs(threads()) do
+    for _, th in ipairs(eventd.threads(vm)) do
         if th.comm:find("^eventd%-writer") then writers[#writers + 1] = th.tid end
         if th.comm:find("^eventd%-drain") then drains[#drains + 1] = th.tid end
     end
@@ -163,9 +143,9 @@ local function starved(fn, niced)
             -- setpriority(PRIO_PROCESS, tid, 19)
             assert(vm:syscall(141, 0, writers[1], 19).ret == 0, "setpriority on the writer")
         else
-            set_policy(writers[1], 5)
+            eventd.set_policy(vm, writers[1], 5)
         end
-        for _, d in ipairs(drains) do set_policy(d, 1, 1) end
+        for _, d in ipairs(drains) do eventd.set_policy(vm, d, 1, 1) end
         for _ = 1, (niced and 2 or 4) do
             local r = vm:run("sh -c 'while :; do :; done' >/dev/null 2>&1 & echo $!")
             hogs[#hogs + 1] = r.stdout:match("(%d+)")
@@ -173,14 +153,14 @@ local function starved(fn, niced)
         fn()
     end)
     for _, h in ipairs(hogs) do vm:run("kill -9 " .. h) end
-    set_policy(writers[1], 0)
+    eventd.set_policy(vm, writers[1], 0)
     vm:syscall(141, 0, writers[1], 0)
-    for _, d in ipairs(drains) do set_policy(d, 0) end
+    for _, d in ipairs(drains) do eventd.set_policy(vm, d, 0) end
     if not ok then error(err, 0) end
 end
 
 local function writes_by_thread()
-    local ths, pid = threads()
+    local ths, pid = eventd.threads(vm)
     local out = {}
     for _, th in ipairs(ths) do
         local ok, io = pcall(vm.read_file, vm, "/proc/" .. pid .. "/task/" .. th.tid .. "/io")
@@ -189,17 +169,6 @@ local function writes_by_thread()
         end
     end
     return out
-end
-
-local function rw_fds(db)
-    local pid = eventd.pid(vm)
-    local fds = vm:run("for f in /proc/" .. pid .. "/fd/*; do echo $(readlink $f) " ..
-        "$(grep flags /proc/" .. pid .. "/fdinfo/${f##*/}); done").stdout
-    local n = 0
-    for path, flags in fds:gmatch("(%S+) flags: (%d+)") do
-        if path == db and tonumber(flags, 8) % 4 == 2 then n = n + 1 end
-    end
-    return n
 end
 
 -- ---------------------------------------------------------------------------
@@ -468,7 +437,7 @@ test("a committed event survives the writer's process being killed", {
     eventd.emit(vm, event_type, { n = 1 })
     eventd.wait_rows(vm, "EVENTS " .. event_type .. " SINCE 10m ago", function(rs) return #rs == 1 end)
     local pid = eventd.pid(vm)
-    vm:run("kill -9 " .. pid):assert_ok()
+    eventd.signal(vm, pid, "KILL")
     wait_until(function()
         local now = eventd.pid(vm)
         return now ~= nil and now ~= pid
@@ -487,9 +456,9 @@ test("a new event type is catalogued with its first event, once", {
             "SELECT count(*) FROM event_types WHERE event_type = '%s'", event_type))[1][1]
     end
     t:assert_eq(catalogued(), 0, "not catalogued before it is seen")
-    freeze()
+    eventd.freeze(vm)
     local ok, err = pcall(emit0, event_type, 1)
-    thaw()
+    eventd.thaw(vm)
     if not ok then error(err, 0) end
     wait_until(function()
         return sql(SHARD0, string.format(
@@ -564,7 +533,7 @@ test("retention reaches an active shard only through its writer, a bounded step 
         wait_until(function() return not present(head) end,
             { timeout = 120, interval = 0.2, desc = "retention to begin deleting" })
         t:assert(present(seg(8)), "retention has begun and has not reached segment 8")
-        local rw_during = rw_fds(SHARD0)
+        local rw_during = (eventd.fds_on(vm, nil, SHARD0))
 
         local during = "pt.batch." .. eventd.marker("during")
         emit0(during, 1)

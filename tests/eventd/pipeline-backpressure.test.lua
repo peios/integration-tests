@@ -29,7 +29,6 @@ peinit.claim(1)
 
 local RING = 65536
 local SCHED_OTHER, SCHED_FIFO, SCHED_IDLE = 0, 1, 5
-local NR_SCHED_SETSCHEDULER = 144
 
 local vm = eventd.boot({
     name = "ev-pipe",
@@ -44,28 +43,10 @@ local vm = eventd.boot({
 -- Local helpers
 -- ---------------------------------------------------------------------------
 
---- eventd's threads as {tid, comm} (comm is truncated to 15 bytes).
-local function threads()
-    local pid = assert(eventd.pid(vm), "eventd is running")
-    local out = {}
-    local r = vm:run("for d in /proc/" .. pid .. "/task/*; do echo ${d##*/} $(cat $d/comm); done")
-    for tid, comm in r.stdout:gmatch("(%d+) (%S+)") do
-        out[#out + 1] = { tid = tonumber(tid), comm = comm }
-    end
-    return out
-end
-
 local function thread_named(prefix)
-    for _, th in ipairs(threads()) do
+    for _, th in ipairs(eventd.threads(vm)) do
         if th.comm:sub(1, #prefix) == prefix then return th.tid end
     end
-end
-
-local function set_policy(tid, policy, priority)
-    local r = vm:syscall(NR_SCHED_SETSCHEDULER, {
-        args = { tid, policy, 0 }, bufs = { string.pack("<i4", priority or 0) }, ptrs = { 2 },
-    })
-    assert(r.ret == 0, "sched_setscheduler(" .. tid .. ", " .. policy .. "): errno " .. tostring(r.errno))
 end
 
 --- Run `fn` with the shard writer starved of CPU and the drain thread not.
@@ -78,8 +59,8 @@ end
 local function starved(fn)
     local writer = assert(thread_named("eventd-writer"), "eventd has a writer thread")
     local drain = assert(thread_named("eventd-drain-0"), "eventd has CPU 0's drain thread")
-    set_policy(writer, SCHED_IDLE)
-    set_policy(drain, SCHED_FIFO, 1)
+    eventd.set_policy(vm, writer, SCHED_IDLE)
+    eventd.set_policy(vm, drain, SCHED_FIFO, 1)
     local hogs = {}
     local ok, err = pcall(function()
         for _ = 1, 2 do
@@ -89,8 +70,8 @@ local function starved(fn)
         fn()
     end)
     for _, pid in ipairs(hogs) do vm:run("kill -9 " .. pid) end
-    set_policy(writer, SCHED_OTHER)
-    set_policy(drain, SCHED_OTHER)
+    eventd.set_policy(vm, writer, SCHED_OTHER)
+    eventd.set_policy(vm, drain, SCHED_OTHER)
     if not ok then error(err, 0) end
 end
 
@@ -209,7 +190,7 @@ test("a KMES event reaches a committed shard row through a drain thread and a wr
     spec = "eventd *pipeline.events-travel-from-the-ring-buffers-to-a-committed-row-in-four-stages",
 }, function(t)
     local names = {}
-    for _, th in ipairs(threads()) do names[th.comm] = true end
+    for _, th in ipairs(eventd.threads(vm)) do names[th.comm] = true end
     t:assert(names["eventd-drain-0"], "a drain thread reads CPU 0's ring")
     t:assert(thread_named("eventd-writer"), "and a writer thread owns the shard")
 

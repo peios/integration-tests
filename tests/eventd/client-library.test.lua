@@ -146,17 +146,12 @@ test("records are visible with EVENTD_READ on the root, or on any field alone", 
     local origin = eventd.marker("fo")
     eventd.send_log(vm, { origin = origin, is_error = false, message = "only this" })
     eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 1 end)
-    local p = assert(io.popen("python3 -c 'import uuid; print(uuid.uuid5(uuid.UUID(" ..
-        "\"e7d3a1b0-5c2f-4e8a-9b1d-0a6f3c8e2d4b\"), \"message\").bytes_le.hex())'", "r"))
-    local guid = (p:read("a"):gsub("%s+$", "")):gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end)
-    p:close()
+    local guid = eventd.field_guid("message")
     local key = eventd.SECURITY .. [[\Logs\]] .. origin
     local sd = access.simple({
         access.ace(access.ACE.ALLOWED, 0x1, token.SID.LOCAL_SYSTEM),
         access.ace(access.ACE.ALLOWED_OBJECT, 0x1, token.SID.TEST_USER, 0, { object_type = guid }) })
-    vm:run("reg new '" .. key .. "'")
-    eventd.set(vm, "@", "hex:" .. (sd:gsub(".", function(c) return string.format("%02x", c:byte()) end)),
-        { key = key }):assert_ok()
+    eventd.write_descriptor(vm, key, sd):assert_ok()
     vm:run("sleep 0.5")
     local NOTIFY = token.bit(token.PRIV.CHANGE_NOTIFY)
     local out

@@ -42,64 +42,6 @@ local function q(s) return '"' .. s .. '"' end
 -- Working on a store while eventd is down
 -- ---------------------------------------------------------------------------
 
-local function host_tmpdir()
-    local p = assert(io.popen("mktemp -d", "r"))
-    local dir = p:read("l")
-    p:close()
-    return dir
-end
-
-local function host_write(path, bytes)
-    local f = assert(io.open(path, "wb"))
-    f:write(bytes)
-    f:close()
-end
-
-local function host_read(path)
-    local f = assert(io.open(path, "rb"))
-    local s = f:read("a")
-    f:close()
-    return s
-end
-
-local function stop_eventd()
-    vm:run("svctl stop eventd"):assert_ok()
-end
-
-local function start_eventd()
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
-end
-
---- Copy guest database `from` (with its WAL) to the host, run `sql` on it,
---- fold the WAL in, and write it to guest path `to` (default `from`),
---- removing the guest's -wal and -shm. eventd must be stopped.
-local function edit_db(from, sql, to)
-    to = to or from
-    local dir = host_tmpdir()
-    host_write(dir .. "/db", vm:read_file(from))
-    local okw, wal = pcall(vm.read_file, vm, from .. "-wal")
-    if okw and wal and #wal > 0 then host_write(dir .. "/db-wal", wal) end
-    host_write(dir .. "/q.sql", sql)
-    host_write(dir .. "/run.py", [[
-import sqlite3, sys
-d = sys.argv[1]
-c = sqlite3.connect(d + "/db")
-c.executescript(open(d + "/q.sql").read())
-c.commit()
-c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-c.close()
-]])
-    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
-    local out = p:read("a")
-    local ok = p:close()
-    assert(ok, "sqlite on host failed: " .. out)
-    local bytes = host_read(dir .. "/db")
-    os.execute("rm -rf '" .. dir .. "'")
-    vm:run("rm -f '" .. to .. "-wal' '" .. to .. "-shm'")
-    vm:write_file(to, bytes)
-end
-
 local function schema_version(db)
     local rows = eventd.sql(vm, db, "SELECT value FROM metadata WHERE key = 'schema_version'")
     return rows[1] and rows[1][1]
@@ -118,7 +60,7 @@ test("synthetic.startup is written when eventd starts and attaches to KMES", {
     eventd.restart(vm)
     local rows = eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1h ago")
     t:assert_eq(#rows, before + 1, "one more startup record after a restart")
-    local fds = vm:run("ls -l /proc/" .. eventd.pid(vm) .. "/fd").stdout
+    local fds = eventd.fd_listing(vm, eventd.pid(vm))
     t:assert(fds:find("anon_inode:kmes-cpu", 1, true), "the new eventd holds a KMES buffer")
     t:assert_eq(#rows[1].resume_points, 1, "and the record names the one CPU it attached: " .. json.encode(rows[1]))
 end)
@@ -127,7 +69,7 @@ test("synthetic.shutdown is written when a graceful shutdown begins", {
     spec = "eventd *constant.synthetic-shutdown-is-emitted-when-graceful-shutdown-begins",
 }, function(t)
     local before = count("EVENTS " .. eventd.T.shutdown .. " SINCE 1h ago")
-    local stopping_at = tonumber((vm:run("date +%s%N").stdout:gsub("%s", "")))
+    local stopping_at = eventd.guest_ns(vm)
     eventd.restart(vm)
     local rows = eventd.rows(vm, "EVENTS " .. eventd.T.shutdown .. " SINCE 1h ago")
     t:assert_eq(#rows, before + 1, "svctl's graceful stop left one shutdown record")
@@ -144,11 +86,11 @@ test("synthetic.gap is written when a CPU's sequence has a gap, naming the CPU a
     -- 120 events of 60 KB. The oldest are overwritten before anyone reads
     -- them, and the restarted eventd finds the hole.
     local before = count("EVENTS " .. eventd.T.gap .. " SINCE 1h ago")
-    stop_eventd()
+    eventd.stop(vm)
     local flood = "pt.flood" .. eventd.marker()
     local big = string.rep("x", 60000)
     for i = 1, 120 do eventd.emit(vm, flood, { i = i, pad = big }) end
-    start_eventd()
+    eventd.start(vm)
     local gaps = eventd.wait_rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 1h ago",
         function(rs) return #rs > before end)
     t:assert_eq(#gaps, before + 1, "one gap record")
@@ -188,24 +130,22 @@ test("synthetic.storage_error is written when a store is found corrupt, not when
         end
         return n
     end
-    fvm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(fvm)
     fvm:write_file(eventd.DB.logs, string.rep("this is not a database. ", 400))
     fvm:run("rm -f " .. eventd.DB.logs .. "-wal " .. eventd.DB.logs .. "-shm"):assert_ok()
-    fvm:run("svctl start eventd")
-    eventd.ready(fvm)
+    eventd.start(fvm)
     local _, corrupt = eventd.wait_rows(fvm, "EVENTS " .. eventd.T.storage_error .. ' WHERE store == "log" SINCE 1h ago',
         function(rs) return #rs >= 1 end, { timeout = 20 })
     t:assert(corrupt, "the corrupt log store is recorded as a storage_error naming the log store")
     local after_corrupt = log_errors()
 
-    fvm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(fvm)
     local r = sys.mount(fvm, { source = "pt-full", target = eventd.STORE.logs, fstype = "tmpfs",
         data = "size=256k" })
     t:assert_eq(r.ret, 0, "mounted a small tmpfs on the log store (errno " .. tostring(r.errno) .. ")")
     fvm:run("sd set '" .. eventd.STORE.logs .. "' 'O:SYG:SYD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)" ..
         "(A;OICI;GA;;;S-1-5-80-1963885778-1835409261-1671587836-2279113866-1994761124)'"):assert_ok()
-    fvm:run("svctl start eventd")
-    eventd.ready(fvm)
+    eventd.start(fvm)
     local origin = eventd.marker("full")
     for i = 1, 600 do
         eventd.send_log(fvm, { origin = origin, is_error = false, message = string.rep("f", 1000) .. i })
@@ -354,24 +294,11 @@ end)
 -- Series hashing
 -- ---------------------------------------------------------------------------
 
-local function fnv1a(bytes)
-    local h = -3750763034362895579 -- 0xcbf29ce484222325 as a signed 64-bit integer
-    for i = 1, #bytes do
-        h = h ~ bytes:byte(i)
-        h = h * 0x100000001b3 -- Lua integer multiplication wraps modulo 2^64
-    end
-    return h
-end
-
-local function unhex(s)
-    return (s:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end))
-end
-
 --- A label value whose canonical string's FNV-1a has its top bit set.
 local function high_bit_value()
     for i = 1, 1000 do
         local v = "v" .. i
-        if fnv1a("k=" .. v) < 0 then return v end
+        if eventd.fnv1a64("k=" .. v) < 0 then return v end
     end
 end
 
@@ -392,11 +319,11 @@ test("series hashes are FNV-1a 64 over the exact canonical label bytes or bounda
     stored(name, 1)
     local row = series_row(name)
     t:assert_eq(row[1], "app=a,zone=b", "the canonical label string")
-    t:assert_eq(row[2], fnv1a(row[1]) & 0x7fffffffffffffff, "label_hash is FNV-1a 64 of exactly those bytes")
+    t:assert_eq(row[2], eventd.fnv1a64(row[1]) & 0x7fffffffffffffff, "label_hash is FNV-1a 64 of exactly those bytes")
     local h = series_row(hist)
-    local blob = unhex(h[4])
+    local blob = eventd.unhex(h[4])
     t:assert_eq(blob, string.pack("<I4ddd", 3, 1, 5, 10), "the boundary blob: a count, then each boundary")
-    t:assert_eq(h[3], fnv1a(blob) & 0x7fffffffffffffff, "boundaries_hash is FNV-1a 64 of the blob")
+    t:assert_eq(h[3], eventd.fnv1a64(blob) & 0x7fffffffffffffff, "boundaries_hash is FNV-1a 64 of the blob")
 end)
 
 test("the FNV offset basis is 0xcbf29ce484222325", {
@@ -434,9 +361,9 @@ test("the stored hash has its high bit cleared", {
     eventd.send_metric(vm, { name = name, type = "gauge", value = 1, labels = eventd.map{ k = v } })
     eventd.wait_rows(vm, "METRIC " .. name .. " SINCE 10m ago", function(rs) return #rs == 1 end)
     local stored = series_row(name)[2]
-    t:assert(fnv1a("k=" .. v) < 0, "the full hash of k=" .. v .. " has bit 63 set")
+    t:assert(eventd.fnv1a64("k=" .. v) < 0, "the full hash of k=" .. v .. " has bit 63 set")
     t:assert(stored >= 0, "the stored one is non-negative: " .. tostring(stored))
-    t:assert_eq(stored, fnv1a("k=" .. v) & 0x7fffffffffffffff, "it is the hash with only bit 63 cleared")
+    t:assert_eq(stored, eventd.fnv1a64("k=" .. v) & 0x7fffffffffffffff, "it is the hash with only bit 63 cleared")
 end)
 
 test("a series is identified by its full label string, never by its hash", {
@@ -447,10 +374,10 @@ test("a series is identified by its full label string, never by its hash", {
     local name = eventd.marker("id")
     eventd.send_metric(vm, { name = name, type = "gauge", value = 1, labels = eventd.map{ s = "a" } })
     eventd.wait_rows(vm, "METRIC " .. name .. " SINCE 10m ago", function(rs) return #rs == 1 end)
-    stop_eventd()
-    edit_db(eventd.DB.metrics, "UPDATE series SET label_hash = " .. (fnv1a("s=b") & 0x7fffffffffffffff) ..
-        " WHERE name = '" .. name .. "';")
-    start_eventd()
+    eventd.stop(vm)
+    eventd.edit_store(vm, eventd.DB.metrics, "UPDATE series SET label_hash = " ..
+        (eventd.fnv1a64("s=b") & 0x7fffffffffffffff) .. " WHERE name = '" .. name .. "';")
+    eventd.start(vm)
     eventd.send_metric(vm, { name = name, type = "gauge", value = 2, labels = eventd.map{ s = "b" } })
     stored(name, 2)
     local series = eventd.sql(vm, eventd.DB.metrics, "SELECT labels, (SELECT count(*) FROM samples " ..
@@ -492,10 +419,10 @@ test("a version eventd does not know is never migrated: a historical shard is le
     eventd.wait_rows(vm, "EVENTS " .. etype .. " SINCE 10m ago", function(rs) return #rs == 1 end)
     local shard = eventd.shards(vm)[1]
     local hist = eventd.STORE.events .. "/shard-0007.db"
-    stop_eventd()
-    edit_db(shard, "UPDATE metadata SET value = '99' WHERE key = 'schema_version';", hist)
-    edit_db(shard, "DELETE FROM events WHERE event_type = '" .. etype .. "';")
-    start_eventd()
+    eventd.stop(vm)
+    eventd.edit_store(vm, shard, "UPDATE metadata SET value = '99' WHERE key = 'schema_version';", { to = hist })
+    eventd.edit_store(vm, shard, "DELETE FROM events WHERE event_type = '" .. etype .. "';")
+    eventd.start(vm)
     vm:run("sleep 1")
     t:assert_eq(schema_version(hist), "99", "the historical shard is still at version 99")
     t:assert_eq(count("EVENTS " .. etype .. " SINCE 10m ago"), 0, "and its event is not served")
@@ -511,13 +438,13 @@ test("an unknown version fails a required store, excludes a historical shard and
     eventd.wait_rows(vm, "EVENTS " .. etype .. " SINCE 10m ago", function(rs) return #rs == 1 end)
     local shard = eventd.shards(vm)[1]
     local hist = eventd.STORE.events .. "/shard-0006.db"
-    stop_eventd()
-    edit_db(shard, "UPDATE metadata SET value = '99' WHERE key = 'schema_version';", hist)
-    edit_db(shard, "DELETE FROM events WHERE event_type = '" .. etype .. "';")
+    eventd.stop(vm)
+    eventd.edit_store(vm, shard, "UPDATE metadata SET value = '99' WHERE key = 'schema_version';", { to = hist })
+    eventd.edit_store(vm, shard, "DELETE FROM events WHERE event_type = '" .. etype .. "';")
     -- Metadata: an unknown version, and a desired index to show what goes.
-    edit_db(eventd.DB.meta, "UPDATE meta SET value = CAST('99' AS BLOB) WHERE key = 'schema_version';" ..
+    eventd.edit_store(vm, eventd.DB.meta, "UPDATE meta SET value = CAST('99' AS BLOB) WHERE key = 'schema_version';" ..
         "INSERT OR REPLACE INTO desired_indexes VALUES ('ptmarkerfield', 0, 1);")
-    start_eventd()
+    eventd.start(vm)
     t:assert_eq(count("EVENTS " .. etype .. " SINCE 10m ago"), 0, "the historical shard's event is excluded")
     local said = eventd.wait_rows(vm, "LOGS FROM eventd CONTAINING " .. q("excluding historical shard") ..
         " SINCE 10m ago", function(rs) return #rs >= 1 end, { timeout = 10 })
@@ -530,17 +457,8 @@ test("an unknown version fails a required store, excludes a historical shard and
 
     -- Required store: its own VM, since eventd will not start.
     local fvm = eventd.boot({ name = "ev-badver" })
-    fvm:run("svctl stop eventd"):assert_ok()
-    local dir = host_tmpdir()
-    host_write(dir .. "/db", fvm:read_file(eventd.DB.logs))
-    local okw, wal = pcall(fvm.read_file, fvm, eventd.DB.logs .. "-wal")
-    if okw and wal and #wal > 0 then host_write(dir .. "/db-wal", wal) end
-    os.execute("python3 -c 'import sqlite3; c = sqlite3.connect(\"" .. dir .. "/db\"); " ..
-        "c.execute(\"UPDATE metadata SET value = 99 WHERE key = \\\"schema_version\\\"\"); c.commit(); " ..
-        "c.execute(\"PRAGMA wal_checkpoint(TRUNCATE)\"); c.close()'")
-    fvm:run("rm -f " .. eventd.DB.logs .. "-wal " .. eventd.DB.logs .. "-shm")
-    fvm:write_file(eventd.DB.logs, host_read(dir .. "/db"))
-    os.execute("rm -rf '" .. dir .. "'")
+    eventd.stop(fvm)
+    eventd.edit_store(fvm, eventd.DB.logs, "UPDATE metadata SET value = 99 WHERE key = 'schema_version';")
     fvm:run("svctl start eventd")
     local cause
     local deadline = os.time() + 25

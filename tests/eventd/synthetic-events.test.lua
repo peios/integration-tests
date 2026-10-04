@@ -184,13 +184,12 @@ end)
 test("a storage error about one shard is written to another, writable one", {
     spec = "eventd *synthetic.a-storage-error-skips-the-failing-shard-unless-it-is-writable-again",
 }, function(t)
-    vm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(vm)
     -- Shard 1 is not a database any more: eventd quarantines it at start.
     vm:write_file(eventd.STORE.events .. "/shard-0001.db", "this is not a SQLite database")
     vm:run("rm -f " .. eventd.STORE.events .. "/shard-0001.db-wal " ..
         eventd.STORE.events .. "/shard-0001.db-shm"):assert_ok()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
 
     local rows = eventd.wait_rows(vm, "EVENTS " .. eventd.T.storage_error .. " SINCE 10m ago",
         function(rs) return #rs >= 1 end)
@@ -315,20 +314,18 @@ test("a corrupt metric store is recorded as a storage error; a full one is not",
         return n
     end
     local before = metric_errors()
-    vm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(vm)
     vm:write_file(eventd.DB.metrics, string.rep("this is not a database. ", 400))
     vm:run("rm -f " .. eventd.DB.metrics .. "-wal " .. eventd.DB.metrics .. "-shm"):assert_ok()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
     local _, corrupt = eventd.wait_rows(vm, "EVENTS " .. eventd.T.storage_error .. ' WHERE store == "metric" SINCE 1h ago',
         function(rs) return #rs >= before + 1 end)
     t:assert(corrupt, "the corrupt metric store is recorded as a storage_error naming the metric store")
     local after_corrupt = metric_errors()
 
-    vm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(vm)
     small_tmpfs(eventd.STORE.metrics, "2m")
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
     fill(eventd.STORE.metrics)
     -- New series need new pages, and there are none.
     local stem = eventd.marker("fill")
@@ -371,10 +368,9 @@ test("with shard 0 full, a configuration change is recorded in shard 1", {
     t:assert(seen >= 3, "startup, shutdown and config_change records were checked: " .. seen)
 
     local f = full_vm()
-    vm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(vm)
     full_wal(0)
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
     t:assert_eq(config_changes_in(f, 1), 0, "shard 1 holds no config_change yet")
     -- CPU 0's first stripe after the start goes to shard 0, which is full.
     fill_events(f, 2)
@@ -391,13 +387,12 @@ test("with every shard full a daemon-wide record is skipped and the failure goes
     spec = "eventd *synthetic.with-no-writable-shard-a-daemon-wide-event-is-skipped-and-logged-to-stderr",
 }, function(t)
     local f = full_vm()
-    vm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(vm)
     for i = 0, 1 do
         -- The previous test filled shard 0's; this one does not rely on it.
         if not vm:read_file("/proc/mounts"):find(" /run/pt-wal" .. i .. " ", 1, true) then full_wal(i) end
     end
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
     f:run("sleep 2")
     local before = { config_changes_in(f, 0), config_changes_in(f, 1) }
     local complaints = 0

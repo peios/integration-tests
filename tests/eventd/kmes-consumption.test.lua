@@ -81,16 +81,6 @@ local function same(event_type, n)
     return out
 end
 
-local function threads()
-    local pid = assert(eventd.pid(vm), "eventd is running")
-    local out = {}
-    local r = vm:run("for d in /proc/" .. pid .. "/task/*; do echo ${d##*/} $(cat $d/comm); done")
-    for tid, comm in r.stdout:gmatch("(%d+) (%S+)") do
-        out[#out + 1] = { tid = tonumber(tid), comm = comm }
-    end
-    return out, pid
-end
-
 --- Rows of one event type straight from every shard: {sequence, cpu_id,
 --- payload hex, shard}.
 local function stored(event_type)
@@ -117,18 +107,11 @@ local function wait_count(event_type, n, timeout)
     return rows
 end
 
-local function hex(s)
-    return (s:gsub(".", function(c) return string.format("%02X", c:byte()) end))
-end
-
 --- Gap records on one CPU, through evctl.
 local function gaps_on(cpu)
     return eventd.rows(vm, string.format(
         "EVENTS %s WHERE cpu_id == %d SINCE 1h ago TAKE 10000", eventd.T.gap, cpu))
 end
-
-local function freeze() vm:run("kill -STOP " .. eventd.pid(vm)):assert_ok() end
-local function thaw() vm:run("kill -CONT " .. eventd.pid(vm)):assert_ok() end
 
 --- Set the KMES ring capacity and wait until a fresh attach sees it.
 local function set_capacity(bytes)
@@ -144,10 +127,8 @@ local function set_capacity(bytes)
 end
 
 local function kmes_fds()
-    local pid = eventd.pid(vm)
-    local r = vm:run("for f in /proc/" .. pid .. "/fd/*; do readlink $f; done")
     local n = 0
-    for _ in r.stdout:gmatch("anon_inode:kmes%-cpu") do n = n + 1 end
+    for _ in eventd.fd_listing(vm):gmatch("anon_inode:kmes%-cpu") do n = n + 1 end
     return n
 end
 
@@ -178,7 +159,7 @@ test("eventd attaches every CPU's ring at startup and drains each with its own t
     t:assert_eq(json.encode(cpus), "[0,1]", "the startup record names both CPUs")
 
     local drains = {}
-    for _, th in ipairs(threads()) do
+    for _, th in ipairs(eventd.threads(vm)) do
         if th.comm:find("^eventd%-drain%-") then drains[#drains + 1] = th.comm end
     end
     table.sort(drains)
@@ -232,7 +213,7 @@ test("events of every size are read whole, in order, each exactly its own length
     local rows = wait_count(event_type, #sizes)
     t:assert_eq(#rows, #sizes, "every event was stored once")
     for i, r in ipairs(rows) do
-        t:assert_eq(r.payload, hex(payloads[i]),
+        t:assert_eq(r.payload, eventd.hex(payloads[i], true),
             "event " .. i .. " (" .. sizes[i] .. "-byte blob) came back byte-exact, " ..
             "no shorter and no longer")
         if i > 1 then
@@ -246,7 +227,7 @@ test("an idle drain thread and an idle writer sleep rather than spin", {
     spec = "eventd *kmes.an-empty-buffer-is-waited-on-through-the-futex-not-by-spinning"
         .. " eventd *batch.an-idle-writer-sleeps-until-a-producer-wakes-it",
 }, function(t)
-    local ths, pid = threads()
+    local ths, pid = eventd.threads(vm)
     local function ticks()
         local out = {}
         for _, th in ipairs(ths) do
@@ -296,12 +277,11 @@ test("after a restart, receipted survivors are skipped and the rest are ingested
     emit_on(1, same(committed, 50))
     wait_count(committed, 100)
 
-    vm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(vm)
     -- Emitted with nothing reading: in the ring, behind the receipts.
     emit_on(0, same(missed, 50))
     emit_on(1, same(missed, 50))
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
 
     local rows = wait_count(missed, 100)
     t:assert_eq(#rows, 100, "every event emitted while eventd was down was ingested")
@@ -332,7 +312,7 @@ test("a ring replacement is followed: the old ring is drained to its end, the ne
     local after = { "pt.kmes." .. eventd.marker("new0"), "pt.kmes." .. eventd.marker("new1") }
     local gaps_before = { #gaps_on(0), #gaps_on(1) }
 
-    freeze()
+    eventd.freeze(vm)
     local ok, err = pcall(function()
         -- 1500 small events per CPU: ~130 KB, all of it in the 4 MiB ring,
         -- twice what the 64 KiB replacement can carry over.
@@ -342,7 +322,7 @@ test("a ring replacement is followed: the old ring is drained to its end, the ne
         emit_on(0, same(after[1], 20))
         emit_on(1, same(after[2], 20))
     end)
-    thaw()
+    eventd.thaw(vm)
     if not ok then error(err, 0) end
 
     for cpu = 0, 1 do
@@ -383,7 +363,7 @@ test("a replacement ring of a different size is read correctly across its wrap p
     local first = rows[1].sequence
     for _, r in ipairs(rows) do
         local i = r.sequence - first + 1
-        t:assert_eq(r.payload, hex(payloads[i]), "sequence " .. r.sequence .. " is byte-exact")
+        t:assert_eq(r.payload, eventd.hex(payloads[i], true), "sequence " .. r.sequence .. " is byte-exact")
     end
 end)
 
@@ -396,11 +376,11 @@ test("each CPU keeps its own last sequence: a loss on one CPU is a gap on that C
     local last = wait_count(marker, 1)[1]
     local gaps0 = #gaps_on(0)
 
-    freeze()
+    eventd.freeze(vm)
     local ok, err = pcall(function()
         emit_on(1, same("pt.kmes." .. eventd.marker("lap1"), 1500))
     end)
-    thaw()
+    eventd.thaw(vm)
     if not ok then error(err, 0) end
 
     local g
@@ -440,7 +420,7 @@ test("events torn by a concurrent overwrite are never stored garbled", {
     -- The rings are 64 KiB. The emitter is pinned to CPU 0 and CPU 0's
     -- drain thread to CPU 1, so the producer overwrites the ring while the
     -- consumer is copying out of it, on another CPU, with no pause between.
-    local ths = threads()
+    local ths = eventd.threads(vm)
     local drain
     for _, th in ipairs(ths) do
         if th.comm == "eventd-drain-0" then drain = th.tid end
@@ -462,7 +442,7 @@ test("events torn by a concurrent overwrite are never stored garbled", {
     local rows = stored(event_type)
     t:assert(#rows > 0, "some events were stored: " .. #rows)
     local emitted = {}
-    for i = 1, n do emitted[hex(payloads[i])] = true end
+    for i = 1, n do emitted[eventd.hex(payloads[i], true)] = true end
     local bad = 0
     for _, r in ipairs(rows) do
         if not emitted[r.payload] then bad = bad + 1 end
@@ -479,14 +459,13 @@ test("events a shrink discards before eventd reads them are recorded as an ordin
     emit_on(0, same(marker, 1))
     local last = wait_count(marker, 1)[1]
 
-    vm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(vm)
     local flood = "pt.kmes." .. eventd.marker("shrunk")
     -- All 1500 fit in the 4 MiB ring; the 64 KiB replacement keeps the
     -- newest few hundred.
     emit_on(0, same(flood, 1500))
     set_capacity(65536)
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
 
     local g
     wait_until(function()

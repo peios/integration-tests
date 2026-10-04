@@ -27,7 +27,6 @@ peinit.claim(1)
 
 local vm = eventd.boot({ name = "ev-const-access" })
 
-local NAMESPACE = "e7d3a1b0-5c2f-4e8a-9b1d-0a6f3c8e2d4b"
 local ROOT = {
     events = "a1b2c3d4-0001-4000-8000-000000000001",
     logs = "a1b2c3d4-0001-4000-8000-000000000002",
@@ -39,13 +38,6 @@ local SY, USER = token.SID.LOCAL_SYSTEM, token.SID.TEST_USER
 local GENERIC_READ, GENERIC_WRITE = 0x80000000, 0x40000000
 local GENERIC_EXECUTE, GENERIC_ALL = 0x20000000, 0x10000000
 
-local function unhex(s)
-    return (s:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end))
-end
-local function hex(b)
-    return (b:gsub(".", function(c) return string.format("%02x", c:byte()) end))
-end
-
 local function host(py)
     local p = assert(io.popen("python3 -c '" .. py .. "'", "r"))
     local out = p:read("a")
@@ -55,31 +47,13 @@ end
 
 --- A GUID string's 16 bytes in PCDS order.
 local function guid_bytes(s)
-    return unhex(host("import uuid; print(uuid.UUID(\"" .. s .. "\").bytes_le.hex())"))
-end
-
---- uuid_v5(namespace, name) in PCDS order.
-local function field_guid(name, namespace)
-    return unhex(host("import uuid; print(uuid.uuid5(uuid.UUID(\"" .. (namespace or NAMESPACE) ..
-        "\"), \"" .. name .. "\").bytes_le.hex())"))
+    return eventd.unhex(host("import uuid; print(uuid.UUID(\"" .. s .. "\").bytes_le.hex())"))
 end
 
 local function sd(aces) return access.simple(aces) end
 local function allow(mask, sid) return access.ace(A.ALLOWED, mask, sid) end
 local function allow_obj(mask, sid, guid) return access.ace(A.ALLOWED_OBJECT, mask, sid, 0, { object_type = guid }) end
 local function deny_obj(mask, sid, guid) return access.ace(A.DENIED_OBJECT, mask, sid, 0, { object_type = guid }) end
-
-local function key_for(ns, pattern) return eventd.SECURITY .. "\\" .. ns .. "\\" .. pattern end
-
-local function write_descriptor(key, bytes)
-    vm:run("reg new '" .. key .. "'")
-    eventd.set(vm, "@", "hex:" .. hex(bytes), { key = key }):assert_ok()
-end
-
-local function read_descriptor(key)
-    local r = vm:run("reg get '" .. key .. "'")
-    return unhex(r.stdout:match("%(default%) = REG_BINARY (%x+)"))
-end
 
 local NOTIFY = token.bit(token.PRIV.CHANGE_NOTIFY)
 local ENABLED = token.GROUP.MANDATORY | token.GROUP.ENABLED_BY_DEFAULT | token.GROUP.ENABLED
@@ -126,7 +100,7 @@ end
 --- Descriptor changes reach eventd through its registry watch, so a short
 --- settle precedes the read.
 local function user_sees(t, key, bytes, query)
-    write_descriptor(key, bytes)
+    eventd.write_descriptor(vm, key, bytes):assert_ok()
     vm:run("sleep 0.5")
     local out
     as_user(t, function(w) out = user_query(w, query) end)
@@ -136,15 +110,15 @@ end
 --- Whether TEST_USER may INDEX while Security\Admin is `bytes`.
 local function user_may_index(t, bytes)
     local key = eventd.SECURITY .. [[\Admin]]
-    local original = read_descriptor(key)
-    write_descriptor(key, bytes)
+    local original = eventd.read_descriptor(vm, key)
+    eventd.write_descriptor(vm, key, bytes):assert_ok()
     vm:run("sleep 0.5")
     local ok, msg
     as_user(t, function(w)
         local r = user_query(w, "EVENTS INDEX " .. eventd.marker("f"))
         ok, msg = r.ok, r.stderr
     end)
-    write_descriptor(key, original)
+    eventd.write_descriptor(vm, key, original):assert_ok()
     return ok, msg
 end
 
@@ -152,7 +126,7 @@ end
 --- is stored.
 local function user_may_publish(t, bytes)
     local name = eventd.marker("pub")
-    write_descriptor(key_for("Metrics", name), bytes)
+    eventd.write_descriptor(vm, eventd.key_of("Metrics", name), bytes):assert_ok()
     vm:run("sleep 0.5")
     as_user(t, function(w)
         eventd.send_metric(w, { name = name, type = "gauge", value = 1 })
@@ -165,7 +139,7 @@ end
 
 local function user_may_read(t, mask)
     local origin = log_origin()
-    local r = user_sees(t, key_for("Logs", origin), sd({ allow(0x1, SY), allow(mask, USER) }),
+    local r = user_sees(t, eventd.key_of("Logs", origin), sd({ allow(0x1, SY), allow(mask, USER) }),
         "LOGS FROM " .. origin .. " SINCE 10m ago")
     return #r.rows == 1
 end
@@ -273,7 +247,7 @@ end)
 --- when its descriptor grants the record and denies the object `guid`.
 local function log_untouched_by(t, guid)
     local origin = log_origin()
-    local r = user_sees(t, key_for("Logs", origin), sd({
+    local r = user_sees(t, eventd.key_of("Logs", origin), sd({
         deny_obj(0x1, USER, guid), allow(0x1, SY), allow(0x1, USER) }),
         "LOGS FROM " .. origin .. " SINCE 10m ago")
     local row = r.rows[1]
@@ -283,20 +257,20 @@ end
 test("field GUIDs are in the namespace {e7d3a1b0-5c2f-4e8a-9b1d-0a6f3c8e2d4b}", {
     spec = "eventd *constant.the-field-guid-namespace-is-e7d3a1b0-5c2f-4e8a-9b1d-0a6f3c8e2d4b",
 }, function(t)
-    local whole, row = log_untouched_by(t, field_guid("message"))
+    local whole, row = log_untouched_by(t, eventd.field_guid("message", eventd.FIELD_NAMESPACE))
     t:assert(not whole, "a deny on uuid_v5({e7d3a1b0-…}, \"message\") takes effect: " .. json.encode(row))
-    local whole2, row2 = log_untouched_by(t, field_guid("message", "6ba7b810-9dad-11d1-80b4-00c04fd430c8"))
+    local whole2, row2 = log_untouched_by(t, eventd.field_guid("message", "6ba7b810-9dad-11d1-80b4-00c04fd430c8"))
     t:assert(whole2, "the same name in the DNS namespace is not message's GUID: " .. json.encode(row2))
 end)
 
 test("a field's GUID is uuid_v5 of its exact UTF-8 name", {
     spec = "eventd *constant.a-field-guid-is-uuid-v5-of-the-utf-8-field-name-in-the-eventd-namespace",
 }, function(t)
-    local whole, row = log_untouched_by(t, field_guid("origin"))
+    local whole, row = log_untouched_by(t, eventd.field_guid("origin"))
     t:assert(not whole, "uuid_v5(ns, \"origin\") is origin's GUID: " .. json.encode(row))
-    local whole2, row2 = log_untouched_by(t, field_guid("Origin"))
+    local whole2, row2 = log_untouched_by(t, eventd.field_guid("Origin"))
     t:assert(whole2, "uuid_v5(ns, \"Origin\") is not — the exact bytes, not a folded name: " .. json.encode(row2))
-    local whole3, row3 = log_untouched_by(t, field_guid("origin "))
+    local whole3, row3 = log_untouched_by(t, eventd.field_guid("origin "))
     t:assert(whole3, "nor is uuid_v5(ns, \"origin \"): " .. json.encode(row3))
 end)
 
@@ -306,8 +280,8 @@ test("field GUIDs are computed: a field never seen before is governed by its GUI
     local field = "ptnew" .. eventd.marker()
     local function denied_by(name)
         local etype = event_type({ [field] = "secret", keep = "visible" })
-        local r = user_sees(t, key_for("Events", etype), sd({
-            deny_obj(0x1, USER, field_guid(name)), allow(0x1, SY), allow(0x1, USER) }),
+        local r = user_sees(t, eventd.key_of("Events", etype), sd({
+            deny_obj(0x1, USER, eventd.field_guid(name)), allow(0x1, SY), allow(0x1, USER) }),
             "EVENTS " .. etype .. " SINCE 10m ago")
         local row = r.rows[1]
         return not (row and row[field] == "secret"), row
@@ -338,7 +312,7 @@ test("the events root is {a1b2c3d4-0001-4000-8000-000000000001}, the level-0 nod
     tags = { "known-bug" },
 }, function(t)
     local etype = event_type({ n = 1 })
-    local key = key_for("Events", etype)
+    local key = eventd.key_of("Events", etype)
     local q = "EVENTS " .. etype .. " SINCE 10m ago"
     local granted = user_sees(t, key, sd({ allow(0x1, SY), allow_obj(0x1, USER, guid_bytes(ROOT.events)) }), q)
     t:assert_eq(#granted.rows, 1, "an object ACE for the events root grants the event: " .. tostring(granted.stderr))
@@ -356,7 +330,7 @@ test("the logs root is {a1b2c3d4-0001-4000-8000-000000000002}", {
     tags = { "known-bug" },
 }, function(t)
     local origin = log_origin()
-    local key = key_for("Logs", origin)
+    local key = eventd.key_of("Logs", origin)
     local q = "LOGS FROM " .. origin .. " SINCE 10m ago"
     t:assert_eq(#user_sees(t, key, sd({ allow(0x1, SY), allow_obj(0x1, USER, guid_bytes(ROOT.logs)) }), q).rows, 1,
         "an object ACE for the logs root grants the record")
@@ -372,7 +346,7 @@ test("the metrics root is {a1b2c3d4-0001-4000-8000-000000000003}", {
     local name = eventd.marker("mr")
     eventd.send_metric(vm, { name = name, type = "gauge", value = 4 })
     eventd.wait_rows(vm, "METRIC " .. name .. " SINCE 10m ago", function(rs) return #rs == 1 end)
-    local key = key_for("Metrics", name)
+    local key = eventd.key_of("Metrics", name)
     local q = "METRIC " .. name .. " SINCE 10m ago"
     t:assert_eq(#user_sees(t, key, sd({ allow(0x9, SY), allow_obj(0x1, USER, guid_bytes(ROOT.metrics)) }), q).rows, 1,
         "an object ACE for the metrics root grants the sample")

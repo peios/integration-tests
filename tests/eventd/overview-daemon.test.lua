@@ -54,7 +54,7 @@ test("eventd is a boot-started, Critical platform daemon signed at TCB level", {
         "with ErrorControl 1, Critical")
     local st = eventd.status(vm)
     t:assert_eq(st.state, "active", "it is running")
-    local psb = vm:run("cat /proc/" .. eventd.pid(vm) .. "/psb").stdout
+    local psb = vm:read_file("/proc/" .. eventd.pid(vm) .. "/psb")
     local ptype, trust = psb:match("pip_type=(%d+) pip_trust=(%d+)")
     t:assert_eq(tonumber(trust), 8192, "its process carries the PeiosTcb trust its signature confers: " .. psb)
     t:assert_eq(tonumber(ptype), 512, "at the protected tier")
@@ -86,7 +86,7 @@ test("eventd reads no /proc, scrapes no endpoint and polls no service", {
     -- No network sockets: everything eventd holds that is a socket is
     -- AF_UNIX.
     local inodes = {}
-    for ino in vm:run("ls -l /proc/" .. pid .. "/fd").stdout:gmatch("socket:%[(%d+)%]") do inodes[#inodes + 1] = ino end
+    for ino in eventd.fd_listing(vm, pid):gmatch("socket:%[(%d+)%]") do inodes[#inodes + 1] = ino end
     local unix = vm:run("cat /proc/net/unix").stdout
     for _, ino in ipairs(inodes) do
         t:assert(unix:find(" " .. ino .. " ", 1, true) or unix:find(" " .. ino .. "\n", 1, true),
@@ -101,7 +101,7 @@ test("eventd reads no /proc, scrapes no endpoint and polls no service", {
     -- appears that something did not push to it.
     local opened = {}
     for _ = 1, 20 do
-        for target in vm:run("ls -l /proc/" .. pid .. "/fd").stdout:gmatch("%-> (/proc/%S+)") do
+        for target in eventd.fd_listing(vm, pid):gmatch("%-> (/proc/%S+)") do
             if not target:find("^/proc/self/") then opened[#opened + 1] = target end
         end
         vm:run("sleep 1")

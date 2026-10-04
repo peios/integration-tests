@@ -187,10 +187,7 @@ test("evctl opens no database and decides nothing: eventd answers by the caller'
     local granted, other = one_log(), one_log()
     local function put(origin, aces)
         local k = eventd.SECURITY .. [[\Logs\]] .. origin
-        local sd = access.simple(aces)
-        vm:run("reg new '" .. k .. "'")
-        eventd.set(vm, "@", "hex:" .. (sd:gsub(".", function(c) return string.format("%02x", c:byte()) end)),
-            { key = k }):assert_ok()
+        eventd.write_descriptor(vm, k, access.simple(aces)):assert_ok()
         return k
     end
     local key = put(granted, { access.ace(access.ACE.ALLOWED, 0x1, token.SID.LOCAL_SYSTEM),

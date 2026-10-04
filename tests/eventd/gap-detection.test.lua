@@ -76,16 +76,12 @@ local function stored_marker(stem)
     return rows[1]
 end
 
-local function hex_to_bytes(h)
-    return (h:gsub("%x%x", function(x) return string.char(tonumber(x, 16)) end))
-end
-
 --- Decode a gap payload: a MessagePack map of string keys to unsigned
 --- integers or nil. Returns the map and its keys in wire order. Anything
 --- else raises, which is the right outcome for a payload of the wrong
 --- shape.
 local function decode_gap_payload(hex)
-    local b = hex_to_bytes(hex)
+    local b = eventd.unhex(hex)
     local at = 1
     local function str()
         local tag = b:byte(at)
@@ -204,9 +200,6 @@ local function oldest_survivor()
     return events[1], events[#events], events
 end
 
-local function freeze() vm:run("kill -STOP " .. eventd.pid(vm)):assert_ok() end
-local function thaw() vm:run("kill -CONT " .. eventd.pid(vm)):assert_ok() end
-
 -- ---------------------------------------------------------------------------
 -- Live overrun
 -- ---------------------------------------------------------------------------
@@ -226,14 +219,14 @@ test("an overrun ring becomes one gap record naming exactly the lost sequences",
     local before = stored_marker("before")
     local flood_type = "pt.gap." .. eventd.marker("ovr")
 
-    freeze()
+    eventd.freeze(vm)
     -- Twice what the ring holds: whatever eventd had not read is lapped.
     flood(flood_type, 1500)
     -- The newest event: emitted after every lost one, before eventd runs.
     local last_emit = eventd.emit(vm, "pt.gap.resume", { n = 1 })
     t:assert_eq(last_emit.ret, 0, "the resume marker emitted")
     local resume = select(2, oldest_survivor())
-    thaw()
+    eventd.thaw(vm)
 
     local g = wait_gap(before.sequence + 1)
     local p = g.payload
@@ -277,7 +270,7 @@ test("a lapped drain thread resumes at the oldest survivor and the lap is an ord
         .. " eventd *gap.a-gap-record-is-never-emitted-through-kmes",
 }, function(t)
     local before = stored_marker("lap")
-    freeze()
+    eventd.freeze(vm)
     flood("pt.gap." .. eventd.marker("lap"), 1500)
     -- Read the ring as eventd will find it: everything up to the tail has
     -- been overwritten, and the tail is the oldest survivor.
@@ -289,7 +282,7 @@ test("a lapped drain thread resumes at the oldest survivor and the lap is an ord
     -- A second consumer, attached across the resume, sees whatever eventd
     -- puts into KMES from here on.
     local watch = assert(kmes.attach(vm, 0))
-    thaw()
+    eventd.thaw(vm)
     local g = wait_gap(before.sequence + 1)
     vm:run("sleep 1")
     local seen = kmes.drain(watch)
@@ -322,9 +315,9 @@ test("a gap is stored like any event: same shard, same transaction, its own rece
         .. " eventd *batch.events-gaps-and-their-receipts-commit-in-the-same-transaction",
 }, function(t)
     local before = stored_marker("path")
-    freeze()
+    eventd.freeze(vm)
     flood("pt.gap." .. eventd.marker("path"), 1500)
-    thaw()
+    eventd.thaw(vm)
     local g = wait_gap(before.sequence + 1)
     local p = g.payload
 
@@ -412,7 +405,7 @@ test("events lost while eventd was stopped become a restart gap, survivors are s
         .. " eventd *kmes.restart-emits-a-gap-only-for-sequences-neither-receipted-nor-surviving",
 }, function(t)
     local before = stored_marker("down")
-    vm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(vm)
     local flood_type = "pt.gap." .. eventd.marker("down")
     flood(flood_type, 1500)
     local oldest, newest = oldest_survivor()
@@ -422,8 +415,7 @@ test("events lost while eventd was stopped become a restart gap, survivors are s
     for _, r in ipairs(rs) do
         if r[1] <= highest + 1 then highest = math.max(highest, r[2]) end
     end
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
 
     t:assert(highest >= before.sequence, "the marker was receipted before the stop")
     local g = wait_gap(highest + 1)
@@ -454,13 +446,12 @@ end)
 test("with no receipt for the CPU, an overwritten prefix is a gap from sequence 1", {
     spec = "eventd *kmes.with-no-receipt-for-a-cpu-coverage-begins-before-sequence-1",
 }, function(t)
-    vm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(vm)
     local oldest = oldest_survivor()
     t:assert(oldest.sequence > 1, "the ring has wrapped since boot: oldest survivor " .. oldest.sequence)
     vm:run("rm -f /var/state/eventd/events/shard-*"):assert_ok()
     t:assert_eq(#eventd.shards(vm), 0, "no shard, so no receipt, is left")
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
 
     local g
     wait_until(function()

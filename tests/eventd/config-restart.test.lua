@@ -70,26 +70,6 @@ local function changes(key, socket)
         { socket = socket }).rows
 end
 
---- Restart eventd and wait until it answers on `socket`.
-local function restart(socket)
-    local before = eventd.pid(vm)
-    vm:run("svctl restart eventd"):assert_ok()
-    wait_until(function()
-        local now = eventd.pid(vm)
-        return now ~= nil and now ~= before and eventd.query(vm, "EVENTS TAKE 1", { socket = socket }).ok
-    end, { timeout = 90, interval = 0.5, desc = "eventd to answer on " .. tostring(socket) })
-end
-
-local function rows_on(socket, text, pred)
-    local out
-    wait_until(function()
-        local r = eventd.query(vm, text, { socket = socket })
-        out = r.rows
-        return r.ok and pred(r.rows)
-    end, { timeout = 30, interval = 0.25, desc = text })
-    return out
-end
-
 local function exists(path)
     return vm:run("test -e '" .. path .. "'").exit_code == 0
 end
@@ -145,12 +125,12 @@ test("store paths, socket paths and StorageShards are deferred until a restart, 
     t:assert_eq(#eventd.shards(vm), 2, "and the event store still has its two shards")
 
     -- After a restart, all of it is in force.
-    restart(ALT.query)
+    eventd.restart(vm, { socket = ALT.query })
     for _, s in ipairs({ ALT.query, ALT.log, ALT.metric }) do
         t:assert(exists(s), "a socket at " .. s .. " after the restart")
     end
-    local startup = rows_on(ALT.query, "EVENTS " .. eventd.T.startup .. " SINCE 1m ago",
-        function(rs) return #rs >= 1 end)
+    local startup = eventd.wait_rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1m ago",
+        function(rs) return #rs >= 1 end, { socket = ALT.query })
     t:assert_eq(startup[1].shard_count, 3, "the restarted eventd runs three shards: " .. json.encode(startup[1]))
     local files = names_in(ALT.events)
     t:assert(files["shard-0000.db"] and files["shard-0001.db"] and files["shard-0002.db"],
@@ -168,7 +148,8 @@ test("EventStorePath is the directory holding the shards and eventd-meta.db", {
     t:assert(files["eventd-meta.db"], "eventd-meta.db is in EventStorePath: " .. json.encode(files))
     local etype = "pt.esp" .. eventd.marker()
     eventd.emit(vm, etype, { n = 1 })
-    rows_on(ALT.query, "EVENTS " .. etype .. " SINCE 10m ago", function(rs) return #rs == 1 end)
+    eventd.wait_rows(vm, "EVENTS " .. etype .. " SINCE 10m ago", function(rs) return #rs == 1 end,
+        { socket = ALT.query })
     local found = 0
     for name in pairs(names_in(ALT.events)) do
         if name:match("^shard%-%d+%.db$") then
@@ -185,7 +166,8 @@ test("LogStorePath is the directory holding logs.db", {
 }, function(t)
     local origin = eventd.marker("lsp")
     eventd.send_log(vm, { origin = origin, is_error = false, message = "here" }, { path = ALT.log })
-    rows_on(ALT.query, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 1 end)
+    eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 1 end,
+        { socket = ALT.query })
     local n = eventd.sql(vm, ALT.logs .. "/logs.db",
         "SELECT count(*) FROM logs WHERE origin = '" .. origin .. "'")[1][1]
     t:assert_eq(n, 1, "the record is in LogStorePath/logs.db")
@@ -196,7 +178,8 @@ test("MetricStorePath is the directory holding metrics.db", {
 }, function(t)
     local name = eventd.marker("msp")
     eventd.send_metric(vm, { name = name, type = "gauge", value = 1 }, { path = ALT.metric })
-    rows_on(ALT.query, "METRIC " .. name .. " SINCE 10m ago", function(rs) return #rs == 1 end)
+    eventd.wait_rows(vm, "METRIC " .. name .. " SINCE 10m ago", function(rs) return #rs == 1 end,
+        { socket = ALT.query })
     local n = eventd.sql(vm, ALT.metrics .. "/metrics.db",
         "SELECT count(*) FROM series WHERE name = '" .. name .. "'")[1][1]
     t:assert_eq(n, 1, "the series is in MetricStorePath/metrics.db")
@@ -215,7 +198,8 @@ test("LogSocketPath is where eventd takes log datagrams", {
     local origin = eventd.marker("lsock")
     local r = eventd.send_log(vm, { origin = origin, is_error = false, message = "x" }, { path = ALT.log })
     t:assert(r.ret and r.ret > 0, "the datagram was accepted at LogSocketPath")
-    rows_on(ALT.query, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 1 end)
+    eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 1 end,
+        { socket = ALT.query })
     local old = eventd.send_log(vm, { origin = origin, is_error = false, message = "x" })
     t:assert(not old.ret or old.ret < 0, "and nothing takes one at the standard path")
 end)
@@ -226,7 +210,8 @@ test("MetricSocketPath is where eventd takes metric datagrams", {
     local name = eventd.marker("msock")
     local r = eventd.send_metric(vm, { name = name, type = "gauge", value = 2 }, { path = ALT.metric })
     t:assert(r.ret and r.ret > 0, "the datagram was accepted at MetricSocketPath")
-    rows_on(ALT.query, "METRIC " .. name .. " SINCE 10m ago", function(rs) return #rs == 1 end)
+    eventd.wait_rows(vm, "METRIC " .. name .. " SINCE 10m ago", function(rs) return #rs == 1 end,
+        { socket = ALT.query })
     local old = eventd.send_metric(vm, { name = name, type = "gauge", value = 2 })
     t:assert(not old.ret or old.ret < 0, "and nothing takes one at the standard path")
 end)
@@ -239,7 +224,7 @@ test("(restore) the standard stores and sockets, after one more restart", {}, fu
     eventd.set(vm, "QuerySocketPath", "sz:/run/eventd/query.sock"):assert_ok()
     eventd.set(vm, "LogSocketPath", "sz:/run/eventd/log.sock"):assert_ok()
     eventd.set(vm, "MetricSocketPath", "sz:/run/eventd/metric.sock"):assert_ok()
-    restart(nil)
+    eventd.restart(vm)
     t:assert(eventd.query(vm, "EVENTS TAKE 1").ok, "back on the standard query socket")
 end)
 
@@ -254,21 +239,21 @@ test("StorageShards defaults to 0, which is one shard per attached KMES buffer",
         local rows = eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1h ago TAKE 1")
         return rows[1].shard_count
     end
-    local fds = vm:run("ls -l /proc/" .. eventd.pid(vm) .. "/fd")
-    local buffers = select(2, fds.stdout:gsub("anon_inode:kmes%-cpu", ""))
+    local fds = eventd.fd_listing(vm, eventd.pid(vm))
+    local buffers = select(2, fds:gsub("anon_inode:kmes%-cpu", ""))
     t:assert_eq(buffers, 2, "eventd attached two KMES buffers on two CPUs")
     t:assert_eq(started(), 2, "with StorageShards absent it runs two shards")
     eventd.set(vm, "StorageShards", "dword:0"):assert_ok()
-    restart(nil)
+    eventd.restart(vm)
     t:assert_eq(started(), 2, "an explicit 0 is the same: two")
     eventd.set(vm, "StorageShards", "dword:1"):assert_ok()
-    restart(nil)
+    eventd.restart(vm)
     t:assert_eq(started(), 1, "1 is one shard, so the 2 was the buffer count rather than a fixed value")
     eventd.set(vm, "StorageShards", "dword:257"):assert_ok()
-    restart(nil)
+    eventd.restart(vm)
     t:assert_eq(started(), 2, "257, above the range, is ignored")
     eventd.unset(vm, "StorageShards")
-    restart(nil)
+    eventd.restart(vm)
 end)
 
 -- ---------------------------------------------------------------------------

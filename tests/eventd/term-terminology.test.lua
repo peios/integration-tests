@@ -28,14 +28,6 @@ local vm = eventd.boot({ name = "ev-term", cpus = 2 })
 local CC = eventd.T.config_change
 local function q(s) return '"' .. s .. '"' end
 
-local function threads()
-    local pid = eventd.pid(vm)
-    local r = vm:run("cat /proc/" .. pid .. "/task/*/comm")
-    local out = {}
-    for name in r.stdout:gmatch("[^\n]+") do out[#out + 1] = name end
-    return out
-end
-
 local function count_prefix(names, prefix)
     local n = 0
     for _, name in ipairs(names) do if name:sub(1, #prefix) == prefix then n = n + 1 end end
@@ -85,7 +77,7 @@ end
 test("there is exactly one drain thread per CPU", {
     spec = "eventd *term.there-is-exactly-one-drain-thread-per-cpu",
 }, function(t)
-    local names = threads()
+    local names = eventd.thread_names(vm)
     t:assert_eq(count_prefix(names, "eventd-drain-"), 2, "two drain threads on two CPUs: " .. table.concat(names, ","))
     local set = {}
     for _, n in ipairs(names) do set[n] = true end
@@ -97,7 +89,7 @@ test("each shard has exactly one writer thread", {
 }, function(t)
     local shards = #eventd.shards(vm)
     t:assert_eq(shards, 2, "two shards")
-    t:assert_eq(count_prefix(threads(), "eventd-writer-"), shards, "and as many writer threads")
+    t:assert_eq(count_prefix(eventd.thread_names(vm), "eventd-writer-"), shards, "and as many writer threads")
     -- Every write to a shard is a writer-thread commit: an event emitted
     -- on each CPU lands in exactly one shard, and nothing else writes them.
     local etype = "pt.wr" .. eventd.marker()
@@ -308,12 +300,11 @@ test("quarantine renames a corrupt database aside and creates an empty one in it
     local origin = eventd.marker("qu")
     eventd.send_log(vm, { origin = origin, is_error = false, message = "before" })
     eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 1 end)
-    vm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(vm)
     local garbage = string.rep("this is not a sqlite database ", 200)
     vm:write_file(eventd.DB.logs, garbage)
     vm:run("rm -f " .. eventd.DB.logs .. "-wal " .. eventd.DB.logs .. "-shm")
-    vm:run("svctl start eventd")
-    eventd.ready(vm)
+    eventd.start(vm)
     local listing = vm:run("ls -1 " .. eventd.STORE.logs).stdout
     local aside = listing:match("(logs%.db%.corrupt%.%d+)")
     t:assert(aside, "the corrupt file was renamed aside: " .. listing)
@@ -349,13 +340,8 @@ test("a shard left by an earlier configuration takes no new events, is still que
     t:assert_eq(json.encode(shards_holding(later)), '["shard-0000.db"]',
         "an event from CPU 1 now goes to the one active shard, not the historical one")
     local modes = {}
-    for line in vm:run("ls -l /proc/" .. pid .. "/fd").stdout:gmatch("[^\n]+") do
-        local fd = line:match("(%d+) %-> /var/state/eventd/events/shard%-0001%.db$")
-        if fd then
-            local flags = vm:run("grep flags /proc/" .. pid .. "/fdinfo/" .. fd).stdout:match("(%d+)")
-            modes[#modes + 1] = tonumber(flags, 8) & 3
-        end
-    end
+    local _, _, on = eventd.fds_on(vm, pid, "/var/state/eventd/events/shard-0001.db")
+    for _, e in ipairs(on) do modes[#modes + 1] = e.mode end
     t:assert(#modes >= 1, "eventd has shard-0001.db open")
     local rw = 0
     for _, m in ipairs(modes) do

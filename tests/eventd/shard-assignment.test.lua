@@ -104,22 +104,11 @@ local function cpu_sequences(cpu)
     return out
 end
 
-local function threads()
-    local pid = assert(eventd.pid(vm), "eventd is running")
-    local out = {}
-    local r = vm:run("for d in /proc/" .. pid .. "/task/*; do echo ${d##*/} $(cat $d/comm); done")
-    for tid, comm in r.stdout:gmatch("(%d+) (%S+)") do
-        out[#out + 1] = { tid = tonumber(tid), comm = comm }
-    end
-    table.sort(out, function(a, b) return a.tid < b.tid end)
-    return out, pid
-end
-
 --- Writer threads in creation order, which is shard order (pipeline.rs
 --- spawns them in index order; comm is truncated, so all read the same).
 local function writer_tids()
     local out = {}
-    for _, th in ipairs(threads()) do
+    for _, th in ipairs(eventd.threads(vm)) do
         if th.comm:find("^eventd%-writer") then out[#out + 1] = th.tid end
     end
     return out
@@ -148,13 +137,6 @@ local function startup_line(fn)
         return #lines > before
     end, { timeout = 30, interval = 0.5, desc = "the start's log line" })
     return lines[1]
-end
-
-local function set_policy(tid, policy, priority)
-    local r = vm:syscall(144, {
-        args = { tid, policy, 0 }, bufs = { string.pack("<i4", priority or 0) }, ptrs = { 2 },
-    })
-    assert(r.ret == 0, "sched_setscheduler: errno " .. tostring(r.errno))
 end
 
 local function restart_with(value)
@@ -189,16 +171,12 @@ test("three shards on two CPUs: three databases, each with its own WAL and its o
         "eventd created one database per shard in the event store")
 
     local pid = eventd.pid(vm)
-    local fds = vm:run("for f in /proc/" .. pid .. "/fd/*; do echo $(readlink $f) " ..
-        "$(grep flags /proc/" .. pid .. "/fdinfo/${f##*/}); done").stdout
+    local fds = eventd.fds(vm, pid)
     for i = 0, 2 do
         local db = string.format("/var/state/eventd/events/shard-%04d.db", i)
-        local rw = 0
-        for path, flags in fds:gmatch("(%S+) flags: (%d+)") do
-            if path == db and tonumber(flags, 8) % 4 == 2 then rw = rw + 1 end
-        end
+        local rw = #eventd.fd_numbers(fds, db, 2)
         t:assert_eq(rw, 1, "shard " .. i .. " has exactly one read-write connection")
-        t:assert(fds:find(db .. "-wal ", 1, true), "and its own write-ahead log")
+        t:assert(#eventd.fd_numbers(fds, db .. "-wal") > 0, "and its own write-ahead log")
     end
     t:assert_eq(#writer_tids(), 3, "and there is one writer thread per shard")
 end)
@@ -261,7 +239,7 @@ test("CPU 0 owns shards 0 and 2 in fixed-length stripes, CPU 1 owns shard 1", {
 
     -- Drain threads hand off and never write: no write syscalls at all,
     -- while every writer has made some.
-    local ths, pid = threads()
+    local ths, pid = eventd.threads(vm)
     for _, th in ipairs(ths) do
         if th.comm:find("^eventd%-drain") or th.comm:find("^eventd%-writer") then
             local io = vm:read_file("/proc/" .. pid .. "/task/" .. th.tid .. "/io")
@@ -282,7 +260,7 @@ test("a stalled writer holds up only its own shards: there is no cross-shard coo
     -- threads at SCHED_FIFO and two busy loops; CPU 1 writes to shard 1.
     local writers = writer_tids()
     local drains = {}
-    for _, th in ipairs(threads()) do
+    for _, th in ipairs(eventd.threads(vm)) do
         if th.comm:find("^eventd%-drain") then drains[#drains + 1] = th.tid end
     end
     local stalled = "pt.shard." .. eventd.marker("stall0")
@@ -290,9 +268,9 @@ test("a stalled writer holds up only its own shards: there is no cross-shard coo
     local hogs = {}
     local during
     local ok, err = pcall(function()
-        set_policy(writers[1], SCHED_IDLE)
-        set_policy(writers[3], SCHED_IDLE)
-        for _, d in ipairs(drains) do set_policy(d, SCHED_FIFO, 1) end
+        eventd.set_policy(vm, writers[1], SCHED_IDLE)
+        eventd.set_policy(vm, writers[3], SCHED_IDLE)
+        for _, d in ipairs(drains) do eventd.set_policy(vm, d, SCHED_FIFO, 1) end
         for _ = 1, 4 do
             local r = vm:run("sh -c 'while :; do :; done' >/dev/null 2>&1 & echo $!")
             hogs[#hogs + 1] = r.stdout:match("(%d+)")
@@ -307,8 +285,8 @@ test("a stalled writer holds up only its own shards: there is no cross-shard coo
         t:assert_eq(total, 20, "shard 1 committed CPU 1's events")
     end)
     for _, h in ipairs(hogs) do vm:run("kill -9 " .. h) end
-    for _, w in ipairs(writers) do set_policy(w, SCHED_OTHER) end
-    for _, d in ipairs(drains) do set_policy(d, SCHED_OTHER) end
+    for _, w in ipairs(writers) do eventd.set_policy(vm, w, SCHED_OTHER) end
+    for _, d in ipairs(drains) do eventd.set_policy(vm, d, SCHED_OTHER) end
     if not ok then error(err, 0) end
     t:assert(during < 10000,
         "while CPU 0's earlier backlog was still being written by its own starved writers " ..
@@ -338,7 +316,7 @@ test("a stripe missing from the middle is re-ingested: receipts, not a high-wate
     t:assert(lo and hi and max > hi, "shard 2 holds a stripe below CPU 0's highest sequence " ..
         tostring(lo) .. ".." .. tostring(hi) .. " < " .. max)
 
-    vm:run("svctl stop eventd"):assert_ok()
+    eventd.stop(vm)
     -- The stop wrote synthetic.shutdown (shard 0) and the metadata
     -- checkpoints, both of which put CPU 0 at or beyond `max`.
     local shutdown = eventd.sql(vm, eventd.shards(vm)[1],
@@ -346,8 +324,7 @@ test("a stripe missing from the middle is re-ingested: receipts, not a high-wate
     t:assert(shutdown >= 1, "a shutdown record is in shard 0")
     vm:run("rm -f /var/state/eventd/events/shard-0002.db /var/state/eventd/events/shard-0002.db-wal " ..
         "/var/state/eventd/events/shard-0002.db-shm"):assert_ok()
-    vm:run("svctl start eventd"):assert_ok()
-    eventd.ready(vm)
+    eventd.start(vm)
 
     local after
     wait_until(function()
