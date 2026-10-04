@@ -202,6 +202,33 @@ zcat "$overlay" | (cd "$agent_dir" && cpio --quiet -idm 'sbin/provium-agent')
 }
 mv "$agent_dir/sbin/provium-agent" "$agent_dir/provium-agent"
 rmdir "$agent_dir/sbin"
+
+# --- the agent's signature --------------------------------------------------
+# The image's peinit, authd and eventd are PIP-signed at the TCB tier, and
+# PIP denies a non-dominant process every signal and every /proc read of
+# them. The agent is a test's hands, so it is signed at the same tier with
+# the development keyring the image's packages are signed with
+# (agent-sign.pekit.toml says how). A host without that keyring cannot
+# build this profile usefully, so it fails here rather than produce an
+# agent that quietly cannot reach half the system.
+keyring=$(readlink -f "${PEIOS_DEV_KEYRING:-../../../pkgs/dev.keyring.pekit.toml}" 2>/dev/null || true)
+[ -n "$keyring" ] && [ -r "$keyring" ] || {
+    warn "no development keyring to sign the agent with: set PEIOS_DEV_KEYRING" \
+         "(default ../../../pkgs/dev.keyring.pekit.toml)"
+    exit 1
+}
+pekit=${PEKIT:-$(command -v pekit || echo "$HOME/go/bin/pekit")}
+sign_dir="$out/agent-sign"
+rm -rf "$sign_dir"
+mkdir -p "$sign_dir/sbin"
+cp agent-sign.pekit.toml "$sign_dir/pekit.toml"
+cp "$agent_dir/provium-agent" "$sign_dir/sbin/provium-agent"
+(cd "$sign_dir" && "$pekit" --quiet build main --version 0.0.0 --keyring "$keyring") || {
+    warn "pekit could not PIP-sign the agent"
+    exit 1
+}
+cp "$sign_dir/out/build/main/usr/bin/provium-agent" "$agent_dir/provium-agent"
+rm -rf "$sign_dir"
 cp payload/10-provium-agent.sh "$agent_dir/"
 
 cat > "$agent_dir/agent.toml" <<'SPEC'
