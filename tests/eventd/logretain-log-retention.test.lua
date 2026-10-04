@@ -264,8 +264,20 @@ test("each retention transaction deletes at most RetentionDeleteBatchRows", {
     -- its frames until the next write restarts it, so it is read as soon
     -- as the rows are gone; a measurement the restart got to first is
     -- taken again.
+    --
+    -- The lines are thirty days old, so no pass may run under the default
+    -- fourteen days while they arrive: every applied change requests one.
+    -- LogRetentionDays is raised past their age first, the passes that
+    -- requested are left to finish, and only then is it lowered again —
+    -- the one change that starts the pass being measured.
     local got
+    eventd.set(vm, "RetentionDeleteBatchRows", "dword:100"):assert_ok()
     for _ = 1, 3 do
+        eventd.set(vm, "LogRetentionDays", "dword:60"):assert_ok()
+        -- An idle log thread takes a maintenance command a second at most
+        -- (log_ingest.rs:92), so a pass with nothing to delete is a few
+        -- seconds of them.
+        vm:clock():sleep("10s")
         local m = eventd.marker("bt")
         local old = now_ns() - 30 * DAY
         send_many(1000, function(i)
@@ -275,13 +287,13 @@ test("each retention transaction deletes at most RetentionDeleteBatchRows", {
             { timeout = 30, interval = 0.25, desc = "the lines to be stored" })
         vm:clock():sleep("1s")
         local c0, s0 = wal_state()
-        eventd.set(vm, "RetentionDeleteBatchRows", "dword:" .. (100 + flip)):assert_ok()
-        flip = flip + 1
+        eventd.unset(vm, "LogRetentionDays"):assert_ok()
         wait_until(function() return count("origin = " .. sql_quote(m)) == 0 end,
-            { timeout = 30, interval = 0.1, desc = "the lines to be deleted" })
+            { timeout = 60, interval = 0.1, desc = "the lines to be deleted" })
         local c1, s1 = wal_state()
         if s0 ~= nil and s1 == s0 then got = c1 - c0; break end
     end
+    eventd.unset(vm, "LogRetentionDays")
     eventd.unset(vm, "RetentionDeleteBatchRows")
     t:assert(got, "a measurement completed without the WAL restarting")
     t:assert(got and got >= 10, "1,000 rows at 100 per transaction took at least ten commits: " .. tostring(got))
