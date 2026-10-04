@@ -1,0 +1,461 @@
+-- eventd TRM §4.3 — the log store's database lifecycle: its directory,
+-- creation, opening, quarantine, connections and checkpointing.
+--
+-- One file-scope VM. The chapter's startup failures (a bad directory, a
+-- bad schema) are reached without letting the eventd service fail: a
+-- failing start of the service would retry and then trip peinit's
+-- Critical policy and take the VM to recovery. Instead the service is
+-- stopped through the service manager and the eventd binary is run by
+-- hand from the agent, against the same registry configuration, with
+-- LogStorePath pointed at a scratch directory under /run that the test
+-- has given the store directory's required descriptor (`sd set`) and
+-- filled with a tampered copy of logs.db. eventd opens its event
+-- directory, log directory and metric directory first (pipeline.rs:50-52)
+-- and the log database before binding any socket (pipeline.rs:117 then
+-- 123), so a log-store failure stops it before it touches anything the
+-- service would have to clean up. The run is under `timeout`; the service
+-- is started again afterwards with LogStorePath restored.
+--
+-- Cases that the service survives (creation, reopening, quarantine) go
+-- through the service itself: stop, change the files, start.
+
+local eventd = require("helpers.eventd")
+local peinit = require("helpers.peinit")
+peinit.claim(1)
+
+local vm = eventd.boot({ name = "ev-logdb" })
+
+local REQUIRED_SDDL = "O:SYG:SYD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
+    .. "(A;OICI;GA;;;S-1-5-80-1963885778-1835409261-1671587836-2279113866-1994761124)"
+
+-- ---------------------------------------------------------------------------
+-- Local helpers
+-- ---------------------------------------------------------------------------
+
+local function host_tmpdir()
+    local p = assert(io.popen("mktemp -d", "r"))
+    local dir = p:read("l")
+    p:close()
+    return dir
+end
+
+local function host_write(path, bytes)
+    local f = assert(io.open(path, "wb"))
+    f:write(bytes)
+    f:close()
+end
+
+local function host_read(path)
+    local f = assert(io.open(path, "rb"))
+    local s = f:read("a")
+    f:close()
+    return s
+end
+
+--- A copy of guest database `db` with `script` applied on the host,
+--- returned as bytes (its WAL folded in).
+local function host_derive(db, script)
+    local dir = host_tmpdir()
+    host_write(dir .. "/db", vm:read_file(db))
+    local okw, wal = pcall(vm.read_file, vm, db .. "-wal")
+    if okw and wal and #wal > 0 then host_write(dir .. "/db-wal", wal) end
+    host_write(dir .. "/edit.sql", script)
+    host_write(dir .. "/run.py", [[
+import sqlite3, sys
+d = sys.argv[1]
+c = sqlite3.connect(d + "/db")
+c.executescript(open(d + "/edit.sql").read())
+c.commit()
+c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+c.close()
+]])
+    local p = assert(io.popen("python3 " .. dir .. "/run.py " .. dir .. " 2>&1", "r"))
+    local out = p:read("a")
+    local ok = p:close()
+    assert(ok, "host sqlite edit failed: " .. out)
+    local bytes = host_read(dir .. "/db")
+    os.execute("rm -rf '" .. dir .. "'")
+    return bytes
+end
+
+local function host_edit(db, script)
+    local bytes = host_derive(db, script)
+    vm:run("rm -f '" .. db .. "-wal' '" .. db .. "-shm'"):assert_ok()
+    vm:write_file(db, bytes)
+end
+
+local function stop_eventd()
+    vm:run("svctl stop eventd"):assert_ok()
+    wait_until(function() return eventd.pid(vm) == nil end,
+        { timeout = 60, interval = 0.25, desc = "eventd to stop" })
+end
+
+local function start_eventd()
+    vm:run("svctl start eventd"):assert_ok()
+    eventd.ready(vm)
+end
+
+local SAVED_PATH = vm:run("reg get '" .. eventd.KEY .. "' LogStorePath").stdout:gsub("%s+$", "")
+
+local function set_log_path(path)
+    eventd.set(vm, "LogStorePath", "sz:" .. path):assert_ok()
+end
+
+local function restore_log_path()
+    set_log_path(SAVED_PATH)
+end
+
+--- A fresh directory under /run with the store directory's descriptor.
+local function scratch_dir(name)
+    local dir = "/run/" .. name
+    vm:run("rm -rf " .. dir .. " && mkdir -p " .. dir):assert_ok()
+    vm:run("sd set " .. dir .. " '" .. REQUIRED_SDDL .. "'"):assert_ok()
+    return dir
+end
+
+--- Run eventd by hand (the service must be stopped). Returns exit code
+--- and stderr.
+local function hand_run()
+    local r = vm:run("timeout 30 /usr/sbin/eventd")
+    return r.exit_code, r.stderr .. r.stdout
+end
+
+local function sha(path)
+    return vm:run("sha256sum '" .. path .. "'").stdout:match("^(%x+)")
+end
+
+local function exists(path)
+    return vm:run("test -e '" .. path .. "' -o -L '" .. path .. "'").exit_code == 0
+end
+
+local function wal_salt(db)
+    local ok, wal = pcall(vm.read_file, vm, db .. "-wal")
+    if not ok or #wal < 32 then return nil end
+    return (string.unpack(">I4", wal, 17))
+end
+
+local function rw_fds(pid, path)
+    local out = vm:run("for f in /proc/" .. pid .. "/fd/*; do [ \"$(readlink $f)\" = " .. path
+        .. " ] && sed -n 's/^flags:[[:space:]]*//p' /proc/" .. pid .. "/fdinfo/${f##*/}; done").stdout
+    local rw, ro = 0, 0
+    for flags in out:gmatch("%d+") do
+        if tonumber(flags, 8) & 3 == 2 then rw = rw + 1 else ro = ro + 1 end
+    end
+    return rw, ro
+end
+
+-- ---------------------------------------------------------------------------
+-- Path
+-- ---------------------------------------------------------------------------
+
+test("LogStorePath names the provisioned log directory, and the database in it is logs.db", {
+    spec = "eventd *logdb.logstorepath-names-a-provisioned-directory"
+        .. " eventd *logdb.the-log-database-file-is-named-logs-db",
+}, function(t)
+    t:assert_eq(SAVED_PATH:gsub("/$", ""), "/var/state/eventd/logs", "the conventional path")
+    local prov = vm:run("reg get 'Machine\\System\\Init\\ProvisionedPaths\\eventd-logs' Path")
+    t:assert_eq(prov.stdout:gsub("%s+$", ""):gsub("/$", ""), "/var/state/eventd/logs",
+        "which peinit provisions before Phase 2")
+    local dbs = {}
+    for _, e in ipairs(vm:listdir(eventd.STORE.logs)) do
+        local n = type(e) == "table" and e.name or e
+        if n:match("%.db$") then dbs[#dbs + 1] = n end
+    end
+    t:assert_eq(table.concat(dbs, ","), "logs.db", "the database is logs.db inside it")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Concurrency
+-- ---------------------------------------------------------------------------
+
+test("logs.db has one read-write connection; queries read through their own", {
+    spec = "eventd *logdb.one-read-write-connection-owned-by-the-log-writer-and-any-number-of-read-only-ones",
+}, function(t)
+    local pid = eventd.pid(vm)
+    local rw = rw_fds(pid, eventd.DB.logs)
+    t:assert_eq(rw, 1, "one read-write descriptor on logs.db")
+    -- Queries read concurrently with the writer and leave no writer behind.
+    for _ = 1, 3 do eventd.rows(vm, "LOGS SINCE 1h ago TAKE 50") end
+    t:assert_eq((rw_fds(pid, eventd.DB.logs)), 1, "still exactly one after queries")
+end)
+
+test("retention reaches logs.db only through the log writer", {
+    spec = "eventd *logdb.retention-and-catalogue-cleanup-go-through-the-writer-and-never-open-a-read-write-connection",
+}, function(t)
+    -- Old rows for retention to delete, a pass triggered by an applied
+    -- configuration change (config.rs:1031), and the descriptors sampled
+    -- while it runs: never a second read-write connection.
+    local origin = eventd.marker("ret")
+    local recs = {}
+    local old = math.tointeger(tonumber((vm:run("date +%s%N").stdout:gsub("%s", ""))) - 40 * 86400 * 10 ^ 9)
+    for i = 1, 3000 do recs[i] = { origin = origin, is_error = false, message = "r" .. i, timestamp = old + i } end
+    eventd.send_log(vm, recs)
+    eventd.wait_rows(vm, "LOGS FROM " .. origin .. " TAKE 10000", function(rs) return #rs == 3000 end)
+    local pid = eventd.pid(vm)
+    eventd.set(vm, "RetentionDeleteBatchRows", "dword:100"):assert_ok()
+    local most = 0
+    for _ = 1, 20 do
+        most = math.max(most, (rw_fds(pid, eventd.DB.logs)))
+    end
+    wait_until(function()
+        return #eventd.sql(vm, eventd.DB.logs, "SELECT 1 FROM logs WHERE origin = '" .. origin .. "' LIMIT 1") == 0
+    end, { timeout = 30, interval = 0.5, desc = "retention to delete the old rows" })
+    eventd.unset(vm, "RetentionDeleteBatchRows")
+    t:assert_eq(most, 1, "at most one read-write descriptor on logs.db throughout the pass")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Creation and opening
+-- ---------------------------------------------------------------------------
+
+test("a log store that does not exist is created with its schema, indexes and entries, in WAL mode", {
+    spec = "eventd *logdb.a-log-store-that-does-not-exist-is-created"
+        .. " eventd *logdb.creation-sets-wal-journal-mode"
+        .. " eventd *logdb.creation-sets-synchronous-normal"
+        .. " eventd *logdb.creation-creates-the-logs-log-origins-and-metadata-tables"
+        .. " eventd *logdb.creation-creates-the-three-write-time-indexes"
+        .. " eventd *logdb.creation-writes-the-schema-version-and-created-at-entries",
+}, function(t)
+    -- synchronous=NORMAL is per connection and leaves no mark in the
+    -- file; everything else creation does is in it.
+    stop_eventd()
+    local db = eventd.DB.logs
+    vm:run("rm -f '" .. db .. "' '" .. db .. "-wal' '" .. db .. "-shm'"):assert_ok()
+    start_eventd()
+    t:assert(vm:stat(db), "logs.db was created")
+    local header = vm:read_file(db)
+    t:assert_eq(header:byte(19) .. "," .. header:byte(20), "2,2", "in WAL mode")
+    local objects = {}
+    for _, r in ipairs(eventd.sql(vm, db,
+        "SELECT type || ':' || name FROM sqlite_master WHERE sql IS NOT NULL ORDER BY 1")) do
+        objects[#objects + 1] = r[1]
+    end
+    t:assert_eq(table.concat(objects, ","),
+        "index:idx_logs_job_id,index:idx_logs_origin,index:idx_logs_timestamp,table:log_origins,table:logs,table:metadata",
+        "with the three tables and three indexes")
+    local meta = {}
+    for _, r in ipairs(eventd.sql(vm, db, "SELECT key, value FROM metadata")) do meta[r[1]] = r[2] end
+    t:assert_eq(meta.schema_version, "1", "schema_version 1")
+    t:assert(meta.created_at and meta.created_at:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$"),
+        "and a created_at: " .. tostring(meta.created_at))
+end)
+
+test("an existing log store is reopened in WAL mode", {
+    spec = "eventd *logdb.opening-uses-wal-mode"
+        .. " eventd *logdb.opening-sets-synchronous-normal",
+}, function(t)
+    -- Take the file out of WAL mode offline (journal_mode is persistent),
+    -- and the next open puts it back. synchronous=NORMAL is per connection
+    -- and not visible from outside.
+    stop_eventd()
+    host_edit(eventd.DB.logs, "PRAGMA journal_mode=DELETE;")
+    local header = vm:read_file(eventd.DB.logs)
+    t:assert_eq(header:byte(19) .. "," .. header:byte(20), "1,1", "precondition: a rollback-journal file")
+    start_eventd()
+    header = vm:read_file(eventd.DB.logs)
+    t:assert_eq(header:byte(19) .. "," .. header:byte(20), "2,2", "opening switched it to WAL")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Checkpointing
+-- ---------------------------------------------------------------------------
+
+-- PEI-TBD-wal-checkpoint-by-file-size: the writer is to checkpoint "when
+-- its write-ahead log reaches WalCheckpointPages". LogStore measures the
+-- WAL *file* (log_store.rs:213-226, `fs::metadata(..-wal).len()`), and
+-- SQLite reuses a checkpointed WAL from the start without shrinking the
+-- file (no journal_size_limit is set). Once the file has reached the
+-- threshold it stays there, so from then on every commit — however small
+-- the log behind it — is followed by a checkpoint. Shards and the
+-- metadata database use the same measure (shard.rs, meta_store.rs:198).
+test("the log writer checkpoints when its WAL reaches WalCheckpointPages, and not before", {
+    spec = "eventd *logdb.the-log-writer-checkpoints-passively-at-walcheckpointpages-and-retries-after-a-later-commit",
+    tags = { "known-bug" },
+}, function(t)
+    eventd.set(vm, "WalCheckpointPages", "dword:100"):assert_ok()
+    vm:clock():sleep("2s")
+    local origin = eventd.marker("cp")
+    local function write(n)
+        local recs = {}
+        for i = 1, n do recs[i] = { origin = origin, is_error = false, message = string.rep("m", 200) .. i } end
+        eventd.send_log(vm, recs)
+        vm:clock():sleep("500ms")
+    end
+    write(1)
+    local s0 = wal_salt(eventd.DB.logs)
+    local crossed = false
+    for _ = 1, 20 do
+        write(200)
+        if wal_salt(eventd.DB.logs) ~= s0 then crossed = true; break end
+    end
+    t:assert(crossed, "a WAL past 100 pages was checkpointed and restarted")
+    -- The restarted log holds a few pages. Small commits now must not each
+    -- be checkpointed.
+    write(1)
+    local s1 = wal_salt(eventd.DB.logs)
+    write(1)
+    write(1)
+    local s2 = wal_salt(eventd.DB.logs)
+    eventd.unset(vm, "WalCheckpointPages")
+    t:assert_eq(s2, s1, "three one-line commits far below the threshold did not restart the WAL")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Startup failures (the service stopped; eventd run by hand)
+-- ---------------------------------------------------------------------------
+
+test("a missing, relative or unprotected log directory fails startup, and none is created", {
+    spec = "eventd *logdb.a-missing-invalid-or-unsafe-log-store-directory-fails-startup"
+        .. " eventd *logdb.the-log-store-directory-has-the-event-store-directory-requirements"
+        .. " eventd *logdb.the-directory-is-never-created-symlinks-are-never-followed-and-the-database-is-opened-handle-relative"
+        .. " eventd *logdb.the-log-store-is-required-and-eventd-never-runs-without-one",
+}, function(t)
+    -- The database being opened relative to the validated directory handle
+    -- is not distinguishable from outside; the refusals around it are.
+    vm:run("rm -rf /run/pt-unprot && mkdir -p /run/pt-unprot"):assert_ok()
+    local good = scratch_dir("pt-good")
+    vm:run("ln -sfn " .. good .. " /run/pt-link"):assert_ok()
+    vm:run("ln -sfn /run /run/pt-runlink"):assert_ok()
+    local cases = {
+        { "missing", "/run/pt-absent/deeper" },
+        { "relative", "run/pt-good" },
+        { "without the required descriptor", "/run/pt-unprot" },
+        { "a symbolic link as the directory", "/run/pt-link" },
+        { "a symbolic link above it", "/run/pt-runlink/pt-good" },
+    }
+    stop_eventd()
+    local ok, err = pcall(function()
+        for _, c in ipairs(cases) do
+            set_log_path(c[2])
+            local code, out = hand_run()
+            t:assert(code ~= 0 and code ~= 124, c[1] .. ": eventd refused to start (exit " .. code .. "): " .. out)
+            t:assert(not exists("/run/eventd/query.sock"),
+                c[1] .. ": and never got as far as serving queries")
+        end
+        t:assert(not exists("/run/pt-absent"), "the missing directory, and its parent, were not created")
+        t:assert(not exists(good .. "/logs.db"), "nothing was created through either link")
+        -- The same directory named directly, with its descriptor, is fine.
+        set_log_path(good)
+    end)
+    restore_log_path()
+    start_eventd()
+    if not ok then error(err, 0) end
+end)
+
+test("a log store with a missing or unknown schema version fails startup and is left as it was", {
+    spec = "eventd *logdb.a-missing-or-unrecognised-schema-version-fails-startup-without-migration"
+        .. " eventd *logdb.missing-tables-or-indexes-without-reported-corruption-fail-startup"
+        .. " eventd *logs.the-log-store-schema-is-checked-at-startup-and-never-migrated",
+}, function(t)
+    local cases = {
+        { "schema_version missing", "DELETE FROM metadata WHERE key = 'schema_version';" },
+        { "schema_version 2", "UPDATE metadata SET value = '2' WHERE key = 'schema_version';" },
+        { "log_origins missing", "DROP TABLE log_origins;" },
+        { "idx_logs_origin missing", "DROP INDEX idx_logs_origin;" },
+        { "idx_logs_job_id missing", "DROP INDEX idx_logs_job_id;" },
+    }
+    local dir = scratch_dir("pt-schema")
+    local derived = {}
+    for i, c in ipairs(cases) do derived[i] = host_derive(eventd.DB.logs, c[2]) end
+    stop_eventd()
+    local ok, err = pcall(function()
+        set_log_path(dir)
+        for i, c in ipairs(cases) do
+            vm:run("rm -f " .. dir .. "/*"):assert_ok()
+            vm:write_file(dir .. "/logs.db", derived[i])
+            local before = sha(dir .. "/logs.db")
+            local code, out = hand_run()
+            t:assert(code ~= 0 and code ~= 124, c[1] .. ": startup failed (exit " .. code .. "): " .. out)
+            t:assert_eq(sha(dir .. "/logs.db"), before, c[1] .. ": the file was not migrated or rewritten")
+            local names = vm:run("ls " .. dir).stdout
+            t:assert(not names:find("corrupt", 1, true), c[1] .. ": nor quarantined as corrupt: " .. names)
+        end
+    end)
+    restore_log_path()
+    start_eventd()
+    if not ok then error(err, 0) end
+end)
+
+-- ---------------------------------------------------------------------------
+-- A directory that meets the requirements, and quarantine
+-- ---------------------------------------------------------------------------
+
+--- Point the log store at a protected scratch directory holding a corrupt
+--- logs.db and junk sidecars, restart eventd, and hand `check` the
+--- directory listing (sorted) and the suffix each file was quarantined
+--- under. LogStorePath is restored afterwards.
+local function quarantine_case(t, name, check)
+    local dir = scratch_dir(name)
+    local junk = string.rep("this is not a database ", 400)
+    vm:write_file(dir .. "/logs.db", junk)
+    vm:write_file(dir .. "/logs.db-wal", "wal junk")
+    vm:write_file(dir .. "/logs.db-shm", "shm junk")
+    set_log_path(dir)
+    local from = math.tointeger(tonumber((vm:run("date +%s%N").stdout:gsub("%s", ""))))
+    local ok, err = pcall(function()
+        eventd.restart(vm)
+        local names = {}
+        for _, e in ipairs(vm:listdir(dir)) do names[#names + 1] = type(e) == "table" and e.name or e end
+        table.sort(names)
+        local suffixes = {}
+        for _, n in ipairs(names) do
+            local base, suffix = n:match("^(logs%.db[%-%a]*)(%.corrupt%..+)$")
+            if base then suffixes[base] = suffix end
+        end
+        check(dir, junk, names, suffixes, from)
+    end)
+    restore_log_path()
+    eventd.restart(vm)
+    if not ok then error(err, 0) end
+end
+
+test("a corrupt log store is quarantined and a fresh one created in its place", {
+    spec = "eventd *logdb.a-corrupt-log-store-is-quarantined-and-replaced",
+}, function(t)
+    -- The directory is the test's own, given the required descriptor: a
+    -- store directory other than the provisioned one is accepted when it
+    -- meets the requirements.
+    quarantine_case(t, "pt-quar1", function(dir, junk, names, suffixes, from)
+        local q = suffixes["logs.db"]
+        t:assert(q and q:match("^%.corrupt%.%d+$"),
+            "the database was renamed .corrupt.<timestamp_ns>: " .. table.concat(names, ", "))
+        t:assert_eq(vm:read_file(dir .. "/logs.db" .. (q or "")), junk, "the quarantined file is the original")
+        local version = eventd.sql(vm, dir .. "/logs.db", "SELECT value FROM metadata WHERE key = 'schema_version'")
+        t:assert_eq(version[1] and version[1][1], "1", "a fresh log store stands at the configured path")
+        local origin = eventd.marker("q")
+        eventd.send_log(vm, { origin = origin, is_error = false, message = "after" })
+        eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 1 end)
+        local errs = eventd.rows(vm, "EVENTS " .. eventd.T.storage_error .. " SINCE 10m ago")
+        local seen = false
+        for _, e in ipairs(errs) do
+            if e.store == "log" and e.timestamp >= from then seen = true end
+        end
+        t:assert(seen, "and the replacement was recorded as a log storage error: " .. json.encode(errs))
+    end)
+end)
+
+-- PEI-TBD-quarantine-loses-sidecars: the book renames the database, -wal
+-- and -shm together. LogStore::open_recovering (log_store.rs:69-80) tries
+-- the open first; the failed open's Connection is dropped on the error
+-- path inside LogStore::open (the `?` after validate/pragma), and SQLite,
+-- closing the last connection to a file it treated as WAL, deletes the
+-- -wal and -shm. quarantine::database (quarantine.rs:17-21) then finds
+-- only the main file. The sidecars — possibly the only copy of the last
+-- commits — are gone before anything can be renamed. (Reproduced with the
+-- host's sqlite: open junk + junk sidecars, fail, close: only the main
+-- file is left.) Shard::open_recovering (shard.rs:76-90) has the same shape.
+test("quarantine renames the database, -wal and -shm under one shared suffix", {
+    spec = "eventd *logdb.quarantine-renames-all-three-files-with-a-shared-corrupt-suffix-and-creates-a-fresh-store",
+    tags = { "known-bug" },
+}, function(t)
+    -- The `.N` collision rule needs the nanosecond timestamp eventd will
+    -- pick, which a test cannot arrange in advance.
+    quarantine_case(t, "pt-quar2", function(dir, junk, names, suffixes)
+        t:assert(suffixes["logs.db"] and suffixes["logs.db-wal"] and suffixes["logs.db-shm"],
+            "all three files were quarantined: " .. table.concat(names, ", "))
+        t:assert(suffixes["logs.db"] == suffixes["logs.db-wal"] and suffixes["logs.db"] == suffixes["logs.db-shm"],
+            "under one shared suffix")
+        t:assert_eq(vm:read_file(dir .. "/logs.db-wal" .. (suffixes["logs.db-wal"] or "")), "wal junk",
+            "the quarantined -wal is the original")
+    end)
+end)
