@@ -255,7 +255,7 @@ test("pretty is the default format: one self-describing record per line", {
         "and it is what --format pretty writes")
 end)
 
--- PEI-TBD-evctl-extension-json-brace: jsonl output of an extension value has one `}` too many, so the line is not JSON.
+-- PEI-1296 (PEI-TBD-evctl-extension-json-brace): jsonl output of an extension value has one `}` too many, so the line is not JSON.
 -- evctl writes an extension value as
 -- `{"$extension":{"type":5,"data":"07"}}}` — the closing write_all at
 -- evctl/src/output.rs:215 is the literal `"}}}`, three braces where the two

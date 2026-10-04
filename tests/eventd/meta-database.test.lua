@@ -279,7 +279,7 @@ test("query counts stay in memory until the policy thread flushes them", {
     t:assert(counter("cpu_id"), "a header field is recorded as its column name")
 end)
 
--- TRM-config-change-recomputes-index-policy: the book has the database
+-- PEI-1298 (TRM-config-change-recomputes-index-policy): the book has the database
 -- written once per policy interval (a1: at least sixty minutes). eventd
 -- also recomputes and writes it on every applied configuration change
 -- (config.rs:1031-1032, `index_policy.try_send(PolicyMessage::Recompute)`)
@@ -461,7 +461,7 @@ test("a malformed metadata database is replaced by a fresh one at startup", {
     end
 end)
 
--- PEI-TBD-meta-recreate-silent: the book has eventd log an error when it
+-- PEI-1296 (PEI-TBD-meta-recreate-silent): the book has eventd log an error when it
 -- throws an invalid metadata database away. MetaStore::open
 -- (meta_store.rs:80-85) drops and recreates it without a word, and
 -- pipeline.rs:64-67 prints nothing either, so the loss of the accumulated

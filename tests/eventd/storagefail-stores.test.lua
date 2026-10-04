@@ -385,7 +385,7 @@ test("a failed event commit on a full disk does not stop the writer", {
     t:assert(names:find("eventd-writer-0", 1, true), "with its writer thread alive: " .. names)
 end)
 
--- PEI-TBD-retention-pass-aborts-on-full-store: the disk-full write does
+-- PEI-1289 (PEI-TBD-retention-pass-aborts-on-full-store): the disk-full write does
 -- request an immediate pass (writer.rs:365-369), but retention::pass
 -- (retention.rs:113-190) runs the stores in a fixed order and returns at
 -- the first error with `?`. With the event store full its own steps fail
@@ -403,7 +403,7 @@ test("a full disk under the event store triggers a retention run across every st
     t:assert(gone, "the retention run the full disk triggered reached the log store and removed the aged record")
 end)
 
--- PEI-TBD-disk-full-stderr-ranges: the event writer's disk-full line is
+-- PEI-1296 (PEI-TBD-disk-full-stderr-ranges): the event writer's disk-full line is
 -- "eventd: event store is full; batch discarded and retention requested:
 -- <SQLite error>" (writer.rs:365-369) — no CPU, no sequence range.
 test("a failed event batch is logged to stderr with its CPUs and sequence ranges", {

@@ -4,7 +4,7 @@
 -- A defect shapes this file. When a rollup commit leaves fewer rows than
 -- AdaptiveRollupMaxRows, prune_rollups computes a negative excess and deletes
 -- with a negative LIMIT, which SQLite reads as "no limit": every commit under
--- the cap empties the whole cache (PEI-TBD-rollup-prune-negative-limit, the
+-- the cap empties the whole cache (PEI-1286 (PEI-TBD-rollup-prune-negative-limit), the
 -- known-bug test below). Rows only survive a commit that lands at or above the
 -- cap. So:
 --
@@ -185,7 +185,7 @@ test("ingestion never writes rollups and nothing seeds them without a query", {
     t:assert_eq(#rollups(name), 0, "no rollups exist for a series that was ingested but never queried")
 end)
 
--- PEI-TBD-rollup-prune-negative-limit: §5.6 says the writer "upserts a
+-- PEI-1286 (PEI-TBD-rollup-prune-negative-limit): §5.6 says the writer "upserts a
 -- candidate … and prunes the oldest window starts until no more than
 -- AdaptiveRollupMaxRows remain", so under the cap nothing is pruned. HEAD's
 -- prune_rollups (metric_store.rs:705-712) computes `count.saturating_sub(

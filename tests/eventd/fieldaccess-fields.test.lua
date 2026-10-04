@@ -287,7 +287,7 @@ test("the object type list has the type's root at level 0 and its fields at leve
     spec = "eventd *fieldaccess.the-object-type-list-is-the-type-root-at-level-0-and-one-field-per-level-1-node",
     tags = { "known-bug" },
 }, function(t)
-    -- PEI-TBD-root-guid-ace-breaks-query: an allowing object ACE naming the
+    -- PEI-1288 (PEI-TBD-root-guid-ace-breaks-query): an allowing object ACE naming the
     -- data type's root GUID (§B) makes every query of the identifier fail
     -- with "access-control failure: Invalid argument". field_grants takes
     -- every allowing object ACE's GUID for a field's
@@ -417,7 +417,7 @@ test("the fixed metric fields are named timestamp, boot_id, name, type and value
     spec = "eventd *fieldaccess.the-fixed-metric-field-names",
     tags = { "known-bug" },
 }, function(t)
-    -- PEI-TBD-hidden-metric-timestamp-drops-sample: boot_id, type, name and
+    -- PEI-1296 (PEI-TBD-hidden-metric-timestamp-drops-sample): boot_id, type, name and
     -- value are each removed from the sample by their names' GUIDs, but a
     -- sample whose timestamp is hidden vanishes. authorize_row removes the
     -- field before the series reader places the sample, and timestamp(row)

@@ -258,7 +258,7 @@ end)
 -- row. The boundary pairs below were found to collide under the book's own
 -- FNV parameters (§5.2) and are each strictly increasing and finite.
 --
--- PEI-TBD-histogram-boundary-hash-identity: the code makes the boundary HASH
+-- PEI-1285 (PEI-TBD-histogram-boundary-hash-identity): the code makes the boundary HASH
 -- part of series identity via UNIQUE(name, labels, boundaries_hash)
 -- (metric_store.rs:21), so the new-series INSERT (resolve_or_insert,
 -- metric_store.rs:489) violates it; commit_batch treats the error as fatal

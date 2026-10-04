@@ -231,7 +231,7 @@ test("the eventd package declares its state directories as required peinit provi
     spec = "eventd *eventdb.the-package-provisions-the-state-directory-and-its-three-store-directories",
     tags = { "known-bug" },
 }, function(t)
-    -- TRM-state-root-not-provisioned: eventd-config.reg declares required
+    -- PEI-1298 (TRM-state-root-not-provisioned): eventd-config.reg declares required
     -- ProvisionedPaths entries for events/, logs/ and metrics/ only
     -- (registry.d/eventd-config.reg:24-100, "The package supplies the
     -- three empty /var/state directories. The required ProvisionedPaths
@@ -260,7 +260,7 @@ test("each store directory is protected, inheritable, full control to SYSTEM and
     spec = "eventd *eventdb.provisioned-store-directories-grant-full-control-only-to-system-and-administrators",
     tags = { "known-bug" },
 }, function(t)
-    -- TRM-store-dir-service-sid: since eventd runs as its own service
+    -- PEI-1298 (TRM-store-dir-service-sid): since eventd runs as its own service
     -- account (commit 5a77aab, "run eventd as its own service account"),
     -- the package's descriptors and the one eventd demands
     -- (directory.rs:12 REQUIRED_SDDL) add (A;OICI;GA;;;<eventd service
@@ -719,7 +719,7 @@ test("quarantine moves the database, its WAL and its shared memory under one suf
         .. " eventd *eventdb.a-corrupt-store-is-never-deleted-or-automatically-repaired",
     tags = { "known-bug" },
 }, function(t)
-    -- PEI-TBD-quarantine-loses-wal: Shard::open_recovering (shard.rs:76-90)
+    -- PEI-1287 (PEI-TBD-quarantine-loses-wal): Shard::open_recovering (shard.rs:76-90)
     -- quarantines only after Shard::open has failed, and that open runs
     -- SQLite against the database with its -wal and -shm in place
     -- (shard.rs:96-110). SQLite opens a present -wal, rebuilds the -shm,

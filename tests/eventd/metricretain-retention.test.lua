@@ -190,7 +190,7 @@ test("retention invalidates the rollups of every series it deletes from", {
     -- Valid hourly rollup rows for both series' old windows, written into the
     -- stopped store. (A seeding query would write the same rows, but a commit
     -- under AdaptiveRollupMaxRows empties the cache — see
-    -- rollup-adaptive-rollups.test.lua, PEI-TBD-rollup-prune-negative-limit —
+    -- rollup-adaptive-rollups.test.lua, PEI-1286 (PEI-TBD-rollup-prune-negative-limit) —
     -- and this test is about what retention does with rows that exist.)
     local H = 3600 * 1000000000
     edit_store(vm, "WITH RECURSIVE w(ws) AS (SELECT " .. base .. " UNION ALL SELECT ws + " .. H

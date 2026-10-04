@@ -403,7 +403,7 @@ test("a userspace emitter cannot make a record that event_type alone reads as sy
     spec = "eventd *events.event-type-alone-distinguishes-real-from-synthetic-records",
     tags = { "known-bug" },
 }, function(t)
-    -- PEI-TBD-synthetic-prefix-spoofable: eventd stores any real KMES event
+    -- PEI-1294 (PEI-TBD-synthetic-prefix-spoofable): eventd stores any real KMES event
     -- under the type it was emitted with (shard.rs:174-191 inserts
     -- event.event_type verbatim; kmes.rs drain copies it unchecked), so a
     -- userspace `synthetic.*` emission becomes a row whose type says
@@ -613,7 +613,7 @@ test("a known type adds no catalogue statement to an insert, real or synthetic",
     spec = "eventd *events.a-known-type-adds-no-catalogue-statement-to-an-insert",
     tags = { "known-bug" },
 }, function(t)
-    -- PEI-TBD-synthetic-catalogue-reinsert: commit_synthetic (shard.rs:334)
+    -- PEI-1296 (PEI-TBD-synthetic-catalogue-reinsert): commit_synthetic (shard.rs:334)
     -- and commit_gaps (shard.rs:258) execute INSERT OR IGNORE INTO
     -- event_types on every call, without consulting the in-memory set the
     -- real-event path uses (shard.rs:175).
@@ -833,7 +833,7 @@ test("retention removes a type its deletes orphaned, once rechecked, and never a
         .. " eventd *events.an-unindexed-or-interrupted-orphan-check-is-skipped-rather-than-delaying-ingestion",
     tags = { "known-bug" },
 }, function(t)
-    -- PEI-TBD-no-orphan-type-cleanup: retention deletes event rows only
+    -- PEI-1296 (PEI-TBD-no-orphan-type-cleanup): retention deletes event rows only
     -- (shard.rs:354-376 retain_before/retain_boot); nothing in eventd
     -- offers, runs, rechecks or skips an orphan-type check, so a type whose
     -- last event retention deleted stays catalogued for ever.

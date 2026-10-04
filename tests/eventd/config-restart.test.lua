@@ -329,7 +329,7 @@ test("so does a missing one", {
     t:assert(not answered, "and does not answer")
 end)
 
--- PEI-TBD-threshold-relation-fails-startup: a seeded drop threshold not below the create threshold crashes eventd at startup.
+-- PEI-1291 (PEI-TBD-threshold-relation-fails-startup): a seeded drop threshold not below the create threshold crashes eventd at startup.
 -- A drop threshold not below the
 -- create threshold is "ignored, value retained" on reload (config.rs:426-450)
 -- but at startup from_values returns ConfigError::Invalid (config.rs:147-149),

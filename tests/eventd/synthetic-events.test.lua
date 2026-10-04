@@ -298,7 +298,7 @@ end
 -- The full-store tests run in order: the metric store full (while shard 0
 -- can still take a record about it), then shard 0, then both shards.
 
--- TRM-storage-error-only-for-corruption: a disk-full write failure takes
+-- PEI-1298 (TRM-storage-error-only-for-corruption): a disk-full write failure takes
 -- the capacity path, which requests retention and emits nothing
 -- (metric_ingest.rs:332-335 and 405-408, log_ingest.rs:181-185 and 210-213,
 -- writer.rs:247-250 and 488-491); only SQLite corruption reaches
@@ -337,7 +337,7 @@ test("a failed write to the metric store is recorded as a storage error", {
     t:assert_eq(errors[1] and errors[1].store, "metric", "for the metric store")
 end)
 
--- PEI-TBD-no-daemon-wide-fallback: only synthetic.shutdown tries the other
+-- PEI-1292 (PEI-TBD-no-daemon-wide-fallback): only synthetic.shutdown tries the other
 -- shards (pipeline.rs:669, commit_synthetic_fallback at :782). startup and
 -- config_change are pinned to queue 0 (pipeline.rs:336, :406), startup
 -- storage errors to shards[0] (pipeline.rs:146), and when shard 0's commit

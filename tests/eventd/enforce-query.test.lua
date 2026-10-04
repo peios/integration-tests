@@ -269,7 +269,7 @@ test("each result identifier is re-checked for EVENTD_READ with an audit context
     spec = "eventd *enforce.each-result-identifier-is-rechecked-for-eventd-read-with-field-guids",
     tags = { "known-bug" },
 }, function(t)
-    -- TRM-audit-context-identifier: step 9 says the audit context names
+    -- PEI-1298 (TRM-audit-context-identifier): step 9 says the audit context names
     -- the identifier; §7.4's own audit-trail section, and the code,
     -- name the pattern the descriptor was resolved from
     -- (eventd/src/query/security.rs:222-225, "{namespace}:{pattern}").

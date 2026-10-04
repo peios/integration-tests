@@ -116,7 +116,7 @@ test("readable() says Unknown, with the reason, when the policy cannot be read",
 -- What eventd does with the text and the grants
 -- ---------------------------------------------------------------------------
 
--- TRM-bare-keyword-origin: a bare origin named WHERE or STREAM after FROM is read as the origin, not the clause.
+-- PEI-1298 (TRM-bare-keyword-origin): a bare origin named WHERE or STREAM after FROM is read as the origin, not the clause.
 -- FROM takes a comma list of identifiers and never
 -- looks for a clause keyword there (query_language.rs:779-791), so an origin
 -- called WHERE or STREAM written bare is read as the origin, not the clause.

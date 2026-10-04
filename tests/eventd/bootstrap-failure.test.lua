@@ -321,7 +321,7 @@ test("KMES attachment needs SeSecurityPrivilege, and without KMES nothing starts
         "the failure is KMES attachment being refused: " .. json.encode(line))
 end)
 
--- TRM-bootstrap-phase-order: eventd reads the boot ID (Phase 4, step 13)
+-- PEI-1298 (TRM-bootstrap-phase-order): eventd reads the boot ID (Phase 4, step 13)
 -- before it opens or creates a single store (Phase 3) — pipeline.rs:61
 -- precedes the metadata and shard opens at :64-93 — and binds the log
 -- socket (Phase 5) before it opens metrics.db (Phase 3, step 11),

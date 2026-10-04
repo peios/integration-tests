@@ -232,7 +232,7 @@ test("events alternating between two shards come back in one newest-first sequen
     t:assert_eq(json.encode(field(page, "i")), "[4,3,2]", "and a page of the merge is a slice of it")
 end)
 
--- PEI-TBD-group-count-unsorted: Groups::finish emits GROUP results "in
+-- PEI-1295 (PEI-TBD-group-count-unsorted): Groups::finish emits GROUP results "in
 -- the order its groups appeared" (HEAD executor.rs:2048-2089) and
 -- emit_aggregate sorts only on an explicit SORT (400-408); only COUNT BY
 -- and TOP N BY go through `counted` (2105-2128). v0.1.5 behaves the same.

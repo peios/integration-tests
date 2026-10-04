@@ -369,7 +369,7 @@ test("every store has its one read-write connection, and a pass adds none while 
     t:assert(s0 ~= nil and s1 ~= s0, "and the pass checkpointed the shard, so its WAL started over")
 end)
 
--- TRM-historical-shard-retention-writer: the book has the coordinator own
+-- PEI-1298 (TRM-historical-shard-retention-writer): the book has the coordinator own
 -- no read-write connection and every database's one writer be its
 -- ingestion writer. A historical shard has no ingestion writer, and the
 -- retention thread opens each one read-write itself for its whole life

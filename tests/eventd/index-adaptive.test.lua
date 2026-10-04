@@ -519,7 +519,7 @@ test("once pressure subsides a quiet shard rebuilds what it shed, highest priori
         .. " eventd *index.an-idle-writer-takes-one-convergence-action-then-rechecks-pressure",
     tags = { "known-bug" },
 }, function(t)
-    -- PEI-TBD-convergence-only-on-policy-broadcast: a writer converges
+    -- PEI-1296 (PEI-TBD-convergence-only-on-policy-broadcast): a writer converges
     -- only while handling a WriterMessage::IndexPolicy (writer.rs:433-472),
     -- and those are sent only when the policy runs (indexing.rs:282-289
     -- broadcast_desired, hourly or on a config change). Shedding

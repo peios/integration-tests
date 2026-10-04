@@ -37,7 +37,7 @@ test("eventd stores events, logs and metrics, and answers queries for all three"
         1, "held in eventd's own event store")
 end)
 
--- PEI-TBD-eventd-not-tcb-signed: eventd's binary is not signed, so it runs with no PIP trust rather than at TCB level.
+-- PEI-1293 (PEI-TBD-eventd-not-tcb-signed): eventd's binary is not signed, so it runs with no PIP trust rather than at TCB level.
 -- eventd runs unprotected (pip_type 0,
 -- pip_trust 0) while peinit and authd in the same image run at PeiosTcb
 -- (512/8192). Their pekit.toml sign the binary ([build.main.sign.pip], authd

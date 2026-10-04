@@ -378,7 +378,7 @@ test("the dump reports the last write error of each store", {
     end
 end)
 
--- PEI-TBD-sigpipe-ignored: eventd survives SIGPIPE. Nothing in eventd
+-- PEI-1298 (PEI-TBD-sigpipe-ignored): eventd survives SIGPIPE. Nothing in eventd
 -- installs that (pipeline.rs:539-551 handles TERM, INT, QUIT and HUP
 -- only); the Rust runtime sets SIGPIPE to SIG_IGN before main.
 test("every other signal keeps its default action", {

@@ -130,7 +130,7 @@ test("with no object ACEs, one root verdict serves a pattern, however many recor
     spec = "eventd *accesscache.without-object-aces-a-root-verdict-is-cached-per-token-and-pattern",
     tags = { "known-bug" },
 }, function(t)
-    -- TRM-cache-key-identifier: §7.5 keys the record-level cache by
+    -- PEI-1298 (TRM-cache-key-identifier): §7.5 keys the record-level cache by
     -- (token, pattern); §7.4 step 4 and the twenty-types example key it by
     -- identifier, and so does the code — AuthorizationCache's entries are
     -- keyed (identifier, fields) (eventd/src/query/executor.rs:1642-1702),
@@ -161,7 +161,7 @@ test("events of twenty types take at most twenty checks: no more than one per ty
     spec = "eventd *accesscache.ten-thousand-events-of-twenty-types-take-at-most-twenty-checks",
     tags = { "known-bug" },
 }, function(t)
-    -- TRM-checks-per-identifier: §7.4 describes two checks per identifier
+    -- PEI-1298 (TRM-checks-per-identifier): §7.4 describes two checks per identifier
     -- — step 4 before reading (cached in AuthorizationCache.identifiers,
     -- executor.rs:1670-1685) and step 9 on the result
     -- (AuthorizationCache.entries, :1687-1702) — so a uniform type costs
@@ -214,7 +214,7 @@ test("a log query takes one check per origin", {
     spec = "eventd *accesscache.a-log-query-takes-one-check-per-origin",
     tags = { "known-bug" },
 }, function(t)
-    -- TRM-checks-per-identifier: as above — the identifier check and the
+    -- PEI-1298 (TRM-checks-per-identifier): as above — the identifier check and the
     -- result check are both made, so one origin costs two.
     local origin = eventd.marker("ptlogone")
     for i = 1, 10 do eventd.send_log(vm, { origin = origin, is_error = false, message = "m" .. i }) end
@@ -319,7 +319,7 @@ test("a failed registry watch discards the descriptor cache and fails closed for
     covered_by = "cargo:eventd TODO query::security: after DescriptorCache::fail_watch, resolve() of an identifier returns None and admin() returns None without reading the registry (default_descriptors_are_valid_and_cache_generation_advances asserts only that the cache turns unhealthy)",
 }, function() end)
 
--- Route closed: as above. TRM-failed-watch-keeps-resolved: §7.5 says a
+-- Route closed: as above. PEI-1298 (TRM-failed-watch-keeps-resolved): §7.5 says a
 -- failed watch both discards the descriptor cache and keeps answering
 -- queries for descriptors already resolved; fail_watch clears every
 -- resolution (eventd/src/query/security.rs:512-521), so the second half

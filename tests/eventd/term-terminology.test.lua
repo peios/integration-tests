@@ -248,7 +248,7 @@ test("the series cache is a bounded in-memory map", {
         "while the cache holds at most its 1000 entries: " .. json.encode(rows[1]))
 end)
 
--- PEI-TBD-rollups-never-written: eligible metric window queries never leave a row in the rollups table.
+-- PEI-1286 (PEI-TBD-rollups-never-written): eligible metric window queries never leave a row in the rollups table.
 -- An eligible window query (one series, a
 -- window aggregate, SINCE, 300 raw inputs over AdaptiveRollupMinSamples=100)
 -- leaves the rollups table empty, repeated or not, and eventd logs no
@@ -328,7 +328,7 @@ end)
 -- Shard reconfiguration (last: it changes the shard count)
 -- ---------------------------------------------------------------------------
 
--- TRM-historical-shard-read-write: eventd holds a historical shard open read-write, for age retention.
+-- PEI-1298 (TRM-historical-shard-read-write): eventd holds a historical shard open read-write, for age retention.
 -- The retention coordinator opens every
 -- historical shard with Shard::open, read-write (retention.rs:53-57), so that
 -- age retention can delete from it (retain_before, retention.rs:126-132); only

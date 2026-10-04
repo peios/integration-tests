@@ -109,7 +109,7 @@ test("records equal in every visible key still come back in one order, and page 
     end
 end)
 
--- PEI-TBD-sort-tie-skips-timestamp: with an explicit SORT, sort_rows
+-- PEI-1295 (PEI-TBD-sort-tie-skips-timestamp): with an explicit SORT, sort_rows
 -- (executor.rs:1908-1947) appends `timestamp` only when the query has no
 -- SORT (1924-1929), so records the SORT keys leave tied go straight to
 -- the shard/row-id keys.
@@ -141,7 +141,7 @@ test("records tied on the SORT keys come newest first across shards, then by sha
         "tied on k, the newer event comes first though it is in the higher shard")
 end)
 
--- PEI-TBD-sort-tie-skips-timestamp (as above): for logs the tie after the
+-- PEI-1295 (PEI-TBD-sort-tie-skips-timestamp) (as above): for logs the tie after the
 -- SORT keys goes straight to row id descending.
 test("log records tied on the SORT keys come newest first, then by row id descending", {
     spec = "eventd *order.log-tiebreakers-are-timestamp-desc-then-id-desc",
@@ -161,7 +161,7 @@ test("log records tied on the SORT keys come newest first, then by row id descen
         "tied on is_error, the newer line still comes first")
 end)
 
--- PEI-TBD-metric-tie-skips-labels: sort_metric_rows (executor.rs:3965-3976)
+-- PEI-1295 (PEI-TBD-metric-tie-skips-labels): sort_metric_rows (executor.rs:3965-3976)
 -- orders by timestamp, then name, then sample id; the canonical labels
 -- never enter the comparison.
 test("samples tied on timestamp and name are ordered by canonical labels before sample id", {

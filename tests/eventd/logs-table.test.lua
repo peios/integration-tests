@@ -463,7 +463,7 @@ test("ERROR ONLY selects exactly what WHERE is_error == true does", {
     t:assert_eq(msgs(base .. " ERROR ONLY"), "e1,e2", "ERROR ONLY")
 end)
 
--- PEI-TBD-is-error-equals-1: the book (and PSPU §3.22, "compares against
+-- PEI-1296 (PEI-TBD-is-error-equals-1): the book (and PSPU §3.22, "compares against
 -- true/false or against 1/0") lets a query write `is_error == 1`. The
 -- executor hands the column over as Value::Bool (executor.rs:1603) and
 -- Value::language_equal (query/value.rs:62-69) has no Bool/Integer case,

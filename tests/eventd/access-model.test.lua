@@ -360,7 +360,7 @@ test("a connection whose identity cannot be evaluated is refused, never served a
     spec = "eventd *access.there-is-no-fallback-identification-or-anonymous-mode",
     tags = { "known-bug" },
 }, function(t)
-    -- PEI-TBD-anonymous-peer-served: a client that connects at Anonymous
+    -- PEI-1294 (PEI-TBD-anonymous-peer-served): a client that connects at Anonymous
     -- impersonation level conveys the anonymous token, and eventd
     -- evaluates it like any other (Authorizer::from_peer, query/mod.rs:269;
     -- no check of the token's level or user), so a descriptor granting

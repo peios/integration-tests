@@ -174,7 +174,7 @@ test("synthetic.config_change is written when a value is applied at runtime", {
     t:assert_eq(rows[1] and rows[1].event_type, eventd.T.config_change, "as synthetic.config_change")
 end)
 
--- TRM-storage-error-not-for-full-disk: a log write refused for a full disk emits no synthetic.storage_error.
+-- PEI-1298 (TRM-storage-error-not-for-full-disk): a log write refused for a full disk emits no synthetic.storage_error.
 -- A write the store refuses for want of
 -- space is classified as capacity, discarded and answered with a retention
 -- request, with no storage_error (log_ingest.rs:210-213, request_retention
@@ -318,7 +318,7 @@ test("severity 1 is error: standard error, or a record marked so", {
     t:assert_eq(stored_is_error(marked)[1], 1, "a record sent with is_error true is stored with 1")
 end)
 
--- PEI-TBD-is-error-integer-literal: `is_error == 1` and `== 0` match nothing; only true/false are accepted.
+-- PEI-1296 (PEI-TBD-is-error-integer-literal): `is_error == 1` and `== 0` match nothing; only true/false are accepted.
 -- The
 -- value is served as a Bool (query/executor.rs:1603) and the language's
 -- equality has no Bool/integer case (query/value.rs:69), so only the

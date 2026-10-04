@@ -323,7 +323,7 @@ end)
 -- Data type roots
 -- ---------------------------------------------------------------------------
 
--- PEI-TBD-root-guid-object-ace-einval: an object ACE on a data type's root GUID makes eventd's access check fail with EINVAL.
+-- PEI-1288 (PEI-TBD-root-guid-object-ace-einval): an object ACE on a data type's root GUID makes eventd's access check fail with EINVAL.
 -- An allowing object ACE naming a data
 -- type's root GUID makes every query of that pattern fail with "access-control
 -- failure: Invalid argument". may_read adds the GUIDs of the descriptor's
@@ -351,7 +351,7 @@ test("the events root is {a1b2c3d4-0001-4000-8000-000000000001}, the level-0 nod
 end)
 
 test("the logs root is {a1b2c3d4-0001-4000-8000-000000000002}", {
-    -- PEI-TBD-root-guid-object-ace-einval (above).
+    -- PEI-1288 (PEI-TBD-root-guid-object-ace-einval) (above).
     spec = "eventd *constant.the-logs-root-guid-is-a1b2c3d4-0001-4000-8000-000000000002",
     tags = { "known-bug" },
 }, function(t)
@@ -365,7 +365,7 @@ test("the logs root is {a1b2c3d4-0001-4000-8000-000000000002}", {
 end)
 
 test("the metrics root is {a1b2c3d4-0001-4000-8000-000000000003}", {
-    -- PEI-TBD-root-guid-object-ace-einval (above).
+    -- PEI-1288 (PEI-TBD-root-guid-object-ace-einval) (above).
     spec = "eventd *constant.the-metrics-root-guid-is-a1b2c3d4-0001-4000-8000-000000000003",
     tags = { "known-bug" },
 }, function(t)

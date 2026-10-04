@@ -201,7 +201,7 @@ test("the log socket carries the protected peinit-only DACL §7.6 gives", {
     spec = "eventd *writepath.the-log-socket-gets-a-protected-dacl-before-the-first-receive",
     tags = { "known-bug" },
 }, function(t)
-    -- TRM-log-socket-owner: eventd sets only the DACL and adds
+    -- PEI-1298 (TRM-log-socket-owner): eventd sets only the DACL and adds
     -- (A;;GA;;;OW), leaving the socket owned by eventd's own service SID:
     -- "Preserve the virtual service owner: changing it to SYSTEM would
     -- require a privilege the long-running daemon deliberately does not
@@ -677,7 +677,7 @@ end)
 test("a metric socket narrowed past eventd's own access does not stop eventd starting", {
     tags = { "known-bug" },
 }, function(t)
-    -- PEI-TBD-narrowed-metric-socket-crashloops: narrowed so that eventd's
+    -- PEI-1297 (PEI-TBD-narrowed-metric-socket-crashloops): narrowed so that eventd's
     -- own service SID is not in the DACL (no OW ACE), the next start never
     -- comes up: eventd crash-loops until peinit's Critical policy takes the
     -- machine to recovery. Observed: metric.sock is left behind, owned by

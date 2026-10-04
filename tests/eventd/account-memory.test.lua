@@ -525,7 +525,7 @@ test("a top-level timestamp bound skips the rows it excludes, and one inside OR 
     end)
 end)
 
--- TRM-aggregation-pushdown: eventd never sends an aggregation to SQL. It
+-- PEI-1298 (TRM-aggregation-pushdown): eventd never sends an aggregation to SQL. It
 -- folds every row in Rust (HEAD executor.rs:294-297, 1997-2046; v0.1.5
 -- aggregate_records over the materialised rows), which is exactly what
 -- the TRM's own §6.4 describes ("Rows from every shard fold into one set

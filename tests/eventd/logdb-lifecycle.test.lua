@@ -260,7 +260,7 @@ end)
 -- Checkpointing
 -- ---------------------------------------------------------------------------
 
--- PEI-TBD-wal-checkpoint-by-file-size: the writer is to checkpoint "when
+-- PEI-1296 (PEI-TBD-wal-checkpoint-by-file-size): the writer is to checkpoint "when
 -- its write-ahead log reaches WalCheckpointPages". LogStore measures the
 -- WAL *file* (log_store.rs:213-226, `fs::metadata(..-wal).len()`), and
 -- SQLite reuses a checkpointed WAL from the start without shrinking the
@@ -434,7 +434,7 @@ test("a corrupt log store is quarantined and a fresh one created in its place", 
     end)
 end)
 
--- PEI-TBD-quarantine-loses-sidecars: the book renames the database, -wal
+-- PEI-1287 (PEI-TBD-quarantine-loses-sidecars): the book renames the database, -wal
 -- and -shm together. LogStore::open_recovering (log_store.rs:69-80) tries
 -- the open first; the failed open's Connection is dropped on the error
 -- path inside LogStore::open (the `?` after validate/pragma), and SQLite,

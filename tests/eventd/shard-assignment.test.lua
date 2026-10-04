@@ -446,7 +446,7 @@ end)
 
 -- Last in the file: at 256 eventd cannot start, and a Critical service that
 -- cannot start takes this VM down.
--- PEI-TBD-256-shards-exhaust-fds: eventd accepts StorageShards=256 (config.rs:158)
+-- PEI-1290 (PEI-TBD-256-shards-exhaust-fds): eventd accepts StorageShards=256 (config.rs:158)
 -- but opens every active shard at startup with a read-write connection and
 -- its -wal and -shm (pipeline.rs:82-93), plus read-only connections, under
 -- the service's default RLIMIT_NOFILE of 1024, which it never raises; at

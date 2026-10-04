@@ -284,7 +284,7 @@ test("the log socket's receive buffer is four times the datagram ceiling", {
     t:assert_eq(rb, 4 * 256 * 1024, "SO_RCVBUF is 4 x 256 KiB")
 end)
 
--- TRM-log-queue-is-dgram-qlen: the book has the log socket's cushion be
+-- PEI-1298 (TRM-log-queue-is-dgram-qlen): the book has the log socket's cushion be
 -- SO_RCVBUF — "the receive queue ... until it fills, after which the
 -- kernel discards them", "it is the whole cushion". For an AF_UNIX
 -- datagram socket neither holds: a queued datagram is charged to its

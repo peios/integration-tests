@@ -274,7 +274,7 @@ test("startup boot_id is the current boot in PCDS canonical (braced, lowercase) 
     spec = "eventd *payload.startup-boot-id-is-the-current-boot-in-canonical-guid-form",
     tags = { "known-bug" },
 }, function(t)
-    -- PEI-TBD-startup-boot-id-unbraced: BootId::canonical (boot_id.rs:40-60)
+    -- PEI-1296 (PEI-TBD-startup-boot-id-unbraced): BootId::canonical (boot_id.rs:40-60)
     -- formats the 8-4-4-4-12 digits with no braces, but PCDS's canonical
     -- GUID string is the 38-character braced form (PCDS GUID string
     -- format) — the form eventd itself uses when it renders the boot_id
@@ -521,7 +521,7 @@ test("every synthetic payload field name is a query field, unless its value is n
     spec = "eventd *payload.synthetic-field-names-are-stable-query-fields-except-nested-values",
     tags = { "known-bug" },
 }, function(t)
-    -- TRM-synthetic-fields-collide: startup's boot_id and gap's cpu_id are
+    -- PEI-1298 (TRM-synthetic-fields-collide): startup's boot_id and gap's cpu_id are
     -- top-level payload keys that collide with header columns, and eventd
     -- suppresses a colliding key from the query surface (the flattening
     -- rule §3.1 and §3.4 also state); the book's own §3.2 table then
