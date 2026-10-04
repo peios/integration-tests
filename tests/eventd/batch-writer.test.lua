@@ -531,46 +531,54 @@ test("retention reaches an active shard only through its writer, a bounded step 
         .. " eventd *batch.ingestion-takes-priority-over-maintenance-under-sustained-pressure"
         .. " eventd *synthetic.synthetic-events-share-the-shards-batching-retention-and-queries-of-kmes-events",
 }, function(t)
-    local rows0 = sql(SHARD0, "SELECT count(*) FROM events")[1][1]
-    t:assert(rows0 > 50000, "shard 0 holds the earlier floods: " .. rows0)
-    -- The boot's first startup record sits among the oldest rows of shard 0.
+    -- Retention is made long and its progress visible: a flood in ordered
+    -- segments, the oldest a small `head`, then nine of 30000 events, all
+    -- on CPU 0 and so in shard 0. With a 1 MiB limit and 100 rows a step,
+    -- retention deletes oldest-first through every segment but the
+    -- newest, some 2700 bounded steps through shard 0's writer. Progress is
+    -- read through queries, which cost the same under any load: the head
+    -- gone means the run has begun, segment 8 present means it has not
+    -- finished. An event emitted once the run has begun, to the same
+    -- writer, must be committed while segment 8 is still there — that is,
+    -- not behind the run but between its steps. No clock is involved.
+    local stem = "pt.batch." .. eventd.marker("ret")
+    local head = stem .. ".head"
+    local function seg(k) return stem .. ".seg" .. k end
+    local function present(event_type)
+        return #eventd.rows(vm, "EVENTS " .. event_type .. " SINCE 1h ago TAKE 1") > 0
+    end
+    emit0(head, 500)
+    for k = 1, 9 do emit0(seg(k), 30000) end
+    wait_until(function() return present(seg(9)) end,
+        { timeout = 120, interval = 0.5, desc = "the flood to be stored" })
+    t:assert(present(head) and present(seg(8)), "the head and segment 8 are stored")
     local startups0 = sql(SHARD0,
         "SELECT count(*) FROM events WHERE event_type = 'synthetic.startup'")[1][1]
     t:assert(startups0 >= 1, "shard 0 holds this boot's startup records: " .. startups0)
+
     local ok, err = pcall(function()
         eventd.set(vm, "RetentionDeleteBatchRows", "dword:100"):assert_ok()
         config_change("RetentionDeleteBatchRows", "100")
-        -- A size limit far below the store: retention must delete most of
-        -- this boot's rows, 100 at a time.
         eventd.set(vm, "EventRetentionMaxBytes", "qword:1048576"):assert_ok()
 
-        local samples, rw_max, ingest_late = 0, 0, 0
-        local deleting = false
-        for _ = 1, 20 do
-            local n = sql(SHARD0, "SELECT count(*) FROM events")[1][1]
-            if n < rows0 then deleting = true end
-            if deleting then
-                samples = samples + 1
-                rw_max = math.max(rw_max, rw_fds(SHARD0))
-                -- An event arriving mid-retention is committed promptly.
-                local event_type = "pt.batch." .. eventd.marker("during")
-                eventd.emit(vm, event_type, { n = 1 })
-                -- A narrow window keeps the query itself cheap while the
-                -- store is busy; the bound is generous because what is
-                -- under test is that ingestion is not held behind the
-                -- whole retention run, not a latency figure.
-                local t0 = os.time()
-                local prompt = pcall(eventd.wait_rows, vm, "EVENTS " .. event_type .. " SINCE 1m ago",
-                    function(rs) return #rs == 1 end, { timeout = 60, interval = 0.2 })
-                if not prompt or os.time() - t0 > 10 then ingest_late = ingest_late + 1 end
-            end
-            vm:run("sleep 0.3")
-        end
-        local rows1 = sql(SHARD0, "SELECT count(*) FROM events")[1][1]
-        t:assert(rows1 < rows0, "retention deleted rows from the active shard: " .. rows0 .. " -> " .. rows1)
-        t:assert(samples >= 1, "the deletion was sampled while under way")
-        t:assert_eq(rw_max, 1, "with only the writer's read-write connection open to the shard throughout")
-        t:assert_eq(ingest_late, 0, "and events arriving meanwhile were committed within 10 s each")
+        wait_until(function() return not present(head) end,
+            { timeout = 120, interval = 0.2, desc = "retention to begin deleting" })
+        t:assert(present(seg(8)), "retention has begun and has not reached segment 8")
+        local rw_during = rw_fds(SHARD0)
+
+        local during = "pt.batch." .. eventd.marker("during")
+        emit0(during, 1)
+        wait_until(function() return present(during) end,
+            { timeout = 120, interval = 0.2, desc = "the event emitted mid-retention" })
+        local seg8_when_committed = present(seg(8))
+
+        wait_until(function() return not present(seg(8)) end,
+            { timeout = 300, interval = 1, desc = "retention to delete segment 8" })
+        t:assert_eq(rw_during, 1,
+            "while retention ran, the shard had only the writer's read-write connection")
+        t:assert(seg8_when_committed,
+            "the event emitted mid-retention was committed while the run still had segment 8 " ..
+            "to delete: the writer took it between bounded retention steps, not after the run")
         local startups1 = sql(SHARD0,
             "SELECT count(*) FROM events WHERE event_type = 'synthetic.startup'")[1][1]
         t:assert(startups1 < startups0,
