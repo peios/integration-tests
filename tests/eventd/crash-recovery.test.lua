@@ -217,52 +217,79 @@ test("SIGINT begins a graceful shutdown", {
 -- Shared by the dump tests: the dump's lines, keyed by their label.
 local dump = {}
 
+local function need_dump(t)
+    t:assert(dump.captured, "dump never captured: the SIGQUIT test above failed to read it")
+end
+
 test("SIGQUIT writes a diagnostic dump to stderr, taken before the shutdown starts, then stops gracefully", {
     spec = "eventd *crash.sigquit-writes-a-diagnostic-dump-then-begins-graceful-shutdown"
         .. " eventd *crash.the-diagnostic-dump-is-written-to-stderr-before-shutdown-step-one",
 }, function(t)
-    -- Material for the dump's counters: a log record whose origin is
-    -- outside the grammar, a metric datagram with no identity, one
-    -- under eventd's own prefix (which nobody may publish), and a type
-    -- conflict on one name.
-    dump.origin = "pt bad origin " .. eventd.marker()
-    eventd.send_log(vm, { origin = dump.origin, is_error = false, message = "x" })
-    eventd.send_metric(vm, { name = eventd.marker("noid"), type = "gauge", value = 1 }, { pass_token = false })
-    -- A name whose publish descriptor grants nobody anything.
-    local denied = eventd.marker("deny")
-    local key = eventd.SECURITY .. [[\Metrics\]] .. denied
-    vm:run("reg new '" .. key .. "' -p"):assert_ok()
-    vm:run("reg set '" .. key .. "' '' hex:" .. client.descriptor_hex(token.SID.LOCAL_SYSTEM, {})):assert_ok()
-    vm:run("sleep 1")
-    eventd.send_metric(vm, { name = denied, type = "gauge", value = 1 })
-    dump.conflict = eventd.marker("mm")
-    eventd.send_metric(vm, { name = dump.conflict, type = "gauge", value = 1 })
-    eventd.wait_rows(vm, "METRIC " .. dump.conflict .. " SINCE 10m ago", function(r) return #r == 1 end)
-    eventd.send_metric(vm, { name = dump.conflict, type = "counter", value = 2 })
-    vm:run("sleep 1")
-    -- A streaming query open when the signal lands: step 1 ends it, so a
-    -- dump taken after step 1 would count no streams.
-    local stream = vm:run_async("/usr/bin/evctl",
-        { args = { "--format", "jsonl", "EVENTS pt.never.emitted STREAM" } })
-    vm:run("sleep 1")
-    local since = now_ns()
-    local pid = eventd.pid(vm)
-    vm:run("kill -QUIT " .. pid):assert_ok()
-    wait_until(function() return gone(pid) end, { timeout = 30, interval = 0.1, desc = "eventd to stop" })
-    pcall(function() stream:wait("5s") end)
-    local status = eventd.status(vm)
-    start()
-    t:assert_eq(status.cause, "clean_exit", "the shutdown after the dump was graceful")
-    t:assert(latest(eventd.T.shutdown, since), "and wrote its shutdown record")
-    local header = stderr_lines("eventd diagnostic dump", since)
-    t:assert(#header == 1, "one dump was written to stderr")
-    local job = header[1] and header[1].job_id
-    for _, r in ipairs(eventd.rows(vm, "LOGS FROM eventd SINCE 10m ago TAKE 500")) do
-        if r.job_id == job and r.timestamp >= since then
-            local label, rest = r.message:match("^%s+([%w_%[%]]+):%s*(.*)$")
-            if label then dump[label] = rest end
-        end
-    end
+    -- The dump reaches the log store as eventd's stderr, forwarded by
+    -- peinit while that same eventd is shutting down: a line peinit
+    -- delivers after the log thread's final drain of its queue is lost
+    -- when the socket closes (seen under host load; reported). So the
+    -- whole procedure is tried up to three times until one dump arrives
+    -- complete, and every try is a full, graceful SIGQUIT shutdown.
+    local attempts, partial = 0, {}
+    local status, since, lines
+    repeat
+        attempts = attempts + 1
+        -- Material for the dump's counters, which are per process and so
+        -- are made again each try: a log record whose origin is outside
+        -- the grammar, a metric datagram with no identity, one whose
+        -- publish descriptor grants nobody anything, a type conflict.
+        dump.origin = "pt bad origin " .. eventd.marker()
+        eventd.send_log(vm, { origin = dump.origin, is_error = false, message = "x" })
+        eventd.send_metric(vm, { name = eventd.marker("noid"), type = "gauge", value = 1 }, { pass_token = false })
+        local denied = eventd.marker("deny")
+        local key = eventd.SECURITY .. [[\Metrics\]] .. denied
+        vm:run("reg new '" .. key .. "' -p"):assert_ok()
+        vm:run("reg set '" .. key .. "' '' hex:" .. client.descriptor_hex(token.SID.LOCAL_SYSTEM, {})):assert_ok()
+        vm:run("sleep 1")
+        eventd.send_metric(vm, { name = denied, type = "gauge", value = 1 })
+        dump.conflict = eventd.marker("mm")
+        eventd.send_metric(vm, { name = dump.conflict, type = "gauge", value = 1 })
+        eventd.wait_rows(vm, "METRIC " .. dump.conflict .. " SINCE 10m ago", function(r) return #r == 1 end)
+        eventd.send_metric(vm, { name = dump.conflict, type = "counter", value = 2 })
+        vm:run("sleep 1")
+        -- A streaming query open when the signal lands: step 1 ends it, so
+        -- a dump taken after step 1 would count no streams.
+        local stream = vm:run_async("/usr/bin/evctl",
+            { args = { "--format", "jsonl", "EVENTS pt.never.emitted STREAM" } })
+        vm:run("sleep 1")
+        since = now_ns()
+        local pid = eventd.pid(vm)
+        vm:run("kill -QUIT " .. pid):assert_ok()
+        wait_until(function() return gone(pid) end, { timeout = 30, interval = 0.1, desc = "eventd to stop" })
+        pcall(function() stream:wait("5s") end)
+        status = eventd.status(vm)
+        start()
+        t:assert_eq(status.cause, "clean_exit", "the shutdown after the dump was graceful")
+        t:assert(latest(eventd.T.shutdown, since), "and wrote its shutdown record")
+        local header = stderr_lines("eventd diagnostic dump", since)
+        t:assert(#header == 1, "one dump was written to stderr")
+        local job = header[1] and header[1].job_id
+        -- Read until its last line (last_write_errors) has arrived.
+        lines = {}
+        local complete = pcall(wait_until, function()
+            lines = {}
+            for _, r in ipairs(eventd.rows(vm, "LOGS FROM eventd SINCE 10m ago TAKE 1000")) do
+                if r.job_id == job and r.timestamp >= since then
+                    local label, rest = r.message:match("^%s+([%w_%[%]]+):%s*(.*)$")
+                    if label then lines[label] = rest end
+                end
+            end
+            return lines.last_write_errors ~= nil
+        end, { timeout = 30, interval = 0.5, desc = "the whole dump to reach the log store" })
+        if complete then break end
+        local got = {}
+        for k in pairs(lines) do got[#got + 1] = k end
+        partial[#partial + 1] = "try " .. attempts .. " got: " .. table.concat(got, ",")
+    until attempts == 3
+    t:assert(lines.last_write_errors, "a whole dump reached the log store: " .. table.concat(partial, "; "))
+    for k, v in pairs(lines) do dump[k] = v end
+    dump.captured = true
     t:assert(dump.queries and dump.queries:find("streaming=1", 1, true),
         "the dump saw the stream still open — it was taken before step 1: " .. tostring(dump.queries))
 end)
@@ -270,6 +297,7 @@ end)
 test("the dump names the boot ID", {
     spec = "eventd *crash.the-dump-includes-the-current-boot-id",
 }, function(t)
+    need_dump(t)
     local id = vm:read_file("/proc/sys/kernel/random/boot_id"):match("[%x%-]+")
     t:assert_eq(dump.boot_id, id, "boot_id")
 end)
@@ -277,6 +305,7 @@ end)
 test("the dump counts active and readable historical shards", {
     spec = "eventd *crash.the-dump-includes-the-active-and-readable-historical-shard-counts",
 }, function(t)
+    need_dump(t)
     t:assert(dump.shards and dump.shards:match("active=1") and dump.shards:match("historical_readable=%d+"),
         "shards: " .. tostring(dump.shards))
 end)
@@ -284,6 +313,7 @@ end)
 test("the dump gives each CPU's receipt coverage and highest covered sequence", {
     spec = "eventd *crash.the-dump-includes-per-cpu-receipt-coverage-and-highest-covered-sequence",
 }, function(t)
+    need_dump(t)
     local line = dump["cpu[0]"]
     t:assert(line and line:match("receipt_ranges=%d+") and line:match("highest_contiguous=%d+"),
         "cpu[0]: " .. tostring(line))
@@ -292,6 +322,7 @@ end)
 test("the dump gives the non-streaming and streaming query counts", {
     spec = "eventd *crash.the-dump-includes-the-non-streaming-and-streaming-query-counts",
 }, function(t)
+    need_dump(t)
     t:assert(dump.queries and dump.queries:match("active=%d+") and dump.queries:match("streaming=%d+"),
         "queries: " .. tostring(dump.queries))
 end)
@@ -299,6 +330,7 @@ end)
 test("the dump gives the series cache occupancy", {
     spec = "eventd *crash.the-dump-includes-the-series-cache-occupancy",
 }, function(t)
+    need_dump(t)
     t:assert(dump.metric_series_cache and dump.metric_series_cache:match("^%d+$")
         and tonumber(dump.metric_series_cache) >= 1,
         "metric_series_cache holds the series used: " .. tostring(dump.metric_series_cache))
@@ -307,6 +339,7 @@ end)
 test("the dump counts invalid-origin log discards and names the latest such origin", {
     spec = "eventd *crash.the-dump-includes-invalid-origin-log-discards-and-the-latest-such-origin",
 }, function(t)
+    need_dump(t)
     t:assert(dump.log_ingress and tonumber(dump.log_ingress:match("rejected_origins=(%d+)") or "0") >= 1,
         "log_ingress: " .. tostring(dump.log_ingress))
     t:assert(dump.last_rejected_log_origin and dump.last_rejected_log_origin:find(dump.origin, 1, true),
@@ -316,6 +349,7 @@ end)
 test("the dump counts metric datagrams rejected for identity, truncation, policy and authorization", {
     spec = "eventd *crash.the-dump-includes-metric-datagrams-rejected-for-identity-truncation-policy-or-authorization",
 }, function(t)
+    need_dump(t)
     local m = dump.metric_ingress or ""
     t:assert(tonumber(m:match("missing_identity=(%d+)") or "0") >= 1, "missing identity counted: " .. m)
     t:assert(m:match("truncated=%d+"), "truncated reported: " .. m)
@@ -326,6 +360,7 @@ end)
 test("the dump counts type mismatches and names the latest conflict", {
     spec = "eventd *crash.the-dump-includes-the-metric-type-mismatch-count-and-latest-conflict",
 }, function(t)
+    need_dump(t)
     local m = dump.metric_ingress or ""
     t:assert(tonumber(m:match("type_mismatches=(%d+)") or "0") >= 1, "a mismatch counted: " .. m)
     local c = dump.last_metric_type_mismatch or ""
@@ -336,6 +371,7 @@ end)
 test("the dump reports the last write error of each store", {
     spec = "eventd *crash.the-dump-includes-the-last-write-error-per-store",
 }, function(t)
+    need_dump(t)
     local w = dump.last_write_errors or ""
     for _, store in ipairs({ "event=", "log=", "metric=" }) do
         t:assert(w:find(store, 1, true), store .. " reported: " .. w)

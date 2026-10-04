@@ -135,8 +135,12 @@ test("a query past QueryTimeoutMs is cancelled with an error, and its connection
     end
     t:assert(out:find("timed out", 1, true), "the query was cancelled with a timeout error: " .. out)
     t:assert(not out:find("rc=0", 1, true), "and the client was told it failed")
-    vm:run("sleep 1")
-    t:assert_eq(db_fds(), baseline, "the query's read-only connections were closed")
+    -- The handler closes its connections as it unwinds; under load that
+    -- can trail the client's error by a moment.
+    local now = db_fds()
+    pcall(wait_until, function() now = db_fds(); return now <= baseline end,
+        { timeout = 20, interval = 0.5, desc = "the query's connections to close" })
+    t:assert_eq(now, baseline, "the query's read-only connections were closed")
     t:assert(eventd.query(vm, "EVENTS TAKE 1").ok, "and queries carry on")
     eventd.unset(vm, "QueryTimeoutMs")
 end)
