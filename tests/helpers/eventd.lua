@@ -216,17 +216,85 @@ function M.boot(opts)
         for k, v in pairs(M.config_seed(opts.config or {}, opts.config_keys)) do files[k] = v end
     end
     for k, v in pairs(opts.files or {}) do files[k] = v end
+    local boot = opts.boot
+    if opts.store_disk then
+        for k, v in pairs(M.store_disk_files()) do files[k] = v end
+        boot = {}
+        for k, v in pairs(opts.boot or {}) do boot[k] = v end
+        local disks = {}
+        for _, d in ipairs(boot.disks or {}) do disks[#disks + 1] = d end
+        for _, store in ipairs(M.STORE_DISK_ORDER) do
+            disks[#disks + 1] = { id = M.STORE_DISK[store], mediated = true,
+                                  scratch = opts.store_disk.size or "256M" }
+        end
+        boot.disks = disks
+    end
     local vm = peinit.boot({
         name = opts.name or "ev",
         memory = opts.memory,
         cpus = opts.cpus,
         append = opts.append,
-        boot = opts.boot,
+        boot = boot,
         stage = opts.stage,
         files = next(files) and files or nil,
     })
     if opts.wait ~= false then M.ready(vm) end
     return vm
+end
+
+--- The ids of the three store disks `boot{store_disk = {…}}` attaches,
+--- one per store, in attach order: /dev/vdb, /dev/vdc, /dev/vdd.
+M.STORE_DISK = { events = "ev-events", logs = "ev-logs", metrics = "ev-metrics" }
+M.STORE_DISK_ORDER = { "events", "logs", "metrics" }
+
+--- The descriptor eventd requires on each store directory (`directory.rs`
+--- REQUIRED_SDDL), used as the store disk's synthesis template so the
+--- mount root and anything created without a descriptor inherit it.
+M.STORE_SDDL = "O:SYG:SYD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)" ..
+    "(A;OICI;GA;;;S-1-5-80-1963885778-1835409261-1671587836-2279113866-1994761124)"
+
+--- The staged files that put eventd's stores on disks which survive a
+--- power cut and a `vm:reset()`.
+---
+--- The live root is an overlay over tmpfs, so a store there is gone after
+--- a reboot. `boot{store_disk = {size = "256M"}}` attaches one mediated
+--- scratch disk per store and stages this Phase 1 autorun, which formats
+--- each on the first boot only and mounts it over its store directory.
+--- Autoruns run before path provisioning (peinit §2.3 steps 7 and 8), so
+--- eventd starts in Phase 2 on the disks.
+---
+--- One disk per store, mounted at the store directory itself, because a
+--- mount root takes the synthesis template verbatim — exactly the
+--- descriptor eventd requires. A store directory *created* on a fresh
+--- filesystem by path provisioning instead carries the generic-mapped form
+--- (GENERIC_ALL as FILE_ALL_ACCESS), which eventd's exact comparison
+--- refuses (PEI-1316).
+---
+--- ext4 is deny-missing under KACS, and a fresh filesystem carries no
+--- descriptors, so each mount is adopted as synth-persist with eventd's
+--- required descriptor as the template: a synthesised descriptor is
+--- written back, and survives the cut with the data.
+---
+--- The profile attaches its ISO medium first, so the disks are /dev/vdb
+--- (events), /dev/vdc (logs) and /dev/vdd (metrics).
+--- `vm:disk(eventd.STORE_DISK.events):power_cut()` drops what that store
+--- never flushed.
+function M.store_disk_files()
+    local lines = {
+        "#!/bin/sh",
+        "# Staged by helpers/eventd.lua: eventd's stores on mediated disks.",
+        "set -eu",
+        "store() {",
+        "    blkid \"$1\" >/dev/null 2>&1 || mkfs.ext4 -F -q \"$1\"",
+        "    mount -t ext4 -o policy=synth-persist --synth-sddl '" .. M.STORE_SDDL ..
+            "' \"$1\" \"/var/state/eventd/$2\"",
+        "}",
+        "store /dev/vdb events",
+        "store /dev/vdc logs",
+        "store /dev/vdd metrics",
+        "",
+    }
+    return { ["lcl/policy/autorun.d/05-pt-eventd-store.sh"] = { table.concat(lines, "\n"), exec = true } }
 end
 
 --- Write `text` to a fresh guest file and return its path.
