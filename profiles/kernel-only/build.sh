@@ -22,6 +22,11 @@
 #                                    device, to provoke firmware loads
 #     modules/ntfs3.ko.zst           an NTFS driver, for the claims
 #                                    about NTFS-backed files
+#     modules/veth.ko.zst, dummy,    the virtual network devices the
+#       8021q, bridge (and llc,      NTFE tests build a second machine
+#       stp, garp, mrp, which        from: a veth pair into another
+#       those two need)              network namespace, a VLAN device,
+#                                    a bridge port
 #     firmware/*.bin, *.peios.sig    blobs signed with the TCB key the
 #                                    kernel embeds, plus unsigned and
 #                                    tampered ones, with the signature
@@ -31,7 +36,7 @@
 #     ntfs.img                       a small empty NTFS volume, for a
 #                                    loop mount
 #
-#   Both modules are copied out of the composed root, so they are the
+#   The modules are copied out of the composed root, so they are the
 #   modules of the kernel that boots. Signing needs the private half
 #   of the TCB key the kernel was built with — the pkgs dev keyring's
 #   by default, PIT_TCB_KEY to name another — and an OpenSSL with
@@ -139,10 +144,14 @@ trap 'rm -rf "$work"' EXIT
 tree="$work/tree"
 mkdir -p "$tree/fixtures/modules" "$tree/fixtures/firmware"
 
-# The two modules, from the kernel the root carries.
+# The modules, from the kernel the root carries.
 moddir=$(find "$root/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d | head -n 1)
 [ -n "$moddir" ] || { warn "no module tree under $root/usr/lib/modules"; exit 1; }
-for m in kernel/lib/test_firmware.ko.zst kernel/fs/ntfs3/ntfs3.ko.zst; do
+for m in kernel/lib/test_firmware.ko.zst kernel/fs/ntfs3/ntfs3.ko.zst \
+    kernel/drivers/net/veth.ko.zst kernel/drivers/net/dummy.ko.zst \
+    kernel/net/llc/llc.ko.zst kernel/net/802/stp.ko.zst \
+    kernel/net/802/garp.ko.zst kernel/net/802/mrp.ko.zst \
+    kernel/net/8021q/8021q.ko.zst kernel/net/bridge/bridge.ko.zst; do
     [ -f "$moddir/$m" ] || {
         warn "$m is not in the composed kernel-modules ($(basename "$moddir"))"
         exit 1
