@@ -25,8 +25,7 @@
 --     reject it). Those are homed on internal/handler unit tests.
 --
 -- Structure mirrors volatile-store.test.lua: a mediated disk, per-case daemons
--- on distinct hive names SIGKILLed at the end (never a clean SIGTERM an idle
--- loregd hangs on — PEI-1122), and the one reboot case last.
+-- on distinct hive names SIGKILLed at the end, and the one reboot case last.
 
 local loregd = require("helpers.loregd")
 
@@ -162,7 +161,6 @@ end)
 -- fail with EIO; loregd 0.21.12 carries the enum-tolerance fix (1b307c0,
 -- PEI-233), which drops it. The dangling entry itself is still PEI-515's to
 -- remove, and the name it blocks is volatile-store.test.lua's known-bug case.
--- NOT PEI-1122 (that is the SIGTERM hang).
 test("an unknown child GUID's entry goes to the persistent table and dangles after restart", {
     spec = "loregd *route.an-entry-with-an-unknown-child-guid-goes-to-the-persistent-table",
 }, function(t)

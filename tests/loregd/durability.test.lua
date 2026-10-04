@@ -134,11 +134,9 @@ test("a value committed before the power cut is there after it",
 test("SIGTERM closes the device and shuts the daemon down cleanly",
     {
         spec = "loregd *exit.sigterm-and-sigint-close-the-device-for-a-clean-shutdown",
-        -- PEI-1122: `main` hands the device fd to the registration ioctl
-        -- through `dev.Fd()`, which puts it back into blocking mode, so
-        -- the handler's `dev.Close()` cannot interrupt the read loop and
-        -- an idle daemon never finishes shutting down.
-        tags = { "known-bug" },
+        -- Until loregd 0.21.13 an idle daemon never finished shutting
+        -- down: `dev.Fd()` put the device back into blocking mode, so the
+        -- handler's Close could not interrupt the read loop (PEI-1122).
     },
     function(t)
         local r, how = loregd.stop(loregd.start(vm, t), vm)
@@ -155,9 +153,8 @@ test("SIGTERM closes the device and shuts the daemon down cleanly",
 test("data written before a clean close is final",
     {
         spec = "loregd *exit.committed-data-is-durable-and-wal-state-is-finalised-at-close",
-        -- PEI-1122: there is no clean close to test until SIGTERM ends the
-        -- daemon, so this stops at its first assertion for the same reason.
-        tags = { "known-bug" },
+        -- Depends on the clean SIGTERM shutdown above (PEI-1122, fixed in
+        -- loregd 0.21.13).
     },
     function(t)
         -- The other half of the sentence: SQLite finalises any

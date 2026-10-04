@@ -135,8 +135,10 @@ test("loregd ships no service seed of its own",
             ls.stdout)
 
         -- No loregd/registryd seed shipped under the seed directory. (Other
-        -- packages legitimately ship seeds there; loregd ships none.)
-        local grep = vm:run("grep -rli registryd /usr/share/regim 2>/dev/null")
+        -- packages legitimately ship seeds there; loregd ships none.) A seed
+        -- that defined the service would name its key; other seeds mention
+        -- registryd in their comments, which is not a definition.
+        local grep = vm:run([[grep -rlF -e 'Services\\registryd' -e 'Services\\loregd' /usr/share/regim 2>/dev/null]])
         t:assert_eq(grep.stdout:gsub("%s+$", ""), "",
             "loregd ships no service seed under /usr/share/regim: " .. grep.stdout)
     end)

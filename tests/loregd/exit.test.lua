@@ -26,7 +26,7 @@ loregd.format(vm)
 loregd.mount(vm)
 
 -- File-scope PtState daemon: always up, its survival is what the storage-
--- error case checks. Never SIGTERMed (PEI-1122); dies with the VM.
+-- error case checks. Never stopped; dies with the VM.
 local main = loregd.start(vm)
 
 local function start_hive(t, name, path)
@@ -119,21 +119,12 @@ test("the kernel marks every served hive unavailable on disconnect",
 
 -- "On shutdown, in-flight requests are drained before the process exits,
 --  and every hive's read connections and write connection are closed."
---  This drain-and-close happens after the read loop returns — which, on a
---  signalled shutdown, it currently does not (PEI-1122): the handler's
---  dev.Close() cannot interrupt the blocking read, so the daemon hangs
---  until SIGKILL, which tears fds down abruptly with no clean drain or
---  close. So the specified clean shutdown is not reached.
+--  This drain-and-close happens after the read loop returns, which on a
+--  signalled shutdown it did not until loregd 0.21.13 (PEI-1122).
 test("in-flight requests are drained and every connection closed on shutdown",
     {
-        spec = "loregd *exit.in-flight-requests-are-drained-and-every-connection-closed-on-shutdown",
-        -- PEI-1122: the same fd-blocking-mode bug that hangs the SIGTERM
-        -- path (see durability.test.lua) prevents the read loop from
-        -- returning, so the deferred drain (device.Serve wg.Wait) and
-        -- connection close (run()'s deferred h.Close) never run on a
-        -- service-manager stop. A clean, complete shutdown is what this
-        -- asserts, and it hangs.
-        tags = { "known-bug" },
+        spec = "loregd *exit.in-flight-requests-are-drained-and-every-connection-closed-on-shutdown"
+            .. " loregd *dispatch.in-flight-requests-are-drained-before-the-process-exits",
     },
     function(t)
         local proc = start_hive(t, "Drain", MOUNT .. "/drain.hive")

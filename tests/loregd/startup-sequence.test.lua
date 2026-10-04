@@ -24,7 +24,7 @@ loregd.mount(vm)
 -- One long-lived daemon serving the fresh PtState fixture, shared by the
 -- observational cases below. Started fresh, so it exercises first boot:
 -- schema creation, root-key generation, the default descriptor. Never
--- SIGTERMed (PEI-1122 would hang it); dies with the VM.
+-- stopped; dies with the VM.
 local main = loregd.start(vm)
 
 -- Spawn loregd with an explicit argv/env and wait for registration.

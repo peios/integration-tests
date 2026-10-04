@@ -14,8 +14,7 @@
 --     route state and kills loregd (and its in-memory volatile store) — and
 --     rely on committed persistent data surviving the cut. The non-restart
 --     cases each run their own daemon on a distinct hive name and SIGKILL it
---     at the end (SIGKILL, not the clean SIGTERM an idle loregd hangs on —
---     PEI-1122). Non-restart cases come first; the reboot cases come last.
+--     at the end. Non-restart cases come first; the reboot cases come last.
 --
 --   * loregd has a known bug (PEI-515, the cases at the end of this file):
 --     the path entry for a volatile child of a *persistent* parent is written
@@ -292,8 +291,7 @@ test("a volatile key's whole subtree is volatile",
 -- Up to 0.21.8 that dangling entry made enumerating the parent fail with EIO.
 -- loregd 0.21.12 carries the enum-tolerance fix (1b307c0, PEI-233), which
 -- drops it, so the first case guards that. The entry still occupies the
--- child's name, which the second case shows. Neither is PEI-1122 (that is the
--- SIGTERM hang).
+-- child's name, which the second case shows.
 test("a persistent parent stays enumerable after a volatile child vanishes", {
     spec = "loregd *volatile.every-volatile-key-ceases-to-exist-when-loregd-exits",
 }, function(t)

@@ -132,17 +132,9 @@ test("one device write carries exactly one response",
         covered_by = "go:loregd internal/device::TestServeDispatchesAndResponds",
     }, function() end)
 
--- Route closed AND coverage-flagged: the drain is `defer wg.Wait()` in
--- device.Serve. A guest cannot observe it — a clean SIGTERM shutdown hangs
--- (PEI-1122), so the drain cannot be exercised end-to-end, and no Go test
--- asserts it in isolation. Cited to the Serve loop that contains it; flagged
--- to the coordinator as a Go coverage gap.
-test("in-flight requests are drained before the process exits",
-    {
-        spec = "loregd *dispatch.in-flight-requests-are-drained-before-the-process-exits",
-        skip = true,
-        covered_by = "go:loregd internal/device::TestServeCleanEOF",
-    }, function() end)
+-- `dispatch.in-flight-requests-are-drained-before-the-process-exits` is
+-- proven end to end in exit.test.lua, whose drain case stops a daemon with
+-- work in flight now that a clean SIGTERM completes (PEI-1122).
 
 -- Route closed: the seed happens in handler.New (every hive's root GUID stored
 -- in the cache) and is indistinguishable at the guest from a first-access

@@ -25,9 +25,8 @@
 --     opened rather than re-created, so a duplicate-GUID create cannot be forged
 --     from a guest either — those two anchors are cited too.
 --
--- One file-scope loregd on the PtState hive; every case drives it. No clean
--- SIGTERM is taken (idle loregd hangs on it, PEI-1122); the daemon is reaped
--- when the file ends.
+-- One file-scope loregd on the PtState hive; every case drives it. The
+-- daemon is reaped when the file ends.
 
 local loregd = require("helpers.loregd")
 local lcs = require("helpers.lcs")

@@ -25,8 +25,7 @@ loregd.mount(vm)
 
 --- SIGKILL a daemon and wait for it to actually leave /proc, so the next
 --- start reopens the hive file with no writer still holding it. SIGKILL,
---- not the clean SIGTERM `loregd.stop` sends — an idle loregd hangs on
---- SIGTERM (PEI-1122), and these cases are not about clean shutdown.
+--- because these cases are not about clean shutdown.
 local function hardstop(proc)
     local pid = proc:pid()
     proc:kill("kill")

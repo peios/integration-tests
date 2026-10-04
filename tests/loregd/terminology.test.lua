@@ -37,8 +37,8 @@ local function is_sqlite(path)
     return r.exit_code == 0 and r.stdout == "SQLite format 3", r.stdout
 end
 
---- SIGKILL a daemon and wait for it to leave /proc (idle loregd hangs on the
---- clean SIGTERM `loregd.stop` sends — PEI-1122).
+--- SIGKILL a daemon and wait for it to leave /proc. These cases are not about
+--- clean shutdown, and a SIGKILL needs no shutdown to complete.
 local function hardstop(p)
     local pid = p:pid()
     p:kill("kill")

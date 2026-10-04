@@ -20,8 +20,8 @@ loregd.format(vm)
 loregd.mount(vm)
 
 -- One long-lived daemon serving the mixed-case PtState fixture, shared by
--- the observational cases. Never SIGTERMed (PEI-1122 would hang it); it
--- dies with the VM at end of file.
+-- the observational cases. Never stopped; it dies with the VM at end of
+-- file.
 loregd.start(vm)
 
 -- Spawn loregd with an explicit argv and env, wait until `wait_for`
