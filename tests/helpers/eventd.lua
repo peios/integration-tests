@@ -212,8 +212,8 @@ end
 function M.boot(opts)
     opts = opts or {}
     local files = {}
-    if opts.config then
-        for k, v in pairs(M.config_seed(opts.config, opts.config_keys)) do files[k] = v end
+    if opts.config or opts.config_keys then
+        for k, v in pairs(M.config_seed(opts.config or {}, opts.config_keys)) do files[k] = v end
     end
     for k, v in pairs(opts.files or {}) do files[k] = v end
     local vm = peinit.boot({
@@ -298,8 +298,12 @@ end
 --- signalled readiness, which by §8.2 is after every store and socket is
 --- open and `synthetic.startup` is durably committed.
 function M.ready(vm, timeout)
+    -- Typed, so the probe plans against one catalogued type rather than
+    -- all of them: an untyped EVENTS query fails outright when any
+    -- catalogued type name is unusable as a descriptor path, and a test
+    -- that plants one would otherwise never see eventd come ready.
     wait_until(function()
-        return M.query(vm, "EVENTS TAKE 1").ok
+        return M.query(vm, "EVENTS " .. M.T.startup .. " TAKE 1").ok
     end, { timeout = timeout or 90, interval = 0.5,
            desc = "eventd to answer on its query socket" })
 end
@@ -442,7 +446,23 @@ end
 --- The copy is not a snapshot: a writer committing while the two files
 --- are read can leave them inconsistent. Read schema, metadata and rows a
 --- test has already waited for, not a store under load.
+local sql_once
+
 function M.sql(vm, db, query)
+    -- The two files are read one after the other, so a writer committing
+    -- in between can leave a copy SQLite rejects. That is a torn copy,
+    -- not a broken store: take another, a few times, before giving up.
+    local err
+    for _ = 1, 4 do
+        local ok, rows = pcall(sql_once, vm, db, query)
+        if ok then return rows end
+        err = rows
+        vm:clock():sleep("250ms")
+    end
+    error(err, 2)
+end
+
+sql_once = function(vm, db, query)
     local dir = host_tmpdir()
     host_write(dir .. "/db", vm:read_file(db))
     local okw, wal = pcall(vm.read_file, vm, db .. "-wal")
