@@ -316,18 +316,15 @@ test("every KMES header field is stored in its own column, not in the payload bl
 end)
 
 test("a userspace emitter cannot make a record that event_type alone reads as synthetic", {
-    spec = "eventd *events.event-type-alone-distinguishes-real-from-synthetic-records",
-    tags = { "known-bug" },
+    spec = "eventd *events.event-type-alone-distinguishes-real-from-synthetic-records"
+        .. " eventd *events.a-kmes-event-typed-in-the-synthetic-namespace-is-counted-and-not-stored",
 }, function(t)
-    -- PEI-1294 (PEI-TBD-synthetic-prefix-spoofable): eventd stores any real KMES event
-    -- under the type it was emitted with (shard.rs:174-191 inserts
-    -- event.event_type verbatim; kmes.rs drain copies it unchecked), so a
-    -- userspace `synthetic.*` emission becomes a row whose type says
-    -- "eventd wrote this".
     local cols = column_decl(vm, SHARD0, "events")
     local n = 0
     for _ in pairs(cols) do n = n + 1 end
     t:assert_eq(n, 11, "the eleven documented columns and no record-type column")
+    local gaps = "SELECT count(*) FROM events WHERE event_type = 'synthetic.gap'"
+    local gaps_before = eventd.sql(vm, SHARD0, gaps)[1][1]
     local tag = eventd.marker("spoof")
     local spoof = "synthetic.pt" .. tag
     local r = eventd.emit(vm, spoof, { tag = tag })
@@ -339,6 +336,8 @@ test("a userspace emitter cannot make a record that event_type alone reads as sy
     t:assert(r.ret ~= 0 or stored[1][1] == 0,
         "a real event typed " .. spoof .. " is refused or not stored as such (emit ret " .. tostring(r.ret) ..
         ", stored rows " .. stored[1][1] .. ")")
+    -- Its sequence is receipted, so the next event leaves no hole behind it.
+    t:assert_eq(eventd.sql(vm, SHARD0, gaps)[1][1], gaps_before, "and no gap is written in its place")
 end)
 
 test("a KMES payload is stored byte for byte, never decoded, re-encoded or validated on the way in", {

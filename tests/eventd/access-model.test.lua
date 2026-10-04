@@ -216,16 +216,9 @@ test("a failed peer-token read ends the connection without evaluating a query", 
 }, function() end)
 
 test("a connection whose identity cannot be evaluated is refused, never served as someone else", {
-    spec = "eventd *access.there-is-no-fallback-identification-or-anonymous-mode",
-    tags = { "known-bug" },
+    spec = "eventd *access.there-is-no-fallback-identification-or-anonymous-mode"
+        .. " eventd *access.an-anonymous-level-caller-is-refused",
 }, function(t)
-    -- PEI-1294 (PEI-TBD-anonymous-peer-served): a client that connects at Anonymous
-    -- impersonation level conveys the anonymous token, and eventd
-    -- evaluates it like any other (Authorizer::from_peer, query/mod.rs:269;
-    -- no check of the token's level or user), so a descriptor granting
-    -- Everyone or Anonymous serves records to a caller who declined to say
-    -- who it is. Unsure: the book may mean only that eventd never invents
-    -- an identity of its own.
     local ty = eventd.marker("ptanon")
     emit(ty, { n = 1 })
     wait_seen(ty, 1, "the event")
@@ -239,10 +232,12 @@ test("a connection whose identity cannot be evaluated is refused, never served a
     t:assert_eq(#ident.records, 0, "an Identification-level caller gets nothing: " .. describe(ident))
     t:assert_eq(ident.status, "error", "and is refused: " .. describe(ident))
 
-    -- Anonymous level: the caller conveys no identity of its own.
+    -- Anonymous level: the caller conveys no identity of its own, and
+    -- eventd answers with an error whatever the descriptor grants.
     local anon = rq.ask(vm, events(ty), { level = token.LEVEL.ANONYMOUS, timeout = 20 })
     t:assert_eq(#anon.records, 0,
         "an anonymous caller is not served, even where Everyone may read: " .. describe(anon))
+    t:assert_eq(anon.status, "error", "and is answered with an error: " .. describe(anon))
 end)
 
 -- ---------------------------------------------------------------------------

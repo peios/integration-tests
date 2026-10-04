@@ -194,7 +194,14 @@ test("SIGQUIT writes a diagnostic dump to stderr, taken before the shutdown star
         -- Material for the dump's counters, which are per process and so
         -- are made again each try: a log record whose origin is outside
         -- the grammar, a metric datagram with no identity, one whose
-        -- publish descriptor grants nobody anything, a type conflict.
+        -- publish descriptor grants nobody anything, a type conflict, and
+        -- a KMES event typed in eventd's reserved namespace (the event
+        -- after it, once stored, shows the writer has been past it).
+        local reserved = eventd.marker("rsv")
+        eventd.emit(vm, "synthetic.pt" .. reserved, { tag = reserved })
+        eventd.emit(vm, "pt.crash.after." .. reserved, { tag = reserved })
+        eventd.wait_rows(vm, "EVENTS pt.crash.after." .. reserved .. " SINCE 10m ago",
+            function(r) return #r == 1 end)
         dump.origin = "pt bad origin " .. eventd.marker()
         eventd.send_log(vm, { origin = dump.origin, is_error = false, message = "x" })
         eventd.send_metric(vm, { name = eventd.marker("noid"), type = "gauge", value = 1 }, { pass_token = false })
@@ -266,6 +273,14 @@ test("the dump gives the series cache occupancy", {
     t:assert(dump.metric_series_cache and dump.metric_series_cache:match("^%d+$")
         and tonumber(dump.metric_series_cache) >= 1,
         "metric_series_cache holds the series used: " .. tostring(dump.metric_series_cache))
+end)
+
+test("the dump counts KMES events discarded for a type in the reserved synthetic namespace", {
+    spec = "eventd *crash.the-dump-includes-kmes-events-discarded-for-a-reserved-type",
+}, function(t)
+    need_dump(t)
+    t:assert(dump.event_ingress and tonumber(dump.event_ingress:match("reserved_types=(%d+)") or "0") >= 1,
+        "event_ingress: " .. tostring(dump.event_ingress))
 end)
 
 test("the dump counts invalid-origin log discards and names the latest such origin", {

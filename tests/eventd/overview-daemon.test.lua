@@ -37,15 +37,8 @@ test("eventd stores events, logs and metrics, and answers queries for all three"
         1, "held in eventd's own event store")
 end)
 
--- PEI-1293 (PEI-TBD-eventd-not-tcb-signed): eventd's binary is not signed, so it runs with no PIP trust rather than at TCB level.
--- eventd runs unprotected (pip_type 0,
--- pip_trust 0) while peinit and authd in the same image run at PeiosTcb
--- (512/8192). Their pekit.toml sign the binary ([build.main.sign.pip], authd
--- pekit.toml:225-226, peinit pekit.toml:198-199); eventd's pekit.toml has no
--- such section, so its package ships the binary unsigned.
 test("eventd is a boot-started, Critical platform daemon signed at TCB level", {
     spec = "eventd *overview.eventd-is-a-boot-started-critical-platform-daemon-signed-at-tcb-level",
-    tags = { "known-bug" },
 }, function(t)
     local def = vm:run([[reg get 'Machine\System\Services\eventd']]).stdout
     t:assert(def:find('Triggers = REG_MULTI_SZ%s*%[?"?boot') or def:find("boot", 1, true),
