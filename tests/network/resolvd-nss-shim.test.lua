@@ -998,7 +998,7 @@ test("the module links the codec and libc only: no shared object outside glibc i
 
 test("the shim links against libc and the wire codec and nothing else",
     { spec = "PSPU *nri-shim.links-libc-and-codec-only", tags = { "known-bug" } }, function(t)
-        -- PEI-TBD-nss-links-libgcc-s: libnss_peios_net.so.2 NEEDs
+        -- PEI-1374: libnss_peios_net.so.2 NEEDs
         -- libgcc_s.so.1 as well as libc.so.6 and ld-linux-x86-64.so.2, so
         -- every resolving process also loads GCC's runtime.
         local r = pt(t, { { "elf", MODULE } })
