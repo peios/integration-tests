@@ -244,11 +244,11 @@ test("listeners are copied out 32 at a time, and a dump of more is whole",
     end)
 
 test("forty sockets in one hash bucket, more than a batch, are all written",
-    { spec = "PKM *ntfe-abi-notes.bound-listener-batch-32", tags = { "known-bug" } }, function(t)
-        -- PEI-1377: a bucket was walked once, so past the 32nd socket in
-        -- one bucket the rest were counted in `total` but never written:
-        -- `count < total` with room to spare. One SO_REUSEPORT group on
-        -- one port shares one bucket.
+    { spec = "PKM *ntfe-abi-notes.bound-listener-batch-32" }, function(t)
+        -- Before alpha9 a bucket was walked once, so past the 32nd socket
+        -- in one bucket the rest were counted in `total` but never
+        -- written: `count < total` with room to spare (PEI-1377). One
+        -- SO_REUSEPORT group on one port shares one bucket.
         local fds = {}
         for _ = 1, 40 do
             fds[#fds + 1] = sock(vm, { type = ntfe.SOCK_DGRAM, opts = { { SOL_SOCKET, SO_REUSEPORT, 1 } },

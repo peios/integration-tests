@@ -358,12 +358,13 @@ test("an inbound refusal is routed out to the peer with our address as its sourc
     end)
 
 test("an inbound refusal to a link-local peer is routed out the link it came in on",
-    { spec = { "PKM *ntfe-seat.inbound-refusal-routed-to-peer", "PKM *ntfe-seat.inbound-link-local-answer-routed-on-ingress" },
-      tags = { "known-bug" } }, function(t)
-        -- PEI-1383: the answer was routed with ip6_route_me_harder, which
-        -- scopes a link-local lookup to the refused packet's own route's
-        -- device — for an inbound packet, the local delivery route's
-        -- loopback — so it found no route and degraded to DROP.
+    { spec = { "PKM *ntfe-seat.inbound-refusal-routed-to-peer", "PKM *ntfe-seat.inbound-link-local-answer-routed-on-ingress" } },
+    function(t)
+        -- Before alpha9 the answer was routed with ip6_route_me_harder,
+        -- which scopes a link-local lookup to the refused packet's own
+        -- route's device — for an inbound packet, the local delivery
+        -- route's loopback — so it found no route and degraded to DROP
+        -- (PEI-1383).
         assert(seat.addr6(vm, net.name, "fe80::9:1"))
         assert(seat.addr6(peer, net.peer, "fe80::9:2"))
         local scope = assert(ntfe.if_index(peer, net.peer))
