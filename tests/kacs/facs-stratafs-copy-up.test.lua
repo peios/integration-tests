@@ -206,8 +206,8 @@ test("there is no userspace surface for the context",
         local top = table.concat(names_under(at), ",")
         t:assert(top:match("kacs"), "KACS's own directory is there: " .. top)
         local kacs_entries = table.concat(names_under(at .. "/kacs"), ",")
-        t:assert_eq(kacs_entries, "self,sessions",
-            "and holds only the session and self files")
+        t:assert_eq(kacs_entries, "self,sessions,signing_keys",
+            "and holds only the session and self files and the key listing")
         -- StrataFS's securityfs directory holds the §4.A.2 test
         -- rendezvous points and nothing else; none of them creates,
         -- enters or arms a copy-up context.

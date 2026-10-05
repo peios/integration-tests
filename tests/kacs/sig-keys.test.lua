@@ -69,7 +69,9 @@ test("there is no revocation interface of any kind",
     { spec = "PKM *sig.no-revocation" }, function(t)
         -- §3.6 says flatly that no hash blocklist, per-key revocation or
         -- revocation state exists. KACS's whole securityfs surface is
-        -- two files, neither of which is one.
+        -- three files, none of which is one: the token and session
+        -- endpoints, and signing_keys, which only lists the compiled-in
+        -- keys (PEI-1314).
         local path, err = hooks.hook_path(vm, "unused")
         t:assert(path, "securityfs is available: " .. tostring(err))
         local names = {}
@@ -77,8 +79,8 @@ test("there is no revocation interface of any kind",
             names[#names + 1] = e.name
         end
         table.sort(names)
-        t:assert_eq(table.concat(names, ","), "self,sessions",
-            "securityfs/kacs holds only the token and session endpoints")
+        t:assert_eq(table.concat(names, ","), "self,sessions,signing_keys",
+            "securityfs/kacs holds only the token and session endpoints and the key listing")
         -- And a signature that does not verify is simply unsigned; it
         -- leaves nothing behind that a later attempt could consult.
         local p = signing.place(vm, B .. "/norevoke",

@@ -287,7 +287,8 @@ test("no signed high-trust crash handler is implemented",
     { spec = "PKM *pip.coredump.no-crash-handler" }, function(t)
         -- §3.7 records the alternative as not implemented. Nothing in
         -- KACS's surface offers one: securityfs carries the token and
-        -- session endpoints and nothing else, and core_pattern is
+        -- session endpoints and the signing-key listing and nothing
+        -- else, and core_pattern is
         -- Linux's own default, untouched by KACS.
         local path, err = hooks.hook_path(vm, "unused")
         t:assert(path, "securityfs is available: " .. tostring(err))
@@ -296,7 +297,7 @@ test("no signed high-trust crash handler is implemented",
             names[#names + 1] = e.name
         end
         table.sort(names)
-        t:assert_eq(table.concat(names, ","), "self,sessions",
+        t:assert_eq(table.concat(names, ","), "self,sessions,signing_keys",
             "KACS's securityfs surface offers no crash-handler endpoint")
         t:assert_eq(vm:read_file("/proc/sys/kernel/core_pattern"), "core\n",
             "and core_pattern is Linux's default: KACS installs no handler")
