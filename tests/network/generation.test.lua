@@ -407,7 +407,7 @@ test("a generation built at runtime that ties two rules naming different profile
 
 test("two rules JOINing one profile in different case are no tie",
     { spec = "netd *generation.runtime-tie-refuses", tags = { "known-bug" } }, function(t)
-        -- PEI-TBD-tie-case: netd refuses this generation with "rules twin vs
+        -- PEI-1362: netd refuses this generation with "rules twin vs
         -- wired tie on interface eth0". pnp-core interns JOIN targets by
         -- their spelling, so JOIN(DEFAULT) and JOIN(default) are two verdict
         -- indexes, and two top-priority JOINs with different indexes are a
