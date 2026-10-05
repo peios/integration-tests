@@ -408,8 +408,11 @@ done
                 end)
                 return ok and procs:match("(%d+)") or nil
             end, { timeout = 30, interval = 0.25, desc = "pt-unforked's child" })
+            -- Read by the agent: the child is a fork of PID 1 that has not
+            -- exec'd yet, so it still carries PID 1's TCB label, and PIP
+            -- refuses the shell's `cat` its /proc.
             wait_until(function()
-                return vm:run("cat /proc/" .. child .. "/wchan").stdout:find("fuse", 1, true)
+                return (peinit.proc(vm, child, "wchan") or ""):find("fuse", 1, true)
             end, { timeout = 15, interval = 0.25, desc = "the child to block in the FUSE mount" })
             local raw = vm:run("svctl --json status pt-unforked").stdout
             t:assert(raw:find('"state":"starting"', 1, true), "pt-unforked is Starting: " .. raw)

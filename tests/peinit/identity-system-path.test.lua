@@ -22,12 +22,14 @@ peinit.claim(2)
 -- comparing tokens wants the machine the image really boots.
 local vm = peinit.boot({ name = "identity-system-path" })
 
+-- What `token show --pid N --raw --all` prints, read by the agent
+-- (helpers/peinit.lua `token_text`): the tokens read here include PID 1's
+-- and eventd's, both TCB-signed, and PIP refuses the shell's `token
+-- --pid` either process.
 local function token_of(pid)
-    local shown = vm:run("token show --pid " .. pid .. " --raw --all")
-    shown:assert_ok()
     local out = { principal = {}, groups = {}, privileges = {} }
     local section
-    for _, line in ipairs(peinit.lines(shown.stdout)) do
+    for _, line in ipairs(peinit.lines(peinit.token_text(vm, pid, "show"))) do
         local head = line:match("^%[(%a+)")
         if head then
             section = head
@@ -353,11 +355,12 @@ test("restricting a service's privileges leaves peinit's own token untouched",
             }),
         })
 
+        -- What `token privs --pid N` prints, read by the agent (helpers/
+        -- peinit.lua `token_text`): one of the tokens read is PID 1's,
+        -- which is TCB-signed, and PIP refuses the shell's `token` it.
         local function privileges(vm_, pid)
-            local shown = vm_:run("token privs --pid " .. pid)
-            shown:assert_ok()
             local names = {}
-            for _, line in ipairs(peinit.lines(shown.stdout)) do
+            for _, line in ipairs(peinit.lines(peinit.token_text(vm_, pid, "privs"))) do
                 local name = line:match("^%s+(.-)%s%s+")
                 if name then names[name] = true end
             end

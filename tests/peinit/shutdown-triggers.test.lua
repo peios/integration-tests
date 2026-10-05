@@ -305,13 +305,11 @@ test("a Critical service out of restart budget reboots the machine without a gra
         end)
     end)
 
---- PID 1's descriptors, as `fd -> target` pairs from /proc/1/fd.
+--- PID 1's descriptors, as `fd -> target` pairs from /proc/1/fd. Read by
+--- the agent: PID 1 is TCB-signed, and PIP refuses the shell's `ls` its
+--- /proc (helpers/peinit.lua).
 local function pid1_fds(vm)
-    local out = {}
-    for fd, target in vm:run("ls -l /proc/1/fd").stdout:gmatch("(%d+) %-> ([^\r\n]+)") do
-        out[tonumber(fd)] = target
-    end
-    return out
+    return peinit.fds(vm, 1)
 end
 
 --- The descriptors registered with PID 1's event loop, as a set, read from
@@ -323,7 +321,8 @@ local function pid1_registered(vm)
     end
     assert(epoll, "PID 1 has an epoll descriptor")
     local out = {}
-    for tfd in vm:run("cat /proc/1/fdinfo/" .. epoll).stdout:gmatch("tfd:%s*(%d+)") do
+    local info = assert(peinit.proc(vm, 1, "fdinfo/" .. epoll))
+    for tfd in info:gmatch("tfd:%s*(%d+)") do
         out[tonumber(tfd)] = true
     end
     return out
@@ -331,7 +330,7 @@ end
 
 --- PID 1's CPU time so far, in clock ticks: utime plus stime.
 local function pid1_ticks(vm)
-    local stat = vm:run("cat /proc/1/stat").stdout
+    local stat = assert(peinit.proc(vm, 1, "stat"))
     -- The fields after the parenthesised command; utime and stime are the
     -- 12th and 13th of them.
     local fields = {}

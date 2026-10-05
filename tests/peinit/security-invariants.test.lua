@@ -170,12 +170,16 @@ test("peinit still holds the token the kernel gave it, and none it minted",
         -- the tokens it builds. Those marks are exact: a minted service
         -- token gains the per-service SID and the Service group
         -- `S-1-5-6` that the template does not carry (§4.2).
-        local mine = vm:run("token groups --pid 1")
-        mine:assert_ok()
-        t:assert(not mine.stdout:find("S%-1%-5%-80%-"),
-            "PID 1 carries no per-service SID: " .. mine.stdout)
-        t:assert(not mine.stdout:find("S%-1%-5%-6%f[%D]"),
-            "and is not in the Service group: " .. mine.stdout)
+        --
+        -- PID 1's token is read by the agent: PID 1 is TCB-signed, and PIP
+        -- refuses the shell's `token --pid 1` the process (helpers/
+        -- peinit.lua `token_text`, which prints what the tool would, with
+        -- every SID raw).
+        local mine = peinit.token_text(vm, 1, "groups")
+        t:assert(not mine:find("S%-1%-5%-80%-"),
+            "PID 1 carries no per-service SID: " .. mine)
+        t:assert(not mine:find("S%-1%-5%-6%f[%D]"),
+            "and is not in the Service group: " .. mine)
 
         -- registryd's token is one peinit built from PID 1's as a
         -- template, and it carries both. Same user SID, different token:
@@ -199,6 +203,6 @@ test("peinit still holds the token the kernel gave it, and none it minted",
 
         -- And PID 1 is still SYSTEM at the end of all of it, which is the
         -- other half: the identity is not dropped either.
-        t:assert(vm:run("token user --pid 1").stdout:find("S-1-5-18", 1, true),
+        t:assert(peinit.token_text(vm, 1, "user"):find("S-1-5-18", 1, true),
             "PID 1 is still SYSTEM")
     end)

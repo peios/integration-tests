@@ -349,8 +349,11 @@ test("a stop sent before a start's process has exec'd supersedes it, rather than
             end)
             return ok and procs:match("(%d+)") or nil
         end, { timeout = 30, interval = 0.25, desc = "pt-cx-preexec's forked child" })
+        -- Read by the agent: the child is a fork of PID 1 that has not
+        -- exec'd yet, so it still carries PID 1's TCB label, and PIP
+        -- refuses the shell's `cat` its /proc.
         wait_until(function()
-            return vm:run("cat /proc/" .. child .. "/wchan").stdout:find("fuse", 1, true)
+            return (peinit.proc(vm, child, "wchan") or ""):find("fuse", 1, true)
         end, { timeout = 15, interval = 0.25, desc = "the child to block in the FUSE mount" })
         local held = vm:run("svctl --json status pt-cx-preexec").stdout
         t:assert(held:find('"state":"starting"', 1, true) and held:find('"pid":null', 1, true),

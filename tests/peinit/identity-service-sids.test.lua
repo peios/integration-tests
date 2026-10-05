@@ -13,11 +13,13 @@ peinit.claim(2)
 
 local vm = peinit.boot({ name = "identity-service-sids" })
 
+-- What `token groups --pid N --raw` prints, read by the agent (helpers/
+-- peinit.lua `token_text`): among the daemons read here are authd and
+-- eventd, both TCB-signed, and PIP refuses the shell's `token --pid`
+-- either process.
 local function groups_of(vm_, pid)
-    local shown = vm_:run("token groups --pid " .. pid .. " --raw")
-    shown:assert_ok()
     local found = {}
-    for _, line in ipairs(peinit.lines(shown.stdout)) do
+    for _, line in ipairs(peinit.lines(peinit.token_text(vm_, pid, "groups"))) do
         local sid = line:match("^%s+(S%-[%d%-]+)%s")
         if sid then found[sid] = true end
     end

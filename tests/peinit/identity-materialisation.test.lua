@@ -61,13 +61,14 @@ local vm = peinit.boot({
 })
 
 -- `token show --pid N --raw --all` prints three sections, each row a name
--- and its attributes separated by run of spaces.
+-- and its attributes separated by run of spaces. The agent reads it
+-- (helpers/peinit.lua `token_text`, which prints what the tool would):
+-- one of the tokens read here is PID 1's, which is TCB-signed, and PIP
+-- refuses the shell's `token --pid 1` the process.
 local function token_of(vm_, pid)
-    local shown = vm_:run("token show --pid " .. pid .. " --raw --all")
-    shown:assert_ok()
     local out = { principal = {}, groups = {}, privileges = {} }
     local section
-    for _, line in ipairs(peinit.lines(shown.stdout)) do
+    for _, line in ipairs(peinit.lines(peinit.token_text(vm_, pid, "show"))) do
         local head = line:match("^%[(%a+)")
         if head then
             section = head

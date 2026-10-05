@@ -140,10 +140,13 @@ local SEED = {
     counted("pt-lp-onrole", "Requires", { "pt-lp-role:up" }),
 }
 
+-- pt-unixpeer is staged TCB-signed: it walks /proc/<pid>/fd of PID 1 and
+-- of every process, authd and eventd among them, all TCB-signed, and PIP
+-- refuses an unsigned process their /proc.
 local vm = peinit.boot({
     memory = "800M",
     name = "levelspub",
-    files = peinit.merge(peinit.tool("pt-notify"), peinit.tool("pt-unixpeer"),
+    files = peinit.merge(peinit.tool("pt-notify"), peinit.tool("pt-unixpeer", { signed = true }),
         peinit.seed("zz-pt-levelspub", SEED)),
 })
 

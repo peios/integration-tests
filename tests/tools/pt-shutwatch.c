@@ -55,8 +55,12 @@
  * witness re-enables the privilege, so peinit's next once-a-second retry
  * succeeds and the machine goes down as it would have.
  *
- * `token` does the adjusting, run from this process's namespace, which
- * still has /usr/bin, /lib and /etc after PID 1 has unmounted its own.
+ * This process does the adjusting itself, through a handle on PID 1's
+ * token opened once when the hold is armed and kept for the release.
+ * It cannot hand the job to `token`: PID 1 is PIP-signed at the TCB
+ * tier, and opening its token needs a caller that dominates it (PKM
+ * §3.7). This binary is staged TCB-signed; `/usr/bin/token`, a fresh
+ * exec, is not, and is refused.
  *
  * Usage:
  *   pt-shutwatch [--seed PATH] [--out PATH] [--pid PID] [--hold N]
@@ -85,17 +89,35 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/inotify.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
-/* KACS (pkm/uapi/pkm/syscall.h, file.h, sd.h): read a security
- * descriptor by path, and set a superblock's mount policy. */
+/* KACS (pkm/uapi/pkm/syscall.h, file.h, sd.h, token.h): read a security
+ * descriptor by path, set a superblock's mount policy, and open and
+ * adjust another process's token. */
+#define SYS_KACS_OPEN_PROCESS_TOKEN 1001
 #define SYS_KACS_GET_SD 1021
 #define SYS_KACS_SET_MOUNT_POLICY 1027
+#define KACS_TOKEN_ADJUST_PRIVS 0x0020u
+#define KACS_PRIVILEGE_ATTR_ENABLED 0x00000002u
+#define KACS_SE_SHUTDOWN_PRIVILEGE_BIT 19u
+#define KACS_IOC_ADJUST_PRIVS 0x40184B01u /* _IOW('K', 1, struct kacs_adjust_privs_args) */
+
+struct kacs_adjust_privs_args {
+    unsigned int count;
+    unsigned int pad;
+    unsigned long long data_ptr;
+    unsigned long long previous_enabled;
+};
+
+struct kacs_priv_entry {
+    unsigned int luid;
+    unsigned int attributes;
+};
 #define KACS_SECINFO_OWNER 0x1u
 #define KACS_SECINFO_GROUP 0x2u
 #define KACS_SECINFO_DACL 0x4u
@@ -187,25 +209,38 @@ static int hold_after;
 static int failed_reboots;
 static int released;
 
-/* Run `token adjust privs SeShutdown=STATE --pid PID` and wait for it. */
-static int set_shutdown_privilege(const char *state)
+/* A handle on the watched process's token, with ADJUST_PRIVS: opened
+ * when the hold is armed, kept for the release. */
+static int watched_token = -1;
+
+/* Open the watched process's token. 0, or the errno that refused it. */
+static int open_watched_token(void)
 {
-    char entry[64], pid_text[32];
-    snprintf(entry, sizeof entry, "SeShutdown=%s", state);
-    snprintf(pid_text, sizeof pid_text, "%d", (int)watched);
-    pid_t child = fork();
-    if (child < 0) return -1;
-    if (child == 0) {
-        /* Its own output is not the record; keep the console clean. */
-        int null = open("/dev/null", O_RDWR | O_CLOEXEC);
-        if (null >= 0) { dup2(null, 1); dup2(null, 2); }
-        char *argv[] = { "token", "adjust", "privs", entry, "--pid", pid_text, NULL };
-        execv("/usr/bin/token", argv);
-        _exit(127);
-    }
-    int status = 0;
-    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+    int pidfd = (int)syscall(SYS_pidfd_open, watched, 0);
+    if (pidfd < 0) return errno;
+    long fd = syscall(SYS_KACS_OPEN_PROCESS_TOKEN, pidfd, KACS_TOKEN_ADJUST_PRIVS);
+    int saved = errno;
+    close(pidfd);
+    if (fd < 0) return saved;
+    watched_token = (int)fd;
+    return 0;
+}
+
+/* Enable or disable SeShutdownPrivilege on the watched process's token,
+ * as `token adjust privs SeShutdown=enabled|disabled --pid PID` would.
+ * 0, or the errno that refused it. */
+static int set_shutdown_privilege(int enabled)
+{
+    if (watched_token < 0) return EBADF;
+    struct kacs_priv_entry entry = {
+        .luid = KACS_SE_SHUTDOWN_PRIVILEGE_BIT,
+        .attributes = enabled ? KACS_PRIVILEGE_ATTR_ENABLED : 0,
+    };
+    struct kacs_adjust_privs_args args;
+    memset(&args, 0, sizeof args);
+    args.count = 1;
+    args.data_ptr = (unsigned long long)(unsigned long)&entry;
+    return ioctl(watched_token, KACS_IOC_ADJUST_PRIVS, &args) < 0 ? errno : 0;
 }
 
 /* ---- the trace source ------------------------------------------------ */
@@ -402,7 +437,7 @@ static void note_reboot_result(const char *line)
     if (!hold_after || released || !contains(line, "sys_reboot ->")) return;
     if (contains(line, "-> 0x0")) return;
     if (++failed_reboots < hold_after) return;
-    int rc = set_shutdown_privilege("enabled");
+    int rc = set_shutdown_privilege(1);
     released = 1;
     say("hold released after=%d rc=%d", failed_reboots, rc);
 }
@@ -780,9 +815,14 @@ int main(int argc, char **argv)
 
     int held = 0;
     if (hold_after > 0) {
-        int rc = set_shutdown_privilege("disabled");
+        int rc = open_watched_token();
+        if (rc != 0) {
+            say("error hold open token errno=%d", rc);
+        } else {
+            rc = set_shutdown_privilege(0);
+            if (rc != 0) say("error hold adjust errno=%d", rc);
+        }
         held = rc == 0;
-        if (!held) say("error hold rc=%d", rc);
     }
 
     say("ready trace=%d fs=%d mount=%d hold=%d mounts=%zu seed=%s", trace_fd >= 0, fs_fd >= 0,

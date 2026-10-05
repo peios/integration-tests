@@ -36,14 +36,15 @@ test("PID 1 holds the boot SYSTEM token, with every privilege",
         -- that the kernel put it there. What can be checked from here is
         -- that PID 1 is holding exactly what the chapter says it was
         -- given.
-        local user = vm:run("token user --pid 1")
-        user:assert_ok()
-        t:assert(user.stdout:find("S-1-5-18", 1, true),
-            "PID 1 runs as SYSTEM: " .. user.stdout)
+        --
+        -- PID 1's token is read by the agent: PID 1 is TCB-signed, and
+        -- PIP refuses the shell's `token --pid 1` the process
+        -- (helpers/peinit.lua `token_text`, which prints what it would).
+        local user = peinit.token_text(vm, 1, "user")
+        t:assert(user:find("S-1-5-18", 1, true),
+            "PID 1 runs as SYSTEM: " .. user)
 
-        local privs = vm:run("token privs --pid 1")
-        privs:assert_ok()
-        local held, count = privileges(privs.stdout)
+        local held, count = privileges(peinit.token_text(vm, 1, "privs"))
         t:assert(count > 30, "the token carries the whole privilege set, not a subset: "
             .. count .. " privileges")
 
@@ -71,10 +72,9 @@ test("PID 1 holds the boot SYSTEM token, with every privilege",
         -- synthesised one: the kernel appends the session's logon SID to
         -- the group list when it creates a token, so its presence is the
         -- kernel's own mark on this one.
-        local groups = vm:run("token groups --pid 1")
-        groups:assert_ok()
-        t:assert(groups.stdout:find("logon%-id"),
-            "the group list carries the boot session's logon SID: " .. groups.stdout)
+        local groups = peinit.token_text(vm, 1, "groups")
+        t:assert(groups:find("logon%-id"),
+            "the group list carries the boot session's logon SID: " .. groups)
     end)
 
 test("a filesystem with no descriptor is refused to SYSTEM as much as to anyone",

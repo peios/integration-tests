@@ -158,8 +158,11 @@ end
 --- store made directly visible: one symlink per descriptor, pointing at
 --- whatever it was opened on. The guest ships no `grep`, so the counting
 --- is done here rather than in a pipeline.
+---
+--- Listed by the agent: PID 1 is TCB-signed, and PIP refuses the shell's
+--- `ls` its /proc (helpers/peinit.lua).
 local function held_fds(path)
-    local listing = vm:run("ls -l /proc/1/fd 2>/dev/null").stdout
+    local listing = peinit.fd_listing(vm, 1)
     local count = 0
     for line in listing:gmatch("[^\r\n]+") do
         local target = line:match("%->%s+(.*)$")

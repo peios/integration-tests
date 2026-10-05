@@ -344,8 +344,10 @@ test("peinit uses one datagram socket for eventd and does not make another per b
             -- took the sample is not counted as growth.
             local previous
             for _ = 1, 20 do
+                -- Listed by the agent: PID 1 is TCB-signed, and PIP
+                -- refuses the shell's `ls` its /proc.
                 local count = 0
-                for _ in vm:run("ls -l /proc/1/fd").stdout:gmatch("%-> socket:") do
+                for _ in peinit.fd_listing(vm, 1):gmatch("%-> socket:") do
                     count = count + 1
                 end
                 if previous == count then return count end
@@ -384,8 +386,10 @@ test("when eventd dies the buffer takes over, and the handoff repeats when it co
         t:assert(pid, "eventd has a process to kill")
 
         -- SIGKILL, so this is a crash rather than a stop: peinit sees
-        -- the exit through the pidfd it supervises eventd with.
-        vm:run("kill -9 " .. pid):assert_ok()
+        -- the exit through the pidfd it supervises eventd with. Sent by
+        -- the agent: eventd is TCB-signed, and PIP refuses the shell's
+        -- `kill`.
+        peinit.signal(vm, pid, "KILL")
 
         -- Output produced while eventd is gone. It cannot be forwarded,
         -- so if it turns up later it was buffered in the meantime.
@@ -446,7 +450,9 @@ test("the log gap while eventd is down is bounded by the pre-eventd buffer",
 
         local pid = vm:run("svctl status eventd").stdout:match("pid: (%d+)")
         t:assert(pid, "eventd has a process to kill")
-        vm:run("kill -9 " .. pid):assert_ok()
+        -- From the agent: eventd is TCB-signed, and PIP refuses the
+        -- shell's `kill`.
+        peinit.signal(vm, pid, "KILL")
         wait_until(function()
             return not vm:run("svctl status eventd").stdout:find("eventd: active", 1, true)
         end, { timeout = 10, interval = 0.2, desc = "peinit to see eventd go" })

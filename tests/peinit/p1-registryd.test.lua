@@ -47,9 +47,14 @@ local function starttime(vm, service)
     end
     if not pid then error(service .. " never reported a pid") end
     -- Field 22 of /proc/pid/stat is the process's start time in clock
-    -- ticks since boot. Read through `cut` rather than parsed in Lua
-    -- because field 2 is a comm in parentheses and may hold spaces.
-    local ticks = vm:run("cut -d' ' -f22 /proc/" .. pid .. "/stat").stdout:match("%d+")
+    -- ticks since boot: the 20th field after the parenthesised comm, which
+    -- may hold spaces. Read by the agent, not by `cut` in the shell: one
+    -- of the services read here is eventd, which is TCB-signed, and PIP
+    -- refuses an unsigned process its /proc.
+    local stat = peinit.proc(vm, pid, "stat") or ""
+    local fields = {}
+    for field in (stat:match("%) (.*)$") or ""):gmatch("%S+") do fields[#fields + 1] = field end
+    local ticks = fields[20]
     return tonumber(ticks), pid
 end
 

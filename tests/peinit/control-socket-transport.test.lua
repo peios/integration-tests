@@ -335,8 +335,10 @@ local O_NONBLOCK = 0x800       -- 04000
 local O_CLOEXEC = 0x80000      -- 02000000
 
 --- PID 1's descriptor number for the socket with this inode, or nil.
+--- Listed by the agent: PID 1 is TCB-signed, and PIP refuses the shell's
+--- `ls` its /proc.
 local function pid1_fd_for_inode(inode)
-    for line in vm:run("ls -l /proc/1/fd 2>/dev/null").stdout:gmatch("[^\r\n]+") do
+    for line in peinit.fd_listing(vm, 1):gmatch("[^\r\n]+") do
         local fd, target = line:match("(%d+)%s+%->%s+socket:%[(%d+)%]")
         if target == tostring(inode) then return fd end
     end

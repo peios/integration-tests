@@ -110,12 +110,13 @@ local vm = peinit.boot({
     files = peinit.seed("pt-exhaust", SERVICES),
 })
 
---- Every descriptor PID 1 holds, as a map of number to link target.
+--- Every descriptor PID 1 holds, as a map of number to link target. The
+--- link is read by the agent too: PID 1 is TCB-signed, and PIP refuses
+--- the shell's `readlink` its /proc.
 local function descriptors()
     local fds = {}
     for _, entry in ipairs(vm:listdir("/proc/1/fd")) do
-        fds[entry.name] = vm:run("readlink /proc/1/fd/" .. entry.name)
-            .stdout:gsub("%s+$", "")
+        fds[entry.name] = peinit.proc_link(vm, 1, "fd/" .. entry.name) or ""
     end
     return fds
 end

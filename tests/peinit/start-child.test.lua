@@ -65,12 +65,13 @@ local function main_pid(service)
     end, { timeout = 60, interval = 0.5, desc = service .. " to have a main process" })
 end
 
---- `/proc/<pid>/fd` as a map of descriptor number to its target.
+--- `/proc/<pid>/fd` as a map of descriptor number to its target. The links
+--- are read by the agent too: one of the processes read here is PID 1,
+--- which is TCB-signed, and PIP refuses the shell's `readlink` its /proc.
 local function descriptors(pid)
     local fds = {}
     for _, entry in ipairs(vm:listdir("/proc/" .. pid .. "/fd")) do
-        local link = vm:run("readlink /proc/" .. pid .. "/fd/" .. entry.name)
-        fds[tonumber(entry.name)] = link.stdout:gsub("%s+$", "")
+        fds[tonumber(entry.name)] = peinit.proc_link(vm, pid, "fd/" .. entry.name) or ""
     end
     return fds
 end

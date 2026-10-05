@@ -218,7 +218,13 @@ local function diagnose(err)
         out[#out + 1] = ok and (r.stdout .. tostring(r.stderr or "")) or ("ERROR " .. tostring(r))
     end
     run("date +%s; cat /proc/uptime; cat /proc/loadavg")
-    run("cut -d' ' -f3,14,15 /proc/1/stat; cat /proc/1/wchan; echo")
+    -- PID 1's /proc through the agent: PID 1 is TCB-signed, and PIP
+    -- refuses the shell's `cut` and `cat` it.
+    for _, name in ipairs({ "stat", "wchan" }) do
+        local ok, text = pcall(peinit.proc, vm, 1, name)
+        out[#out + 1] = "$ (agent) /proc/1/" .. name
+        out[#out + 1] = ok and tostring(text) or ("ERROR " .. tostring(text))
+    end
     run("cat /run/pt-hc.log")
     run("cat /run/pt-ticks")
     run("svctl --json status pt-j-health pt-j-daily pt-j-window pt-j-stamp")

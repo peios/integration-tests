@@ -76,8 +76,13 @@ local function mask_has(hex, signal)
 end
 
 --- One `Name:\tvalue` field out of /proc/1/status.
+---
+--- PID 1's /proc is read by the agent throughout this file, and PID 1 is
+--- signalled from it: PID 1 is TCB-signed, and PIP refuses an unsigned
+--- process — `cat`, `ls`, `kill` in the shell — all of it
+--- (helpers/peinit.lua).
 local function proc1_status(field)
-    local text = vm:run("cat /proc/1/status").stdout
+    local text = assert(peinit.proc(vm, 1, "status"))
     return text:match(field .. ":%s*(%S+)")
 end
 
@@ -105,20 +110,18 @@ test("PID 1 blocks every blockable signal and reads them through a nonblocking, 
 
         -- The descriptor itself. `ls -l /proc/1/fd` names what each fd
         -- points at, and a signalfd shows as an anon_inode.
-        local fds = vm:run("ls -l /proc/1/fd")
-        fds:assert_ok()
-        local signalfd = fds.stdout:match("(%d+) %-> anon_inode:%[signalfd%]")
-        t:assert(signalfd, "PID 1 holds a signalfd: " .. fds.stdout)
+        local fds = peinit.fd_listing(vm, 1)
+        local signalfd = fds:match("(%d+) %-> anon_inode:%[signalfd%]")
+        t:assert(signalfd, "PID 1 holds a signalfd: " .. fds)
 
-        local info = vm:run("cat /proc/1/fdinfo/" .. signalfd)
-        info:assert_ok()
-        local sigmask = info.stdout:match("sigmask:%s*(%x+)")
-        t:assert(sigmask, "the signalfd reports its mask: " .. info.stdout)
+        local info = assert(peinit.proc(vm, 1, "fdinfo/" .. signalfd))
+        local sigmask = info:match("sigmask:%s*(%x+)")
+        t:assert(sigmask, "the signalfd reports its mask: " .. info)
         t:assert_eq(sigmask, blocked,
             "and it is the same mask that was installed with rt_sigprocmask")
 
-        local flags = tonumber(info.stdout:match("flags:%s*(%d+)"), 8)
-        t:assert(flags, "the signalfd reports its flags: " .. info.stdout)
+        local flags = tonumber(info:match("flags:%s*(%d+)"), 8)
+        t:assert(flags, "the signalfd reports its flags: " .. info)
         t:assert(flags & 0x800 ~= 0, "created SFD_NONBLOCK (O_NONBLOCK)")
         t:assert(flags & 0x80000 ~= 0, "and SFD_CLOEXEC (O_CLOEXEC)")
     end)
@@ -158,16 +161,14 @@ test("SIGHUP, SIGPIPE and everything else are ignored, and no signal can kill PI
         -- cannot be blocked, so it is the one that tests the kernel's
         -- protection of PID 1 rather than peinit's mask — and if that
         -- protection were not there, nothing after this line would run.
-        local before = vm:run("cat /proc/1/comm")
-        before:assert_ok()
+        local before = assert(peinit.proc(vm, 1, "comm"))
 
         for _, signal in ipairs({ "HUP", "PIPE", "USR1", "USR2", "QUIT", "ABRT", "KILL" }) do
-            vm:run("kill -" .. signal .. " 1"):assert_ok()
+            peinit.signal(vm, 1, signal)
         end
 
-        local after = vm:run("cat /proc/1/comm")
-        after:assert_ok()
-        t:assert_eq(after.stdout, before.stdout,
+        local after = assert(peinit.proc(vm, 1, "comm"))
+        t:assert_eq(after, before,
             "PID 1 is the same process it was before seven signals were sent at it")
         vm:run("svctl list"):assert_ok()
 

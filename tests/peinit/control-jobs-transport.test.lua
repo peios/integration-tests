@@ -321,12 +321,14 @@ test("a message may carry sixty-four descriptors, and a sixty-fifth is invalid, 
         t:assert(not r.closed, "it was never closed: " .. r.raw)
     end)
 
---- How many descriptors PID 1 holds right now.
+--- How many descriptors PID 1 holds right now. Listed by the agent: PID 1
+--- is TCB-signed, and PIP refuses the shell's `ls` its /proc.
 local function pid1_fds()
-    local r = vm:run("ls /proc/1/fd")
-    r:assert_ok()
     local n = 0
-    for _ in r.stdout:gmatch("%S+") do n = n + 1 end
+    for _, e in ipairs(vm:listdir("/proc/1/fd")) do
+        local name = type(e) == "table" and e.name or e
+        if tostring(name):match("^%d+$") then n = n + 1 end
+    end
     return n
 end
 

@@ -423,4 +423,258 @@ function M.verdict(result)
     return "allowed"
 end
 
+-- ---------------------------------------------------------------------------
+-- A TCB-signed process, from the agent.
+--
+-- PID 1 (peinit), authd and eventd are PIP-signed at the TCB tier, and PIP
+-- (PKM §3.7) refuses a process that does not dominate them every signal,
+-- ptrace attach and /proc/<pid> read. The agent is signed at that tier
+-- (tests/tools/sign.sh), but only its OWN operations carry it —
+-- `vm:syscall`, `vm:read_file`, `vm:listdir` and a worker's syscalls. A
+-- command run through `vm:run`/`vm:run_async`/`w:run` is a fresh, unsigned
+-- exec and is refused: `kill 1`, `cat /proc/1/…`, `ls -l /proc/1/fd` and
+-- `token … --pid 1` in the shell do not work against these processes.
+-- Everything below goes through the agent instead.
+--
+-- `who` is a VM or a worker of one.
+-- ---------------------------------------------------------------------------
+
+local NR_KILL = 62
+
+--- x86_64 signal numbers, by name.
+M.SIG = {
+    HUP = 1, INT = 2, QUIT = 3, ABRT = 6, KILL = 9, USR1 = 10, SEGV = 11,
+    USR2 = 12, PIPE = 13, ALRM = 14, TERM = 15, CHLD = 17, CONT = 18,
+    STOP = 19, TSTP = 20, WINCH = 28, PWR = 30,
+}
+
+local function signum(sig)
+    if math.type(sig) == "integer" then return sig end
+    local name = tostring(sig):upper():gsub("^SIG", "")
+    return assert(M.SIG[name], "peinit: unknown signal " .. tostring(sig))
+end
+
+--- kill(2) from the agent: send `sig` (a number, or a name such as "TERM",
+--- "KILL", "STOP", "CONT", with or without "SIG") to `pid`. Asserts
+--- success unless `opts.check == false`. Returns the raw result (`ret`,
+--- `errno`), which `ok()` turns into a boolean.
+function M.signal(who, pid, sig, opts)
+    local sys = require("helpers.sys")
+    local r = who:syscall(NR_KILL, { args = { tonumber(pid), signum(sig) } })
+    if not (opts and opts.check == false) then
+        assert(r.ret == 0, "kill(" .. tostring(pid) .. ", " .. tostring(sig) .. "): "
+            .. sys.errname(r.errno or 0))
+    end
+    return r
+end
+
+--- /proc/<pid>/<name> read by the agent (`"status"`, `"stat"`, `"comm"`,
+--- `"fdinfo/7"`, `"task/1/children"` …), or nil and the error when it
+--- cannot be read.
+function M.proc(who, pid, name)
+    local ok, text = pcall(who.read_file, who, "/proc/" .. tostring(pid) .. "/" .. name)
+    if not ok then return nil, text end
+    return text
+end
+
+--- readlink(2) of /proc/<pid>/<name> by the agent (`"exe"`, `"cwd"`,
+--- `"fd/3"` …), or nil and the errno.
+function M.proc_link(who, pid, name)
+    return require("helpers.sys").readlink(who, "/proc/" .. tostring(pid) .. "/" .. name)
+end
+
+--- The pid (a string) of the first process whose comm is `name`, walking
+--- /proc in the order the shell's `/proc/[0-9]*` glob does, or nil. The
+--- agent reads every comm, so authd, eventd and PID 1 are found as well
+--- as anything unsigned.
+function M.pid_of_comm(who, name)
+    local pids = {}
+    for _, e in ipairs(who:listdir("/proc")) do
+        local n = tostring(type(e) == "table" and e.name or e)
+        if n:match("^%d+$") then pids[#pids + 1] = n end
+    end
+    table.sort(pids)
+    for _, pid in ipairs(pids) do
+        local comm = M.proc(who, pid, "comm")
+        if comm and comm:gsub("%s+$", "") == name then return pid end
+    end
+    return nil
+end
+
+--- The descriptors process `pid` holds, read by the agent from
+--- /proc/<pid>/fd: a map from fd number to its target, exactly as
+--- `ls -l` shows it after the arrow ("/dev/console", "socket:[123]",
+--- "anon_inode:[eventpoll]", "/x (deleted)"). A descriptor closed between
+--- the listing and its read is left out.
+function M.fds(who, pid)
+    local base = "/proc/" .. tostring(pid) .. "/fd"
+    local ok, names = pcall(who.listdir, who, base)
+    assert(ok, "peinit.fds: cannot list " .. base .. ": " .. tostring(names))
+    local out = {}
+    for _, e in ipairs(names) do
+        local n = type(e) == "table" and e.name or e
+        if tostring(n):match("^%d+$") then
+            local target = M.proc_link(who, pid, "fd/" .. n)
+            if target then out[tonumber(n)] = target end
+        end
+    end
+    return out
+end
+
+-- The privilege names `token` prints: the ABI header's (pkm/uapi/pkm/
+-- token.h), `Privilege` suffix dropped, by bit. A present bit with no name
+-- prints as `<privilege bit N>`, as the tool's does.
+local PRIVILEGE_NAMES = {
+    [2] = "SeCreateToken", [3] = "SeAssignPrimaryToken", [4] = "SeLockMemory",
+    [5] = "SeIncreaseQuota", [7] = "SeTcb", [8] = "SeSecurity",
+    [9] = "SeTakeOwnership", [10] = "SeLoadDriver", [11] = "SeSystemProfile",
+    [12] = "SeSystemtime", [13] = "SeProfileSingleProcess",
+    [14] = "SeIncreaseBasePriority", [17] = "SeBackup", [18] = "SeRestore",
+    [19] = "SeShutdown", [20] = "SeDebug", [21] = "SeAudit",
+    [23] = "SeChangeNotify", [24] = "SeRemoteShutdown", [28] = "SeManageVolume",
+    [29] = "SeImpersonate", [32] = "SeRelabel", [35] = "SeCreateSymbolicLink",
+}
+
+-- The labels `token` gives a group's attributes, in its order.
+local function group_labels(a)
+    local out = {}
+    if a & 0x01 ~= 0 then out[#out + 1] = "mandatory" end
+    if a & 0x02 ~= 0 then out[#out + 1] = "default" end
+    out[#out + 1] = (a & 0x04 ~= 0) and "enabled" or "disabled"
+    if a & 0x08 ~= 0 then out[#out + 1] = "owner" end
+    if a & 0x10 ~= 0 then out[#out + 1] = "deny-only" end
+    if a & 0x20 ~= 0 then out[#out + 1] = "integrity" end
+    if a & 0x40 ~= 0 then out[#out + 1] = "integrity-enabled" end
+    if a & 0x20000000 ~= 0 then out[#out + 1] = "resource" end
+    if a & 0xC0000000 == 0xC0000000 then out[#out + 1] = "logon-id" end
+    return table.concat(out, ", ")
+end
+
+--- Process `pid`'s token, read by the agent: what `token show --pid PID
+--- --raw --all` reports, as data.
+---
+---   principal   key -> value, the keys and values `token show` prints:
+---               user, owner, primary_group, integrity (SIDs as
+---               "S-1-5-18"), type ("Primary" | "Impersonation"),
+---               impersonation_level, elevation_type, session_id (decimal)
+---   groups      a list of { sid, attrs } in token order, `attrs` the
+---               tool's label string ("mandatory, default, enabled")
+---   privileges  a list of { name, attrs } in bit order, `attrs`
+---               "enabled|disabled[, default][, used]"
+---
+--- `token` itself cannot do this for PID 1, authd or eventd: opening
+--- another process's token is a process access, and PIP refuses it to a
+--- caller that does not dominate the target.
+function M.token(who, pid)
+    local token = require("helpers.token")
+    local sys = require("helpers.sys")
+    local pidfd = assert(token.pidfd_open(who, tonumber(pid)),
+        "peinit.token: pidfd_open(" .. tostring(pid) .. ")")
+    local fd, err = token.open_process(who, pidfd, token.RIGHT.QUERY)
+    who:syscall(sys.NR.close, pidfd)
+    assert(fd, "peinit.token: kacs_open_process_token(" .. tostring(pid) .. "): "
+        .. sys.errname(err or 0))
+
+    local ok, out = pcall(function()
+        local principal = {}
+        local function sid_of(class)
+            local p = token.query(who, fd, class)
+            if p and #p >= 8 then return token.sid_string(p) end
+        end
+        principal.user = assert(sid_of(token.CLASS.USER), "peinit.token: no user SID")
+        principal.owner = sid_of(token.CLASS.OWNER)
+        principal.primary_group = sid_of(token.CLASS.PRIMARY_GROUP)
+        principal.integrity = sid_of(token.CLASS.INTEGRITY_LEVEL)
+        local ttype = token.query_u32(who, fd, token.CLASS.TYPE)
+        if ttype then
+            principal.type = ({ [1] = "Primary", [2] = "Impersonation" })[ttype] or tostring(ttype)
+        end
+        local level = token.query_u32(who, fd, token.CLASS.IMPERSONATION_LEVEL)
+        if level then principal.impersonation_level = tostring(level) end
+        local elevation = token.query_u32(who, fd, token.CLASS.ELEVATION_TYPE)
+        if elevation then principal.elevation_type = tostring(elevation) end
+        local stats = token.statistics(who, fd)
+        if stats then principal.session_id = string.format("%d", stats.auth_id) end
+
+        local groups = {}
+        for _, g in ipairs(assert(token.groups(who, fd), "peinit.token: no groups")) do
+            groups[#groups + 1] = { sid = token.sid_string(g.sid), attrs = group_labels(g.attributes) }
+        end
+
+        local p = assert(token.privileges(who, fd), "peinit.token: no privileges")
+        local privileges = {}
+        for bit = 0, 63 do
+            local mask = 1 << bit
+            if p.present & mask ~= 0 then
+                local tags = { (p.enabled & mask ~= 0) and "enabled" or "disabled" }
+                if p.default & mask ~= 0 then tags[#tags + 1] = "default" end
+                if p.used & mask ~= 0 then tags[#tags + 1] = "used" end
+                privileges[#privileges + 1] = {
+                    name = PRIVILEGE_NAMES[bit] or ("<privilege bit " .. bit .. ">"),
+                    attrs = table.concat(tags, ", "),
+                }
+            end
+        end
+        return { principal = principal, groups = groups, privileges = privileges }
+    end)
+    who:syscall(sys.NR.close, fd)
+    if not ok then error(out, 0) end
+    return out
+end
+
+local PRINCIPAL_ORDER = { "user", "owner", "primary_group", "integrity", "type",
+    "impersonation_level", "elevation_type", "session_id" }
+
+--- Process `pid`'s token as `token` prints it with `--raw`, read by the
+--- agent (see `token`): `kind` is "show" (`token show --all`: the
+--- principal block, then groups, then privileges), "user", "groups" or
+--- "privs". Same sections, same two-space key column, same values — so a
+--- parser written against the tool's output reads this unchanged.
+function M.token_text(who, pid, kind)
+    local tok = M.token(who, pid)
+    local rows = {}
+    local function section(s) rows[#rows + 1] = { section = s } end
+    local function kv(k, v) rows[#rows + 1] = { k = k, v = v } end
+    if kind == "show" then
+        section("principal")
+        for _, key in ipairs(PRINCIPAL_ORDER) do
+            if tok.principal[key] then kv(key, tok.principal[key]) end
+        end
+    elseif kind == "user" then
+        kv("user", tok.principal.user)
+    end
+    if kind == "show" or kind == "groups" then
+        section("groups (" .. #tok.groups .. ")")
+        for _, g in ipairs(tok.groups) do kv(g.sid, g.attrs) end
+    end
+    if kind == "show" or kind == "privs" then
+        section("privileges (" .. #tok.privileges .. ")")
+        for _, e in ipairs(tok.privileges) do kv(e.name, e.attrs) end
+    end
+    assert(#rows > 0, "peinit.token_text: unknown kind " .. tostring(kind))
+    local width = 0
+    for _, r in ipairs(rows) do if r.k and #r.k > width then width = #r.k end end
+    local out = {}
+    for _, r in ipairs(rows) do
+        if r.section then
+            out[#out + 1] = "\n[" .. r.section .. "]\n"
+        else
+            out[#out + 1] = "  " .. r.k .. string.rep(" ", width - #r.k) .. "  " .. r.v .. "\n"
+        end
+    end
+    return table.concat(out)
+end
+
+--- `fds` as text, one `<fd> -> <target>` line each in fd order: the arrow
+--- part of `ls -l /proc/<pid>/fd`, so a pattern written against that
+--- output (`(%d+) %-> ([^\r\n]+)`, `%-> socket:`) matches unchanged.
+function M.fd_listing(who, pid)
+    local fds, order = M.fds(who, pid), {}
+    for fd in pairs(fds) do order[#order + 1] = fd end
+    table.sort(order)
+    local lines = {}
+    for _, fd in ipairs(order) do lines[#lines + 1] = fd .. " -> " .. fds[fd] end
+    return table.concat(lines, "\n") .. (#lines > 0 and "\n" or "")
+end
+
 return M

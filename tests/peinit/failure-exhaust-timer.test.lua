@@ -61,16 +61,19 @@ local function trim(text) return (text:gsub("%s+$", "")) end
 
 --- PID 1's children that are bare forks of it: never exec'd (their image
 --- is PID 1's own), and still in PID 1's own cgroup. Returns the pids.
+---
+--- Read by the agent. PID 1 is TCB-signed, and so is a bare fork of it —
+--- the label is the binary's and only an exec changes it — so PIP refuses
+--- the shell's `cat` and `readlink` the /proc of both (helpers/peinit.lua).
 local function bare_forks(vm, pid1_exe, pid1_cgroup)
     local found = {}
-    local children = vm:run("cat /proc/1/task/1/children").stdout
+    local children = assert(peinit.proc(vm, 1, "task/1/children"))
     for pid in children:gmatch("%d+") do
-        local exe = vm:run("readlink /proc/" .. pid .. "/exe")
-        local cgroup = vm:run("cat /proc/" .. pid .. "/cgroup")
+        local exe = peinit.proc_link(vm, pid, "exe")
+        local cgroup = peinit.proc(vm, pid, "cgroup")
         -- A child can exit between the listing and the look; that is a
         -- process that is gone, not a bare fork.
-        if exe.exit_code == 0 and cgroup.exit_code == 0
-            and trim(exe.stdout) == pid1_exe and trim(cgroup.stdout) == pid1_cgroup then
+        if exe and cgroup and trim(exe) == pid1_exe and trim(cgroup) == pid1_cgroup then
             found[#found + 1] = pid
         end
     end
@@ -110,7 +113,7 @@ test("a persistent timer's firing forks PID 1 for its last-run write, and that i
     function(t)
         -- Persistent (the default), firing five seconds into every ten.
         local vm = boot_with("timer-persistent", ticker("pt-tw", "timer:*-*-* *:*:5/10", true))
-        local pid1_exe = trim(vm:run("readlink /proc/1/exe").stdout)
+        local pid1_exe = trim(assert(peinit.proc_link(vm, 1, "exe")))
         local pid1_cgroup = trim(vm:read_file("/proc/1/cgroup"))
         local registryd = json.decode(vm:run("svctl --json status registryd").stdout).current_job.pid
         t:assert(registryd, "registryd has a main process")
@@ -142,10 +145,10 @@ test("a persistent timer's firing forks PID 1 for its last-run write, and that i
             -- kernel's LCS response wait — what a last-run write does, and
             -- nothing a launch does.
             for _, writer in ipairs(s.forks) do
-                t:assert_eq(trim(vm:run("cat /proc/" .. writer .. "/comm").stdout),
-                    trim(vm:run("cat /proc/1/comm").stdout),
+                t:assert_eq(trim(peinit.proc(vm, writer, "comm") or ""),
+                    trim(assert(peinit.proc(vm, 1, "comm"))),
                     "writer " .. writer .. " is PID 1's image, forked not exec'd")
-                local wchan = trim(vm:run("cat /proc/" .. writer .. "/wchan").stdout)
+                local wchan = trim(peinit.proc(vm, writer, "wchan") or "")
                 t:assert(wchan:find("lcs", 1, true) or wchan:find("source_response", 1, true),
                     "writer " .. writer .. " is blocked in the registry write, not idle: " .. wchan)
             end
@@ -179,7 +182,7 @@ test("a non-persistent timer's firing forks nothing outside the launch path",
     function(t)
         -- Non-persistent, firing on every ten.
         local vm = boot_with("timer-nonpersistent", ticker("pt-np", "timer:*-*-* *:*:0/10", false))
-        local pid1_exe = trim(vm:run("readlink /proc/1/exe").stdout)
+        local pid1_exe = trim(assert(peinit.proc_link(vm, 1, "exe")))
         local pid1_cgroup = trim(vm:read_file("/proc/1/cgroup"))
         local registryd = json.decode(vm:run("svctl --json status registryd").stdout).current_job.pid
 

@@ -14,10 +14,14 @@ peinit.claim(1)
 
 local vm = peinit.boot()
 
---- The `token privs` table, as name → attribute string.
-local function privileges(text)
+--- The `token privs` table of PID 1, as name → attribute string.
+---
+--- Read by the agent rather than by `token privs --pid 1` in the shell:
+--- PID 1 is TCB-signed, and PIP refuses an unsigned process its token
+--- (helpers/peinit.lua `token_text` prints what the tool would).
+local function privileges()
     local out = {}
-    for _, line in ipairs(peinit.lines(text)) do
+    for _, line in ipairs(peinit.lines(peinit.token_text(vm, 1, "privs"))) do
         local name, attrs = line:match("^%s+(.-)%s%s+([%a%s,]+)$")
         if name and attrs then out[name] = attrs end
     end
@@ -30,7 +34,7 @@ test("the two privileges peinit requires are present, enabled and spent",
         -- The check runs before Phase 1 does anything that needs them,
         -- and a boot that reached Phase 2 is a boot that passed it. What
         -- can be inspected afterwards is the condition it applied.
-        local held = privileges(vm:run("token privs --pid 1").stdout)
+        local held = privileges()
 
         -- Present *and* enabled, which is the whole point of the wording:
         -- a privilege the token carries but has not enabled is not
@@ -65,7 +69,7 @@ test("SeImpersonatePrivilege is held and never spent",
         -- would gate impersonating is never reached. The boot token
         -- carries it regardless — every privilege is on it — so the
         -- claim is about use, not possession.
-        local held = privileges(vm:run("token privs --pid 1").stdout)
+        local held = privileges()
         t:assert(held.SeImpersonate, "the boot token carries SeImpersonate: "
             .. tostring(held.SeImpersonate))
         t:assert(not held.SeImpersonate:find("used", 1, true),
@@ -89,7 +93,7 @@ test("SeImpersonatePrivilege is held and never spent",
         -- svctl calls above went through peinit's AccessCheck path, and
         -- that is the path the privilege would have been needed on.
         vm:run("svctl status registryd"):assert_ok()
-        local after = privileges(vm:run("token privs --pid 1").stdout)
+        local after = privileges()
         t:assert(not after.SeImpersonate:find("used", 1, true),
             "still unspent after a control command was authorised: " .. after.SeImpersonate)
     end)

@@ -268,7 +268,9 @@ local function peinit_socket(sink)
     for inode in vm:run("/usr/bin/pt-logsink peers " .. sink.sock).stdout:gmatch("peer inode=(%d+)") do
         peers[inode] = true
     end
-    for fd, inode in vm:run("ls -l /proc/1/fd").stdout:gmatch("(%d+) %-> socket:%[(%d+)%]") do
+    -- PID 1's table is listed by the agent: PID 1 is TCB-signed, and PIP
+    -- refuses the shell's `ls` its /proc.
+    for fd, inode in peinit.fd_listing(vm, 1):gmatch("(%d+) %-> socket:%[(%d+)%]") do
         if peers[inode] then return fd, inode end
     end
 end

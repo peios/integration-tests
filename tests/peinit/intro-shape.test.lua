@@ -31,9 +31,12 @@ local vm = peinit.boot({
     },
 })
 
---- One field out of a /proc/N/status file, as a string.
+--- One field out of a /proc/N/status file, as a string. Read by the
+--- agent: N is PID 1 or one of the image's daemons, among them authd and
+--- eventd, and those three are TCB-signed — PIP refuses the shell's `cat`
+--- their /proc (helpers/peinit.lua).
 local function proc_status(pid, field)
-    local text = vm:run("cat /proc/" .. pid .. "/status").stdout
+    local text = peinit.proc(vm, pid, "status") or ""
     return text:match("\n" .. field .. ":%s*([^\n\r]+)") or text:match("^" .. field .. ":%s*([^\n\r]+)")
 end
 
@@ -63,10 +66,9 @@ test("peinit is PID 1, and it is one thread",
         },
     },
     function(t)
-        local exe = vm:run("readlink /proc/1/exe")
-        exe:assert_ok()
-        t:assert(exe.stdout:find("peinit", 1, true),
-            "PID 1 is peinit: " .. exe.stdout)
+        local exe = assert(peinit.proc_link(vm, 1, "exe"))
+        t:assert(exe:find("peinit", 1, true),
+            "PID 1 is peinit: " .. exe)
 
         -- Single-threaded is not a stylistic claim: it is the constraint
         -- the whole design answers to, and the kernel counts threads for

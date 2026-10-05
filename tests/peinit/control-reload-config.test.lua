@@ -417,10 +417,12 @@ test("a reload with an undecodable key names the key, the field and what was wro
             "and the console reports the service failed on it")
     end)
 
---- Every target PID 1 holds a descriptor on, from /proc/1/fd.
+--- Every target PID 1 holds a descriptor on, from /proc/1/fd. Listed by
+--- the agent: PID 1 is TCB-signed, and PIP refuses the shell's `ls` its
+--- /proc.
 local function pid1_targets(vm)
     local out = {}
-    for line in vm:run("ls -l /proc/1/fd 2>/dev/null").stdout:gmatch("[^\r\n]+") do
+    for line in peinit.fd_listing(vm, 1):gmatch("[^\r\n]+") do
         local target = line:match("%->%s+(.*)$")
         if target then out[#out + 1] = (target:gsub("%s+$", "")) end
     end

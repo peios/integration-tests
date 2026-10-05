@@ -118,16 +118,16 @@ end
 --- The pid of the first process whose comm is `name`. There is no pgrep
 --- in this image — peiosutils is a coreutils fork — so /proc is walked
 --- directly, which is what pgrep would have read anyway.
+---
+--- The /proc reads in this file are the agent's (helpers/peinit.lua): the
+--- processes they look at are PID 1 and authd, both TCB-signed, and PIP
+--- refuses the shell's `cat`, `ls` and `readlink` their /proc.
 local function pid_of(vm, name)
-    return vm:run(
-        'for p in /proc/[0-9]*; do ' ..
-        '[ "$(cat "$p/comm" 2>/dev/null)" = ' .. name .. ' ] && echo "${p#/proc/}"; ' ..
-        'done'
-    ).stdout:match("%d+")
+    return peinit.pid_of_comm(vm, name)
 end
 
 local function link(vm, path)
-    return vm:run("readlink " .. path).stdout:gsub("%s+$", "")
+    return (require("helpers.sys").readlink(vm, path) or "")
 end
 
 --- Every descriptor PID 1 holds, as target -> fd. peinit keeps the read
@@ -135,7 +135,7 @@ end
 --- peinit's own table: by the inode both ends share.
 local function peinit_fds(vm)
     local by_target = {}
-    for fd, target in vm:run("ls -l /proc/1/fd").stdout:gmatch("(%d+) %-> (%S+)") do
+    for fd, target in peinit.fd_listing(vm, 1):gmatch("(%d+) %-> (%S+)") do
         by_target[target] = fd
     end
     return by_target
@@ -213,14 +213,14 @@ test("the epoll instance is peinit's own and no service has one from it",
         -- Created close-on-exec, so it cannot survive into a child. The
         -- observable form of that: peinit has one and the services it
         -- exec'd have none of peinit's.
-        local mine = vm:run("ls -l /proc/1/fd").stdout
+        local mine = peinit.fd_listing(vm, 1)
         t:assert(mine:find("anon_inode:[eventpoll]", 1, true),
             "peinit watches its pipes with an epoll instance")
 
         for _, service in ipairs({ "authd", "netd", "pnpd" }) do
             local pid = pid_of(vm, service)
             if pid then
-                local theirs = vm:run("ls -l /proc/" .. pid .. "/fd").stdout
+                local theirs = peinit.fd_listing(vm, pid)
                 t:assert(not theirs:find("eventpoll", 1, true),
                     service .. " inherited no epoll descriptor")
             end
@@ -295,7 +295,7 @@ test("an attached sink gets the job's lines untagged and in the order it wrote t
 --- /proc/<pid>/fd by its path, so this is how a test sees whether peinit
 --- still has a sink open.
 local function peinit_holds(vm, path)
-    return vm:run("ls -l /proc/1/fd").stdout:find("-> " .. path, 1, true) ~= nil
+    return peinit.fd_listing(vm, 1):find("-> " .. path, 1, true) ~= nil
 end
 
 local function read_or_empty(vm, path)

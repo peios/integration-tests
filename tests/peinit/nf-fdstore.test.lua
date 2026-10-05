@@ -118,9 +118,10 @@ local function restart(name)
     await_steps(name)
 end
 
---- Every target PID 1 has a descriptor open on.
+--- Every target PID 1 has a descriptor open on. Listed by the agent: PID 1
+--- is TCB-signed, and PIP refuses the shell's `ls` its /proc.
 local function fd_targets()
-    local listing = vm:run("ls -l /proc/1/fd 2>/dev/null").stdout
+    local listing = peinit.fd_listing(vm, 1)
     local out = {}
     for line in listing:gmatch("[^\r\n]+") do
         local target = line:match("%->%s+(.*)$")

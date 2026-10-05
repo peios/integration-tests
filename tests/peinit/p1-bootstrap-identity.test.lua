@@ -68,12 +68,14 @@ local SID = {
     ["pt-bs-default"] = "S-1-5-80-154766025-3589640390-2737900188-718047884-1128318716",
 }
 
+-- What `token show --pid N --raw --all` prints, read by the agent
+-- (helpers/peinit.lua `token_text`): one of the tokens read here is PID
+-- 1's, which is TCB-signed, and PIP refuses the shell's `token --pid 1`
+-- the process.
 local function token_of(pid)
-    local shown = vm:run("token show --pid " .. pid .. " --raw --all")
-    shown:assert_ok()
     local out = { principal = {}, groups = {}, privileges = {} }
     local section
-    for _, line in ipairs(peinit.lines(shown.stdout)) do
+    for _, line in ipairs(peinit.lines(peinit.token_text(vm, pid, "show"))) do
         local head = line:match("^%[(%a+)")
         if head then
             section = head

@@ -63,12 +63,13 @@ local vm = peinit.boot({
     }),
 })
 
--- The privilege rows of `token privs`, as name -> attribute string.
+-- The privilege rows of `token privs`, as name -> attribute string. Read
+-- by the agent (helpers/peinit.lua `token_text`, which prints what the
+-- tool would): one of the tokens read here is PID 1's, which is
+-- TCB-signed, and PIP refuses the shell's `token --pid 1` the process.
 local function privileges_of(pid)
-    local shown = vm:run("token privs --pid " .. pid)
-    shown:assert_ok()
     local found = {}
-    for _, line in ipairs(peinit.lines(shown.stdout)) do
+    for _, line in ipairs(peinit.lines(peinit.token_text(vm, pid, "privs"))) do
         local name, attrs = line:match("^%s+(.-)%s%s+(.*)$")
         if name then found[name] = attrs end
     end
