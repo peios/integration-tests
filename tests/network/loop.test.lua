@@ -162,7 +162,7 @@ test("a kernel event leads to a fresh dump and a full pass",
     end)
 
 test("a full pass repeats while the kernel's state keeps changing, before it publishes",
-    { spec = "netd *loop.converge-repeats-until-stable-at-most-four" }, function(t)
+    { spec = "netd *loop.converge-repeats-until-stable" }, function(t)
         -- Taking eth0 down makes one pass bring it up, after which the
         -- kernel shows carrier: that is a different dump, so the steps run
         -- again and the second round starts the DHCP client. Publishing
@@ -170,8 +170,9 @@ test("a full pass repeats while the kernel's state keeps changing, before it pub
         -- the client is started BEFORE the new level is published. With
         -- one pass per event, `machine readiness is link` would come first
         -- and the client would wait for the next event.
-        -- The bound of four is not observable from outside: no state this
-        -- guest can make keeps the kernel changing on every pass.
+        -- The bound (the steps run at most four times in one pass) is
+        -- unanchored prose in §2.2: no state this guest can make keeps the
+        -- kernel changing on every pass, so nothing outside can observe it.
         local s = rebind(t, "bound")
         t:assert_eq(s.level, "routed", "the machine starts routed")
         local index = network.iface(s, "eth0").index

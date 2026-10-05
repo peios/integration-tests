@@ -272,13 +272,16 @@ test("IPv4 addresses: every static entry at its prefix; the link-local fallback 
         { timeout = 20, interval = 0.25, desc = "both static addresses" })
     t:assert_eq(addrs(d1)["10.55.0.2"].prefix, 24, "10.55.0.2 at /24")
     t:assert_eq(addrs(d1)["10.57.0.2"].prefix, 16, "10.57.0.2 at /16")
-    -- Observation for the report, not a claim of the TRM: two statics in
-    -- one subnet, written high then low; which does the kernel make primary?
+    -- The written order has no effect: two statics in one subnet, written
+    -- high then low, are added in address order, so the kernel makes the
+    -- low one primary (IFA_F_SECONDARY = 0x1 on the other).
     set("Profiles\\ptd-a", "Address.Static", "multi:10.58.0.9/24,10.58.0.3/24,10.55.0.2/24")
     wait_until(function() local a = addrs(d1); return a["10.58.0.9"] and a["10.58.0.3"] end,
         { timeout = 20, interval = 0.25, desc = "both 10.58 statics" })
-    t:log(string.format("10.58.0.9 flags 0x%x, 10.58.0.3 flags 0x%x (0x1 = secondary)",
-        addrs(d1)["10.58.0.9"].flags, addrs(d1)["10.58.0.3"].flags))
+    local hi, lo = addrs(d1)["10.58.0.9"].flags, addrs(d1)["10.58.0.3"].flags
+    t:log(string.format("10.58.0.9 flags 0x%x, 10.58.0.3 flags 0x%x (0x1 = secondary)", hi, lo))
+    t:assert_eq(lo & 1, 0, "10.58.0.3, the lower address though written second, is the subnet's primary")
+    t:assert_eq(hi & 1, 1, "10.58.0.9, written first, is secondary")
     set("Profiles\\ptd-a", "Address.Static", "multi:10.55.0.2/24")
     wait_until(function() local a = addrs(d1); return a["10.57.0.2"] == nil and a["10.58.0.9"] == nil
         and a["10.58.0.3"] == nil end,

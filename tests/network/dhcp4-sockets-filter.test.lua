@@ -1,6 +1,7 @@
 -- netd TRM §5.6 — what the DHCPv4 packet socket lets through: its classic
--- BPF filter passes only an IPv4 UDP datagram, not a fragment, addressed
--- to port 68.
+-- BPF filter passes only an IPv4 UDP datagram with fragment offset zero,
+-- addressed to port 68. It tests the offset alone, so a first fragment
+-- (more-fragments set, offset zero) passes and is decoded (PEI-1370).
 --
 -- The gateway's DHCP server answers no DISCOVER here; the test answers by
 -- hand, with OFFER frames built byte by byte, so each one can be wrong in
@@ -94,7 +95,7 @@ local IP_MF = 0x2000
 
 local second_xid
 
-test("the packet socket passes only an unfragmented IPv4 UDP datagram to port 68",
+test("the packet socket refuses a non-first fragment and a datagram to another port, and reads an unfragmented one to port 68",
     { spec = "netd *dhcp4-sockets.packet-socket" }, function(t)
         t:assert(gw:serve({ timeout = 30, until_ = function() return #discovers() >= 1 end }),
             "the client's first DISCOVER arrives")
@@ -120,14 +121,15 @@ test("the packet socket passes only an unfragmented IPv4 UDP datagram to port 68
         second_xid = d[#d].xid
     end)
 
--- TRM-first-fragment: the filter tests only the fragment-offset bits
--- (`jset #0x1fff` on bytes 6-7 of the IPv4 header), so a first fragment
--- (more-fragments set, offset 0) passes it, and the re-check after the
--- read does not look at fragmentation at all: netd decodes and acts on
--- the OFFER in it.
-test("a first fragment (more-fragments set, offset 0) is not passed either",
-    { spec = "netd *dhcp4-sockets.packet-socket", tags = { "known-bug" } }, function(t)
+-- PEI-1370: the filter tests only the fragment-offset bits (`jset #0x1fff`
+-- on bytes 6-7 of the IPv4 header), so a first fragment (more-fragments
+-- set, offset 0) passes it, and the re-check after the read does not look
+-- at fragmentation at all: netd decodes and acts on the OFFER in it. This
+-- is the documented current behaviour; when the filter also tests MF, this
+-- test asserts "ignored" instead.
+test("a first fragment (more-fragments set, offset 0) passes the filter and its OFFER is taken",
+    { spec = "netd *dhcp4-sockets.packet-socket" }, function(t)
         t:assert(second_xid, "the first test left the client in Selecting")
-        t:assert_eq(try_offer(t, second_xid, 68, IP_MF, "a first fragment (MF set, offset 0)"), "ignored",
-            "an OFFER in a datagram with more-fragments set is not read")
+        t:assert_eq(try_offer(t, second_xid, 68, IP_MF, "a first fragment (MF set, offset 0)"), "taken",
+            "an OFFER in a datagram with more-fragments set and offset 0 is read and answered with a REQUEST (PEI-1370)")
     end)

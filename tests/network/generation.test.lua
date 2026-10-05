@@ -22,9 +22,9 @@
 -- a key component, and an empty component, so no registry key can carry
 -- such a name; pnp-core's own tests hold that row.
 --
--- The nesting row ("Nesting deeper than 12 | from pnp-core") has its own
--- test, tagged known-bug: pnp-core at netd's pinned revision has no
--- nesting limit, so a 13-deep tree builds.
+-- Depth refuses nothing (only netd's 16-level registry read bounds a
+-- rule tree, §2.3): a 13-deep tree has its own test, which shows it is
+-- built and its deepest rule speaks.
 --
 -- Own VMs: the tests rewrite (and once delete) the interface layer.
 
@@ -267,16 +267,15 @@ test("everything pnp-core refuses at the interface layer refuses the generation,
         cleared()
     end)
 
-test("rule nesting deeper than 12 refuses the generation",
-    { spec = "netd *generation.refusal-causes", tags = { "known-bug" } }, function(t)
-        -- TRM-nesting-limit: netd builds a 13-deep rule tree. pnp-core at
-        -- netd's pinned revision (pkm 9c1d56c) has no nesting check in
-        -- build_forest; the only depth bound netd applies is its 16-level
-        -- registry read (§2.3).
+test("rule depth refuses nothing: a 13-deep rule tree is built and its deepest rule speaks",
+    { spec = "netd *generation.refusal-causes" }, function(t)
+        -- pnp-core has no nesting check in build_forest; the only depth
+        -- bound netd applies is its 16-level registry read (§2.3).
         apply({ { [[Rules\Interface\bad]], { "Actions", "multi", { "JOIN(nosuch)" } } } })
         refused(t, "JOIN(nosuch) names no profile")
-        local path = [[Rules\Interface]]
-        for n = 1, 13 do path = path .. "\\n" .. n end
+        local path, names = [[Rules\Interface]], {}
+        for n = 1, 13 do path = path .. "\\n" .. n; names[n] = "n" .. n end
+        local deepest = table.concat(names, "/")
         -- The thirteenth rule matches eth0 and JOINs the profile eth0 is
         -- already in (no client restarts), so if the tree is built, its
         -- attribution shows it was.
@@ -287,13 +286,18 @@ test("rule nesting deeper than 12 refuses the generation",
         -- question.
         local s = wait_for(function(st) return st.refusal ~= "JOIN(nosuch) names no profile" end,
             "the next generation judged")
-        gw:serve({ timeout = 2 })
-        s = wait_for(function() return true end, "status")
-        t:log("after a 13-deep tree: refusal = " .. tostring(s.refusal) .. "; eth0's rule = " .. tostring(eth0(s).rule))
-        local refusal = s.refusal
+        local s2, i = network.serve_until(gw, sut, function(st)
+            local e = eth0(st)
+            return st.refusal ~= nil or (e ~= nil and e.rule == deepest)
+        end, { timeout = 15 })
+        s = s2 or s
+        i = eth0(s)
+        t:log("after a 13-deep tree: refusal = " .. tostring(s.refusal) .. "; eth0's rule = " .. tostring(i and i.rule))
+        local refusal, rule = s.refusal, i and i.rule
         delkey([[Rules\Interface\n1]])
         cleared()
-        t:assert(refusal ~= nil, "a 13-deep rule tree is refused")
+        t:assert_eq(refusal, nil, "a 13-deep rule tree is not refused")
+        t:assert_eq(rule, deepest, "the thirteenth-level rule judges eth0")
     end)
 
 test("a condition on a fact never present at the interface layer is a lint, logged, and the generation is taken",

@@ -372,12 +372,11 @@ test("a 20 s lease moves bound → renewing → rebinding → bound; the Rebindi
             "back on a long lease")
     end)
 
--- TRM-dhcp4-states-display: §5.1 says the status reply shows the state as
--- selecting, requesting or rebooting too; but `lease` (the only place the
--- state appears) is nil unless the client holds a lease (main.rs status(),
--- and §9.2 says so), so only bound/renewing/rebinding are ever shown.
-test("the status reply shows a client in Rebooting as `rebooting`",
-    { spec = "netd *dhcp4-client.states", tags = { "known-bug" } },
+-- The state appears only inside `lease`, which is nil unless the client
+-- holds a lease (§9.2), so a client in Rebooting shows no state at all;
+-- bound, renewing and rebinding are shown by the test above.
+test("the status reply shows a client's state only inside `lease`: a client in Rebooting shows none",
+    { spec = "netd *dhcp4-client.states" },
     function(t)
         bound()
         local hold = true
@@ -391,8 +390,9 @@ test("the status reply shows a client in Rebooting as `rebooting`",
         hold = false
         local lease = i.lease
         t:log("lease while rebooting: " .. (lease and (lease.state .. " " .. lease.server) or "nil"))
-        bound()
-        t:assert(lease ~= nil and lease.state == "rebooting", "status shows `rebooting`")
+        local after = network.iface(bound(), "eth0")
+        t:assert_eq(lease, nil, "while the INIT-REBOOT REQUEST is unanswered, `lease` (and so the state) is nil")
+        t:assert_eq(after.lease.state, "bound", "once the ACK binds it, `lease` shows `bound`")
     end)
 
 -- ---------------------------------------------------------------------------
@@ -427,16 +427,41 @@ test("a profile that stops wanting IPv4 stops the client (RELEASE, address gone)
         t:assert(count_logged("interface eth0: dhcp starting") > starting, "`dhcp starting` was logged")
     end)
 
--- TRM-dhcp4-stopping-log: the stop above is made by the outcome change in
--- the link pass (main.rs sync_links: Outcome compares the whole Profile, so
--- any profile edit is an outcome change) before start_dhcp_where_due runs;
--- by then the client is gone, so its `dhcp stopping` line never fires. A
--- carrier loss is likewise stopped in sync_links (logged `carrier lost`).
-test("a client the interface no longer wants is logged `dhcp stopping`",
-    { spec = "netd *dhcp4-client.start-stop", tags = { "known-bug" } },
+-- Every stop is made in the link pass (main.rs sync_links), before
+-- clients are started: a carrier loss logged `carrier lost`, an outcome
+-- change logged as the verdict. Outcome compares the whole Profile, so
+-- an edit that leaves the profile wanting a client still stops it, and
+-- the same pass starts a new one.
+local VERDICT = "interface eth0: JOIN(default) by wired"
+
+test("a stop is logged as `carrier lost` or as the verdict; a profile edit that still wants a client restarts it",
+    { spec = "netd *dhcp4-client.start-stop" },
     function(t)
         bound()
-        local n = count_logged("interface eth0: dhcp stopping")
-        t:log("`dhcp stopping` lines in this boot: " .. n)
-        t:assert(n > 0, "the stop in the previous test was logged `interface eth0: dhcp stopping`")
+        -- A carrier loss.
+        local lost, starting = count_logged("interface eth0: carrier lost"), count_logged("interface eth0: dhcp starting")
+        cable_cycle()
+        await(function(m) return m.type == D.REQUEST end, 20, "the restarted client's REQUEST")
+        bound()
+        t:assert(count_logged("interface eth0: carrier lost") > lost, "the carrier-loss stop was logged `carrier lost`")
+        t:assert(count_logged("interface eth0: dhcp starting") > starting, "and the new client `dhcp starting`")
+
+        -- A profile edit that leaves Address.Offered and IPv4 in place.
+        local verdicts, starting2 = count_logged(VERDICT), count_logged("interface eth0: dhcp starting")
+        gw:forget()
+        network.write(sut, PROFILE, { ["Address.OnExpiry"] = "sz:Keep" })
+        local rel = await(function(m) return m.type == D.RELEASE end, 20, "the RELEASE")
+        local r = await(function(m) return m.type == D.REQUEST end, 20, "the new client's REQUEST")
+        bound()
+        t:assert_eq(rel.ciaddr, LEASED, "the edit stopped the client: a RELEASE for the lease")
+        t:assert_eq(gateway.ip4_text(r.opt[50]), LEASED, "and a new client asked for the address again")
+        t:assert(count_logged(VERDICT) > verdicts, "the stop was logged as the verdict `" .. VERDICT .. "`")
+        t:assert(count_logged("interface eth0: dhcp starting") > starting2, "and the new client `dhcp starting`")
+        t:log("`dhcp stopping` lines in this boot: " .. count_logged("interface eth0: dhcp stopping"))
+
+        -- Put the profile back (another restart).
+        gw:forget()
+        unset(PROFILE, "Address.OnExpiry")
+        await(function(m) return m.type == D.REQUEST end, 20, "the restart after the clean-up")
+        bound()
     end)

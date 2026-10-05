@@ -206,8 +206,8 @@ test("a DUID file shorter than 4 bytes is ignored: a new DUID-LL is made and wri
         t:assert_eq(duid_value(), colon_hex(duid), "and so does the registry")
     end)
 
-test("a registry Duid that is not hex is passed over for the file",
-    { spec = "netd *dhcp4-memory.duid" }, function(t)
+test("a registry Duid that is not hex is passed over for the file, logged, and replaced by the file's DUID",
+    { spec = "netd *dhcp4-memory.duid netd *dhcp4-memory.duid-written-back" }, function(t)
         t:assert(ifid, "the first test found the interface")
         local duid = "\0\4\x77\x88\x99\xaa"
         sut:write_file(DUID_FILE, duid)
@@ -216,9 +216,8 @@ test("a registry Duid that is not hex is passed over for the file",
         local id = fresh_client(t, restart_netd, "Duid not hex")
         t:assert_eq(hex(id), hex("\xff" .. iaid(ifid) .. duid), "the client id is built on the file's DUID")
         t:assert(network.logged(sut, 'Duid "00:02:0g" is not hex; ignoring it'), "netd logged the bad Duid")
-        -- The TRM says the result is written back "when the registry had
-        -- no Duid"; what happens to an unparseable one is recorded here.
         t:log("registry Duid afterwards: " .. tostring(duid_value()))
+        t:assert_eq(duid_value(), "00:04:77:88:99:aa", "the value that was not hex is replaced by the file's DUID")
     end)
 
 test("a DUID that cannot be written to the file is logged and used all the same",

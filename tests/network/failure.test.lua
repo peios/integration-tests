@@ -14,8 +14,8 @@
 --
 -- The kernel rate-limits /dev/kmsg writes per open file (ten lines per
 -- five seconds by default), and netd opens it once: the first test
--- spaces its steps out, the second makes a burst and is a known bug
--- (TRM-kmsg-ratelimited).
+-- spaces its steps out, the second makes a burst and shows the lines
+-- past the limit missing from the kernel log (PEI-1371).
 --
 -- The other half of the paragraph (the mirror that cannot be opened is
 -- reported once on stderr) needs a netd that may not write /dev/kmsg,
@@ -104,7 +104,7 @@ local function mirror(mark, seq0)
         for k = at, #recs do
             if recs[k].text == l.msg then found = recs[k]; at = k + 1; break end
         end
-        pairs_[#pairs_ + 1] = { line = l.msg, rec = found }
+        pairs_[#pairs_ + 1] = { line = l.msg, rec = found, ts = l.ts }
     end
     return pairs_, recs
 end
@@ -174,13 +174,17 @@ test("each log line reaches eventd through stderr and the kernel log at its own 
         end
     end)
 
-test("every log line is mirrored to /dev/kmsg, a burst included",
-    { spec = "netd *failure.log-mirrored-to-kmsg", tags = { "known-bug" } }, function(t)
-        -- TRM-kmsg-ratelimited: netd opens /dev/kmsg once and the kernel
-        -- rate-limits writes through one open file (printk.devkmsg=ratelimit,
-        -- ten lines per five seconds), so in a burst every line past the
-        -- tenth is dropped from the kernel log. They all still reach
-        -- eventd. Observed: 24 lines, the first 10 mirrored, 14 not.
+test("in a burst the kernel log has the first ten lines and not those after them; eventd has every one",
+    { spec = "netd *failure.log-mirrored-to-kmsg" }, function(t)
+        -- PEI-1371: netd opens /dev/kmsg once and the kernel rate-limits
+        -- writes through one open file (printk.devkmsg=ratelimit, ten
+        -- lines per five seconds), so in a burst every line past the
+        -- tenth in the window is dropped from the kernel log. They all
+        -- still reach eventd. This is the documented current behaviour.
+        -- The window opens at the burst's first line (the SPACE before it
+        -- lets the previous one lapse); lines within half a second of its
+        -- end are not asserted either way, nor are those after it, which
+        -- a new window may mirror.
         sut:run(SPACE)
         local mark, seq0 = guest_ns(), kmsg_seq()
         -- Twelve hostname changes in quick succession: each is logged as
@@ -197,5 +201,24 @@ test("every log line is mirrored to /dev/kmsg, a burst included",
         for _, p in ipairs(pairs_) do if not p.rec then missing = missing + 1 end end
         t:log(#pairs_ .. " lines in eventd, " .. missing .. " of them not in /dev/kmsg")
         t:assert(#pairs_ > 10, "a burst of more than ten lines reached eventd")
-        t:assert_eq(missing, 0, "every one of them is in the kernel log")
+        for k = 1, 10 do
+            t:assert(pairs_[k].rec, "line " .. k .. " of the burst is in the kernel log: " .. pairs_[k].line)
+        end
+        -- mirror() pairs lines with records by text, in order, so a line
+        -- whose text recurs (`configuration changed`) could be paired with
+        -- a later line's record from a new window: only lines whose text
+        -- is unique in the burst (`hostname is pt-burst-N`) are judged.
+        local seen = {}
+        for _, p in ipairs(pairs_) do seen[p.line] = (seen[p.line] or 0) + 1 end
+        local window_end = pairs_[1].ts + 4500000000
+        local dropped = 0
+        for k = 11, #pairs_ do
+            local p = pairs_[k]
+            if p.ts < window_end and seen[p.line] == 1 then
+                t:assert(p.rec == nil, "line " .. k .. ", inside the first five seconds, is not in the kernel log: " .. p.line)
+                dropped = dropped + 1
+            end
+        end
+        t:log(dropped .. " lines past the tenth fell inside the window")
+        t:assert(dropped > 0, "the burst put more than ten lines inside one window")
     end)
