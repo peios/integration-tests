@@ -248,6 +248,8 @@ end
 ---           the root before peinit runs
 ---   append  kernel command-line tokens, appended after the image's own
 ---   boot    extra `vm:boot` opts, merged over the above
+---   bridges provium bridges to attach the VM to before it boots, one
+---           NIC each, in order
 function M.boot(opts)
     opts = opts or {}
     local vm_opts = {
@@ -259,6 +261,7 @@ function M.boot(opts)
     if opts.files then boot_opts.files = M.stage(opts.files) end
     if opts.append then boot_opts.kernel_cmdline_append = opts.append end
     local vm = provium:vm(opts.name or "v", "peinit", vm_opts)
+    for _, br in ipairs(opts.bridges or {}) do br:attach(vm) end
     vm:boot(boot_opts)
     -- `opts.stage or "phase2"` would defeat `stage = false`, since false
     -- is falsy in Lua and `or` cannot tell it from an absent field. A
