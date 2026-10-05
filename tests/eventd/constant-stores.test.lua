@@ -265,14 +265,9 @@ test("severity 1 is error: standard error, or a record marked so", {
     t:assert_eq(stored_is_error(marked)[1], 1, "a record sent with is_error true is stored with 1")
 end)
 
--- PEI-1296 (PEI-TBD-is-error-integer-literal): `is_error == 1` and `== 0` match nothing; only true/false are accepted.
--- The
--- value is served as a Bool (query/executor.rs:1603) and the language's
--- equality has no Bool/integer case (query/value.rs:69), so only the
--- boolean form is accepted, though §4.2 and a2 say both are.
+-- §4.2 and a2: a query may compare is_error against true/false or 1/0.
 test("is_error is stored as an integer and served as a boolean, and queries take either", {
     spec = "eventd *constant.is-error-is-stored-as-an-integer-and-exposed-as-a-boolean",
-    tags = { "known-bug" },
 }, function(t)
     local origin = eventd.marker("ie")
     eventd.send_log(vm, { origin = origin, is_error = true, message = "e" })
@@ -399,8 +394,8 @@ test("the event shard schema version is 1", { spec = "eventd *constant.the-event
 test("the log store schema version is 1", { spec = "eventd *constant.the-log-store-schema-version-is-1" },
     function(t) t:assert_eq(schema_version(eventd.DB.logs), "1", "logs.db") end)
 
-test("the metric store schema version is 2", { spec = "eventd *constant.the-metric-store-schema-version-is-2" },
-    function(t) t:assert_eq(schema_version(eventd.DB.metrics), "2", "metrics.db") end)
+test("the metric store schema version is 3", { spec = "eventd *constant.the-metric-store-schema-version-is-3" },
+    function(t) t:assert_eq(schema_version(eventd.DB.metrics), "3", "metrics.db") end)
 
 test("the metadata database schema version is 1", {
     spec = "eventd *constant.the-metadata-database-schema-version-is-1",

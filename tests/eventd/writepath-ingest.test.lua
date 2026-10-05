@@ -19,9 +19,9 @@
 -- The rejection counters live only in eventd's memory and are read from
 -- its diagnostic dump (§8.5), which SIGQUIT writes to standard error on the
 -- way out and peinit forwards into the log store. That test stops eventd
--- twice and so runs last but one. The last narrows the metric socket and
--- restarts eventd, which today sends it into a crash loop and the machine
--- to recovery (ErrorControl Critical), so it boots a machine of its own.
+-- twice and so runs last but three. The last three narrow a socket and
+-- start eventd again, each on a machine of its own, so that a start that
+-- failed would not take the file's machine with it.
 
 local eventd = require("helpers.eventd")
 local peinit = require("helpers.peinit")
@@ -612,15 +612,11 @@ test("rejected metric input is counted in memory, and only there", {
         "and a restart starts them from zero again: " .. line2)
 end)
 
---- The machine the last two tests narrow the metric socket on, booted by
---- the first of them.
-local sock_vm
-
---- Narrow the metric socket to `narrowed`, restart eventd, and assert it
---- comes back with its own descriptor.
-local function narrow_and_restart(t, narrowed)
-    sock_vm = sock_vm or eventd.boot({ name = "ev-write-sock" })
-    local own = sock_vm
+--- Boot a machine of its own (`name`; a machine booted in a test is shut
+--- down when the test ends), narrow its metric socket to `narrowed`,
+--- restart eventd, and assert it comes back with its own descriptor.
+local function narrow_and_restart(t, name, narrowed)
+    local own = eventd.boot({ name = name })
     local before = dacl(eventd.SOCKET.metric, own)
     own:run("sd set " .. eventd.SOCKET.metric .. " '" .. narrowed .. "'"):assert_ok()
     t:assert_eq(dacl(eventd.SOCKET.metric, own), narrowed, "an operator narrowed the socket")
@@ -639,20 +635,43 @@ test("eventd sets the metric socket's descriptor again each time it starts", {
 }, function(t)
     -- Narrowed to SYSTEM, keeping the owner's ACE eventd manages its
     -- socket by (eventd/src/datagram.rs:22-27).
-    narrow_and_restart(t, "D:P(A;;GA;;;SY)(A;;GA;;;OW)")
+    narrow_and_restart(t, "ev-write-sock", "D:P(A;;GA;;;SY)(A;;GA;;;OW)")
 end)
 
+--- On a machine of its own (`name`), with eventd made Normal / RestartPolicy
+--- Never: narrow `socket` to `narrowed`, kill eventd so the socket is left
+--- behind as it is, start eventd again, and assert it comes up with its own
+--- descriptor back on the socket.
+local function narrow_stale_and_start(t, name, socket, narrowed)
+    local own = eventd.boot({ name = name, noncritical = true })
+    local before = dacl(socket, own)
+    own:run("sd set " .. socket .. " '" .. narrowed .. "'"):assert_ok()
+    t:assert_eq(dacl(socket, own), narrowed, "an operator narrowed the socket")
+    eventd.crash(own)
+    eventd.settle(own)
+    t:assert(own:run("test -S " .. socket).exit_code == 0, "the killed eventd left the socket behind")
+    t:assert_eq(dacl(socket, own), narrowed, "still narrowed")
+    own:run("svctl start eventd")
+    local up = pcall(wait_until, function() return eventd.query(own, "EVENTS TAKE 1").ok end,
+        { timeout = 45, interval = 1, desc = "eventd to start again" })
+    t:assert(up, "eventd starts again over the narrowed leftover: " .. own:run("svctl --json status eventd").stdout)
+    t:assert_eq(dacl(socket, own), before, "and its own descriptor is on the socket")
+end
+
+-- §8.2: "Recognising a leftover socket needs no right on it. If an operator
+-- has narrowed its descriptor so that eventd may no longer delete it,
+-- eventd, which still owns it, first puts its own descriptor back, so a
+-- narrowed socket never stops the next start." Narrowed so that eventd's
+-- own service SID is not in the DACL (no OW ACE): eventd, the socket's
+-- owner, keeps only the owner's implicit READ_CONTROL | WRITE_DAC.
 test("a metric socket narrowed past eventd's own access does not stop eventd starting", {
-    tags = { "known-bug" },
+    spec = "eventd *bootstrap.a-stale-socket-eventd-may-no-longer-delete-is-reclaimed-first",
 }, function(t)
-    -- PEI-1297 (PEI-TBD-narrowed-metric-socket-crashloops): narrowed so that eventd's
-    -- own service SID is not in the DACL (no OW ACE), the next start never
-    -- comes up: eventd crash-loops until peinit's Critical policy takes the
-    -- machine to recovery. Observed: metric.sock is left behind, owned by
-    -- eventd and carrying the narrowed DACL. The socket is unlinked at stop
-    -- with the error ignored (eventd/src/datagram.rs:187-193) and removed
-    -- at bind with the error fatal (:56-59), so a socket eventd may no
-    -- longer delete stops every later start. Unsure: the book's "sets its
-    -- own again each time it starts" does not say what may be narrowed.
-    narrow_and_restart(t, "D:P(A;;GA;;;SY)")
+    narrow_stale_and_start(t, "ev-write-sock2", eventd.SOCKET.metric, "D:P(A;;GA;;;SY)")
+end)
+
+test("so does a query socket narrowed the same way", {
+    spec = "eventd *bootstrap.a-stale-socket-eventd-may-no-longer-delete-is-reclaimed-first",
+}, function(t)
+    narrow_stale_and_start(t, "ev-write-sock3", eventd.SOCKET.query, "D:P(A;;GA;;;SY)")
 end)

@@ -240,16 +240,13 @@ test("the series cache is a bounded in-memory map", {
         "while the cache holds at most its 1000 entries: " .. json.encode(rows[1]))
 end)
 
--- PEI-1286 (PEI-TBD-rollups-never-written): eligible metric window queries never leave a row in the rollups table.
--- An eligible window query (one series, a
--- window aggregate, SINCE, 300 raw inputs over AdaptiveRollupMinSamples=100)
--- leaves the rollups table empty, repeated or not, and eventd logs no
--- rollup write failure. The query side queues the rows (executor.rs:3174-3216)
--- and the metric writer should commit them when idle (metric_ingest.rs:310-329);
--- where they are lost is not isolated. With nothing cached, reuse cannot be shown.
+-- An eligible window query (one series, a window aggregate, SINCE, 300 raw
+-- inputs over AdaptiveRollupMinSamples=100) leaves rows in the rollups
+-- table; a late sample then makes its window's row stale. The query's
+-- windows before the samples begin are cached too, as empty rows with no
+-- value (§5.6), so the window judged is the first one holding samples.
 test("a rollup is reused only after its freshness is proved against the raw samples", {
     spec = "eventd *term.a-rollup-is-reused-only-after-its-freshness-is-proved-against-raw-samples",
-    tags = { "known-bug" },
 }, function(t)
     local now = tonumber((vm:run("date +%s").stdout:gsub("%s", ""))) * 1000000000
     local name = eventd.marker("ro")
@@ -271,10 +268,11 @@ test("a rollup is reused only after its freshness is proved against the raw samp
     local cached
     pcall(wait_until, function()
         cached = eventd.sql(vm, eventd.DB.metrics, "SELECT r.window_start, r.value FROM rollups r JOIN series s " ..
-            "ON s.id = r.series_id WHERE s.name = '" .. name .. "' ORDER BY r.window_start LIMIT 1")
+            "ON s.id = r.series_id WHERE s.name = '" .. name .. "' AND r.source_max_sample_id > 0 " ..
+            "ORDER BY r.window_start LIMIT 1")
         return #cached == 1
     end, { timeout = 20, interval = 0.5 })
-    t:assert_eq(#cached, 1, "the window query seeded rollups")
+    t:assert_eq(#cached, 1, "the window query seeded rollups for windows holding samples")
     local window = cached[1][1]
     t:assert_eq(cached[1][2], 10, "the first cached window's average is 10")
     -- A late sample in that window makes the rollup stale.

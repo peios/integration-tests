@@ -165,10 +165,34 @@ local function writes_by_thread()
     for _, th in ipairs(ths) do
         local ok, io = pcall(vm.read_file, vm, "/proc/" .. pid .. "/task/" .. th.tid .. "/io")
         if ok then
-            out[th.tid] = { comm = th.comm, syscw = tonumber(io:match("syscw: (%d+)")) }
+            out[th.tid] = { comm = th.comm, syscw = tonumber(io:match("syscw: (%d+)")),
+                            wchar = tonumber(io:match("wchar: (%d+)")) }
         end
     end
     return out
+end
+
+local function store_writer(comm)
+    return comm:find("^eventd%-writer") or comm == "eventd-log" or comm == "eventd-metric"
+end
+
+--- Wait until no thread but a store writer has made a write syscall for a
+--- whole second. An applied configuration change requests a retention
+--- pass, and a pass rings the log and metric threads' wake eventfds (a
+--- write(2) of eight bytes each) as it hands them its commands; that pass
+--- is over before a measurement starts.
+local function others_quiet()
+    local last = writes_by_thread()
+    wait_until(function()
+        vm:clock():sleep("1s")
+        local now, moved = writes_by_thread(), false
+        for tid, a in pairs(now) do
+            local b = last[tid]
+            if b and not store_writer(a.comm) and a.syscw > b.syscw then moved = true end
+        end
+        last = now
+        return not moved
+    end, { timeout = 30, interval = 0.05, desc = "every thread but the store writers to stop writing" })
 end
 
 -- ---------------------------------------------------------------------------
@@ -181,6 +205,7 @@ test("the writer checkpoints passively once its WAL reaches WalCheckpointPages",
 }, function(t)
     eventd.set(vm, "WalCheckpointPages", "dword:100"):assert_ok()
     config_change("WalCheckpointPages", "100")
+    others_quiet()
     local db0 = file_size(SHARD0)
     local before = writes_by_thread()
 
@@ -205,8 +230,8 @@ test("the writer checkpoints passively once its WAL reaches WalCheckpointPages",
     for tid, a in pairs(after) do
         local b = before[tid]
         if b and a.syscw > b.syscw then
-            t:assert(a.comm:find("^eventd%-writer") or a.comm == "eventd-log" or a.comm == "eventd-metric",
-                a.comm .. " made write syscalls during the flood")
+            t:assert(store_writer(a.comm), a.comm .. " made write syscalls during the flood: "
+                .. (a.syscw - b.syscw) .. " of them, " .. (a.wchar - b.wchar) .. " bytes")
         end
     end
 end)

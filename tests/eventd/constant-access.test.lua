@@ -297,19 +297,9 @@ end)
 -- Data type roots
 -- ---------------------------------------------------------------------------
 
--- PEI-1288 (PEI-TBD-root-guid-object-ace-einval): an object ACE on a data type's root GUID makes eventd's access check fail with EINVAL.
--- An allowing object ACE naming a data
--- type's root GUID makes every query of that pattern fail with "access-control
--- failure: Invalid argument". may_read adds the GUIDs of the descriptor's
--- allowing object ACEs to the object type list as level-1 field nodes
--- (query/security.rs:186-196, via eventd_client::access::field_grants,
--- access.rs:249-269), so the root GUID appears at level 0 and again at
--- level 1, and kacs_access_check_list rejects the list. field_grants
--- should leave out the namespace's root GUID. v0.1.5 granted correctly.
 test("the events root is {a1b2c3d4-0001-4000-8000-000000000001}, the level-0 node", {
     spec = "eventd *constant.the-events-root-guid-is-a1b2c3d4-0001-4000-8000-000000000001"
         .. " eventd *constant.a-data-type-root-guid-is-the-level-0-object-type-list-node",
-    tags = { "known-bug" },
 }, function(t)
     local etype = event_type({ n = 1 })
     local key = eventd.key_of("Events", etype)
@@ -325,9 +315,7 @@ test("the events root is {a1b2c3d4-0001-4000-8000-000000000001}, the level-0 nod
 end)
 
 test("the logs root is {a1b2c3d4-0001-4000-8000-000000000002}", {
-    -- PEI-1288 (PEI-TBD-root-guid-object-ace-einval) (above).
     spec = "eventd *constant.the-logs-root-guid-is-a1b2c3d4-0001-4000-8000-000000000002",
-    tags = { "known-bug" },
 }, function(t)
     local origin = log_origin()
     local key = eventd.key_of("Logs", origin)
@@ -339,9 +327,7 @@ test("the logs root is {a1b2c3d4-0001-4000-8000-000000000002}", {
 end)
 
 test("the metrics root is {a1b2c3d4-0001-4000-8000-000000000003}", {
-    -- PEI-1288 (PEI-TBD-root-guid-object-ace-einval) (above).
     spec = "eventd *constant.the-metrics-root-guid-is-a1b2c3d4-0001-4000-8000-000000000003",
-    tags = { "known-bug" },
 }, function(t)
     local name = eventd.marker("mr")
     eventd.send_metric(vm, { name = name, type = "gauge", value = 4 })

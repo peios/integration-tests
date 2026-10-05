@@ -122,6 +122,68 @@ test("a shutdown still running at the stop timeout is ended there", {
     eventd.unset(vm, "QueryTimeoutMs")
 end)
 
+-- §8.4 step 2: "Shut the log and metric sockets for reading, so that a
+-- later send fails with EPIPE and its sender keeps the datagram … Then read
+-- and process the datagrams still in the receive queues, and close those
+-- descriptors." A sender connected before the stop has its sends accepted
+-- (the held test above shows that through step 1); once step 2 begins they
+-- fail with EPIPE, never again succeeding, until the descriptors close.
+-- The drain is widened so the agent can see inside it: with eventd frozen,
+-- both receive queues are filled with large datagrams (the metric ones of
+-- new, authorized series, the slowest to process), the stop is asked
+-- (SIGTERM waits for the thaw), and eventd is thawed.
+test("once the drain begins, a send to the log socket fails with EPIPE", {
+    spec = "eventd *shutdown.a-send-after-the-log-and-metric-sockets-are-shut-for-reading-fails-with-epipe",
+}, function(t)
+    local pid = eventd.pid(vm)
+    local log = assert(us.socket(vm, us.AF_UNIX, us.SOCK.DGRAM))
+    t:assert_eq(us.connect(vm, log, eventd.SOCKET.log).ret, 0, "a sender connected to the log socket")
+    local metric = assert(us.socket(vm, us.AF_UNIX, us.SOCK.DGRAM))
+    t:assert_eq(us.connect(vm, metric, eventd.SOCKET.metric).ret, 0, "and one to the metric socket")
+    t:assert_eq(us.set_pass_token(vm, metric, true).ret, 0, "which passes its token")
+    local tag = eventd.marker("epipe")
+    local function log_bytes(n)
+        local recs = {}
+        for i = 1, n do recs[i] = { origin = tag, is_error = false, message = string.rep("p", 40) .. i } end
+        return eventd.msgpack(eventd.array(recs))
+    end
+    local one = log_bytes(1)
+    local r = us.sendmsg(vm, log, one, { flags = us.MSG.DONTWAIT })
+    t:assert(r.ret and r.ret > 0, "before the stop the log socket takes a send (errno " .. tostring(r.errno) .. ")")
+
+    eventd.freeze(vm, pid)
+    local big = log_bytes(500)
+    for _ = 1, 64 do
+        local s = us.sendmsg(vm, log, big, { flags = us.MSG.DONTWAIT })
+        if not (s.ret and s.ret > 0) then break end
+    end
+    for d = 1, 64 do
+        local recs = {}
+        for i = 1, 900 do recs[i] = { name = tag .. "." .. d .. "." .. i, type = "gauge", value = i } end
+        local s = us.sendmsg(vm, metric, eventd.msgpack(eventd.array(recs)), { flags = us.MSG.DONTWAIT })
+        if not (s.ret and s.ret > 0) then break end
+    end
+    begin_stop()
+    eventd.thaw(vm, pid)
+
+    local seen, epipe_at, ok_after = {}, nil, false
+    local deadline = os.time() + 20
+    while os.time() < deadline do
+        local s = us.sendmsg(vm, log, one, { flags = us.MSG.DONTWAIT })
+        local what = (s.ret and s.ret > 0) and "ok" or tostring(s.errno)
+        if seen[#seen] ~= what then seen[#seen + 1] = what end
+        if what == tostring(us.E.PIPE) then epipe_at = epipe_at or #seen
+        elseif what == "ok" and epipe_at then ok_after = true end
+        if what ~= "ok" and what ~= tostring(us.E.PIPE) and what ~= "11" then break end
+    end
+    vm:syscall(3, log); vm:syscall(3, metric)
+    local gone = eventd.wait_gone(vm, pid, 30)
+    eventd.start(vm)
+    t:assert(gone, "the stop finished")
+    t:assert(epipe_at, "once the drain began a send failed with EPIPE: " .. table.concat(seen, " → "))
+    t:assert(not ok_after, "and none succeeded after it: " .. table.concat(seen, " → "))
+end)
+
 test("a stop ends streaming queries with an error", {
     spec = "eventd *shutdown.existing-streaming-queries-are-terminated-with-an-error",
 }, function(t)
@@ -263,12 +325,14 @@ test("an aborted shutdown: events are recovered from KMES, uncommitted logs are 
     begin_stop()
     wait_until(function() return vm:run("ls /run/eventd").stdout:find("sock", 1, true) == nil end,
         { timeout = 3, interval = 0.1, desc = "the shutdown to be under way" })
-    -- The drains and the log thread see `stopping` at once, do their one
-    -- final cycle and finish; the held query handler keeps the shutdown
-    -- from reaching its final commit. What is produced now is read by
-    -- nobody: events stay in KMES, the log record in the socket's queue.
-    -- (The log thread notices `stopping` after its poll, at most a second.)
+    -- The drains see `stopping` at once, do their one final cycle and
+    -- finish; the held query handler keeps the shutdown from reaching its
+    -- final commit. Events produced now stay in KMES. The log thread goes
+    -- on reading through the held step 1 and commits what it reads at
+    -- once, so eventd is frozen for the log record: it is still queued,
+    -- uncommitted, when the kill comes.
     vm:run("sleep 2")
+    eventd.freeze(vm, pid)
     local tag = eventd.marker("abort")
     for i = 1, 20 do eventd.emit(vm, "pt.abort", { tag = tag, i = i }) end
     us.sendmsg(vm, log, eventd.msgpack({ origin = tag, is_error = false, message = "never committed" }),
@@ -292,5 +356,5 @@ test("an aborted shutdown: events are recovered from KMES, uncommitted logs are 
     t:assert(type(cp) == "number" and cp < asked,
         "the checkpoints recovery ran beside were stale, from before this run: " .. tostring(cp))
     t:assert_eq(#eventd.rows(vm, "LOGS FROM " .. tag .. " SINCE 10m ago"), 0,
-        "the queued log record died with the aborted shutdown")
+        "the uncommitted log record died with the aborted shutdown")
 end)

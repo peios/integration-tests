@@ -108,16 +108,33 @@ test("a query past QueryTimeoutMs is cancelled with an error, and its connection
     end, { timeout = 60, interval = 1, desc = "the load to be stored" })
     set_and_wait("QueryTimeoutMs", 1000)
     local pid = eventd.pid(vm)
+    --- How many descriptors eventd holds on a store database, and which.
     local function db_fds()
-        local n = 0
+        local n, which = 0, {}
         for line in eventd.fd_listing(vm, pid):gmatch("[^\n]+") do
             if line:find("shard%-%d+%.db$") or line:find("logs%.db$") or line:find("metrics%.db$") then
                 n = n + 1
+                which[#which + 1] = line
             end
         end
-        return n
+        return n, table.concat(which, "; ")
     end
-    local baseline = db_fds()
+    -- The QueryTimeoutMs change also requested a retention pass, which
+    -- measures each store through a read-only connection of its own. When
+    -- one closes while the store's writer still holds its lock on the
+    -- file, SQLite keeps the descriptor for reuse rather than closing it,
+    -- so the pass can leave one more descriptor than it found. The
+    -- baseline is taken once that has settled: the same for three
+    -- seconds running.
+    local baseline, baseline_which = db_fds()
+    local steady = 0
+    wait_until(function()
+        vm:clock():sleep("1s")
+        local n, which = db_fds()
+        if which == baseline_which then steady = steady + 1 else steady = 0 end
+        baseline, baseline_which = n, which
+        return steady >= 3
+    end, { timeout = 60, interval = 0.05, desc = "eventd's store descriptors to settle" })
     -- Start the scan, then freeze eventd across its one-second deadline.
     -- Whether the freeze lands inside execution depends on timing, so
     -- try a few offsets.
@@ -137,10 +154,11 @@ test("a query past QueryTimeoutMs is cancelled with an error, and its connection
     t:assert(not out:find("rc=0", 1, true), "and the client was told it failed")
     -- The handler closes its connections as it unwinds; under load that
     -- can trail the client's error by a moment.
-    local now = db_fds()
-    pcall(wait_until, function() now = db_fds(); return now <= baseline end,
+    local now, now_which = db_fds()
+    pcall(wait_until, function() now, now_which = db_fds(); return now <= baseline end,
         { timeout = 20, interval = 0.5, desc = "the query's connections to close" })
-    t:assert_eq(now, baseline, "the query's read-only connections were closed")
+    t:assert_eq(now, baseline, "the query's read-only connections were closed: before [" .. baseline_which
+        .. "], after [" .. now_which .. "]")
     t:assert(eventd.query(vm, "EVENTS TAKE 1").ok, "and queries carry on")
     eventd.unset(vm, "QueryTimeoutMs")
 end)

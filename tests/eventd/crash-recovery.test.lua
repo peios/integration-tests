@@ -237,8 +237,8 @@ test("the dump names the boot ID", {
     spec = "eventd *crash.the-dump-includes-the-current-boot-id",
 }, function(t)
     need_dump(t)
-    local id = eventd.boot_id(vm)
-    t:assert_eq(dump.boot_id, id, "boot_id")
+    local id = "{" .. eventd.boot_id(vm) .. "}"
+    t:assert_eq(dump.boot_id, id, "boot_id, in the braced canonical form")
 end)
 
 test("the dump counts active and readable historical shards", {

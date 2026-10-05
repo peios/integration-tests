@@ -314,14 +314,11 @@ test("so does a missing one", {
     t:assert(not answered, "and does not answer")
 end)
 
--- PEI-1291 (PEI-TBD-threshold-relation-fails-startup): a seeded drop threshold not below the create threshold crashes eventd at startup.
--- A drop threshold not below the
--- create threshold is "ignored, value retained" on reload (config.rs:426-450)
--- but at startup from_values returns ConfigError::Invalid (config.rs:147-149),
--- so a tuning value fails startup and, eventd being Critical, reboots the machine.
+-- An invalid tuning value is ignored and the value in use retained, at
+-- startup as on reload: a seeded value outside its range, or a drop
+-- threshold not below the create threshold, does not fail startup.
 test("an invalid value is ignored and the value in use kept, live and at startup", {
     spec = "eventd *config.an-invalid-value-is-ignored-and-the-value-in-use-is-retained",
-    tags = { "known-bug" },
 }, function(t)
     -- At startup the file-scope VM was seeded with MaxBatchSize=5: eventd
     -- started, on the default, so setting the default now is no change.

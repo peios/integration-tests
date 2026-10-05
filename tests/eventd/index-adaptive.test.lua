@@ -473,6 +473,9 @@ local function shed_burst()
     local n = burst(press, "pt.ix.burst", eventd.msgpack({ k = 1 }), 300)
     eventd.thaw(press, pid)
     wait_for("the burst to be stored", function() return stored(press, "pt.ix.burst") >= n end)
+    -- The last large batch has committed by now: the shedding window runs
+    -- from about here.
+    local stored_at = eventd.guest_ns(press)
     -- The graduated check runs after each batch's commit (writer.rs
     -- commit_batch), so the last batch's shed lands after its events are
     -- already visible, and a loaded host can stretch that gap. Read the
@@ -493,13 +496,15 @@ local function shed_burst()
         return settled
     end, { timeout = 60, interval = 1, desc = "the burst's shedding to show and settle" })
     if not have then have, ix = material(press) end
+    local settled_at = eventd.guest_ns(press)
     -- Batches of this burst: one receipt range per committed batch.
-    local large = 0
+    local large, sizes = 0, {}
     for _, r in ipairs(sql(press, SHARD0, "SELECT first_sequence, last_sequence FROM receipt_ranges " ..
-        "WHERE last_sequence > " .. boot_seq)) do
+        "WHERE last_sequence > " .. boot_seq .. " ORDER BY first_sequence")) do
+        sizes[#sizes + 1] = r[2] - r[1] + 1
         if (r[2] - r[1] + 1) * 4 > 300 then large = large + 1 end
     end
-    SHED = { have = have, ix = ix, large = large }
+    SHED = { have = have, ix = ix, large = large, sizes = sizes, stored_at = stored_at, settled_at = settled_at }
     return SHED
 end
 
@@ -525,26 +530,42 @@ test("too many large batches in the window shed the lowest-priority index, then 
         end
     end
     t:assert(shed >= 2, "pressure shed more than one index: " .. shed .. " (large batches " .. large .. ")")
-    t:assert(shed <= large, "no more than one per large batch commit: " .. shed .. " of " .. large)
+    t:assert(shed <= large, "no more than one per large batch commit: " .. shed .. " of " .. large
+        .. " (the burst's batches: " .. json.encode(s.sizes) .. ")")
     t:assert(ix.idx_events_timestamp, "idx_events_timestamp is still there")
 end)
 
+-- A shard is quiet with no pending events and no batch over 75% of
+-- MaxBatchSize within SheddingWindowSeconds (10 on press), and a quiet
+-- shard converges without waiting for the next policy run (an hour away).
+-- So nothing shed comes back while the burst's large batches are inside
+-- the window, and everything does soon after it.
 test("once pressure subsides a quiet shard rebuilds what it shed, highest priority first", {
     spec = "eventd *index.shed-indexes-are-rebuilt-highest-priority-first-once-pressure-subsides"
-        .. " eventd *index.an-idle-writer-takes-one-convergence-action-then-rechecks-pressure",
-    tags = { "known-bug" },
+        .. " eventd *index.an-idle-writer-takes-one-convergence-action-then-rechecks-pressure"
+        .. " eventd *index.a-shard-is-quiet-with-no-pending-events-and-no-large-batch-in-the-shedding-window",
 }, function(t)
-    -- PEI-1296 (PEI-TBD-convergence-only-on-policy-broadcast): a writer converges
-    -- only while handling a WriterMessage::IndexPolicy (writer.rs:433-472),
-    -- and those are sent only when the policy runs (indexing.rs:282-289
-    -- broadcast_desired, hourly or on a config change). Shedding
-    -- (writer.rs:278-299) leaves the shard short of the desired set with
-    -- nothing to bring it back until then.
+    local s = shed_burst()
     local shed = 0
-    for _, h in ipairs(shed_burst().have) do if not h then shed = shed + 1 end end
+    for _, h in ipairs(s.have) do if not h then shed = shed + 1 end end
     t:assert(shed > 0, "the burst left indexes shed")
-    local ok = pcall(wait_for, "the shed indexes to be rebuilt", function() return all_built(press) end, 30)
+    t:assert(s.settled_at - s.stored_at < 8e9, "precondition: the shedding was read inside the window, "
+        .. string.format("%.1f", (s.settled_at - s.stored_at) / 1e9) .. "s after the burst was stored")
+    local first_back
+    local ok = pcall(wait_for, "the shed indexes to be rebuilt", function()
+        local have = material(press)
+        local back, all = false, true
+        for i, h in ipairs(have) do
+            if h and not s.have[i] then back = true end
+            if not h then all = false end
+        end
+        if back and not first_back then first_back = eventd.guest_ns(press) end
+        return all
+    end, 30)
     t:assert(ok, "30 quiet seconds later every shed index is back")
+    local after = first_back and (first_back - s.stored_at) / 1e9 or -1
+    t:assert(after >= 8, "and none came back while a large batch was inside the 10-second shedding window: "
+        .. "the first, " .. string.format("%.1f", after) .. "s after the burst was stored")
 end)
 
 test("a full batch with the ring past EmergencySheddingBufferPercent drops every secondary index at once", {

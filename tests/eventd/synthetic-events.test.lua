@@ -346,15 +346,10 @@ test("a corrupt metric store is recorded as a storage error; a full one is not",
     t:assert_eq(metric_errors(), after_corrupt, "and no storage_error records the writes refused for space")
 end)
 
--- PEI-1292 (PEI-TBD-no-daemon-wide-fallback): only synthetic.shutdown tries the other
--- shards (pipeline.rs:669, commit_synthetic_fallback at :782). startup and
--- config_change are pinned to queue 0 (pipeline.rs:336, :406), startup
--- storage errors to shards[0] (pipeline.rs:146), and when shard 0's commit
--- fails for capacity the writer acknowledges success and drops the record
--- (writer.rs:488-491). The book's fallback is sensible and was not built.
+-- Every daemon-wide record, not only synthetic.shutdown, falls back from a
+-- full shard 0 to the lowest-numbered writable active shard.
 test("with shard 0 full, a configuration change is recorded in shard 1", {
     spec = "eventd *synthetic.daemon-wide-events-go-to-shard-0-else-the-lowest-numbered-writable-active-shard",
-    tags = { "known-bug" },
 }, function(t)
     -- First, the ordinary case, on the file VM: every daemon-wide record
     -- is in shard 0 while shard 0 is writable.

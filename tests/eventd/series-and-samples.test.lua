@@ -61,9 +61,10 @@ test("the series table has the documented columns, UNIQUE constraint and indexes
         .. " eventd *series.series-type-is-0-counter-1-gauge-2-histogram"
         .. " eventd *series.series-boundaries-hash-hashes-the-boundary-blob-and-is-null-for-counters-and-gauges"
         .. " eventd *series.series-boundaries-holds-the-boundary-blob-and-is-null-for-counters-and-gauges"
-        .. " eventd *series.the-series-table-is-unique-on-name-labels-and-boundaries-hash"
+        .. " eventd *series.the-series-table-is-unique-on-name-labels-and-boundaries"
         .. " eventd *series.idx-series-name-indexes-series-by-name"
-        .. " eventd *series.idx-series-label-hash-indexes-series-by-label-hash",
+        .. " eventd *series.idx-series-label-hash-indexes-series-by-label-hash"
+        .. " eventd *series.idx-series-boundaries-hash-indexes-series-by-boundaries-hash",
 }, function(t)
     local schema = eventd.schema(vm, eventd.DB.metrics)
     local s = schema.series
@@ -76,12 +77,15 @@ test("the series table has the documented columns, UNIQUE constraint and indexes
     t:assert(s:find("label_hash INTEGER NOT NULL", 1, true), "label_hash INTEGER NOT NULL")
     t:assert(s:find("boundaries_hash INTEGER", 1, true), "boundaries_hash INTEGER (nullable)")
     t:assert(s:find("boundaries BLOB", 1, true), "boundaries BLOB")
-    t:assert(s:find("UNIQUE(name, labels, boundaries_hash)", 1, true),
-        "UNIQUE(name, labels, boundaries_hash)")
+    t:assert(s:find("UNIQUE(name, labels, boundaries)", 1, true),
+        "UNIQUE(name, labels, boundaries), on the full boundary blob: " .. s)
     t:assert(schema.idx_series_name and schema.idx_series_name:find("series(name)", 1, true),
         "idx_series_name on series(name)")
     t:assert(schema.idx_series_label_hash and schema.idx_series_label_hash:find("series(label_hash)", 1, true),
         "idx_series_label_hash on series(label_hash)")
+    t:assert(schema.idx_series_boundaries_hash
+        and schema.idx_series_boundaries_hash:find("series(boundaries_hash)", 1, true),
+        "idx_series_boundaries_hash on series(boundaries_hash), the hash being a lookup key")
 end)
 
 -- §5.2 The samples table, metadata table and its sample index.
@@ -312,17 +316,34 @@ test("samples order by (timestamp, id) ascending, duplicate timestamps allowed, 
     t:assert_eq(n[1][1], 2, "both samples sharing the timestamp are stored")
 end)
 
--- §5.2 Schema version.
-test("the metric store is at schema version 2 with the rollups cache", {
-    spec = "eventd *series.schema-version-2-adds-only-the-rollups-cache",
+-- §5.2 Schema version. Version 2 added the rollups cache and left raw
+-- storage alone; version 3 changed only the series table's uniqueness, to
+-- the full boundary blob, and added idx_series_boundaries_hash. A fresh
+-- store is the sum: version 1's tables shaped as before, the rollups cache,
+-- and version 3's series constraint and index.
+test("the metric store is at schema version 3: the rollups cache, and series unique on the boundary blob", {
+    spec = "eventd *series.schema-version-2-adds-only-the-rollups-cache"
+        .. " eventd *series.schema-version-3-makes-series-unique-on-the-full-boundary-blob",
 }, function(t)
     local v = eventd.sql(vm, eventd.DB.metrics,
         "SELECT value FROM metadata WHERE key = 'schema_version'")
-    t:assert_eq(v[1][1], "2", "schema_version is 2")
+    t:assert_eq(v[1][1], "3", "schema_version is 3")
     local schema = eventd.schema(vm, eventd.DB.metrics)
-    t:assert(schema.rollups, "version 2 adds the rollups cache table")
-    -- It did not change raw storage: series and samples are still present and
-    -- shaped as version 1 left them.
-    t:assert(schema.series and schema.samples, "series and samples are unchanged")
+    t:assert(schema.rollups, "version 2 added the rollups cache table")
+    t:assert(schema.samples and schema.samples:find("series_id INTEGER NOT NULL REFERENCES series(id)", 1, true),
+        "samples is still shaped as version 1 left it: " .. tostring(schema.samples))
+    t:assert(schema.series and schema.series:find("UNIQUE(name, labels, boundaries)", 1, true)
+        and not schema.series:find("boundaries_hash)", 1, true),
+        "version 3: series is unique on the boundary blob, not its hash: " .. tostring(schema.series))
+    t:assert(schema.idx_series_boundaries_hash, "and version 3 added idx_series_boundaries_hash")
+    local objects = {}
+    for _, r in ipairs(eventd.sql(vm, eventd.DB.metrics,
+        "SELECT type || ':' || name FROM sqlite_master WHERE sql IS NOT NULL ORDER BY 1")) do
+        objects[#objects + 1] = r[1]
+    end
+    t:assert_eq(table.concat(objects, ","), "index:idx_rollups_window,index:idx_samples_series_timestamp," ..
+        "index:idx_series_boundaries_hash,index:idx_series_label_hash,index:idx_series_name," ..
+        "table:metadata,table:rollups,table:samples,table:series",
+        "and nothing else: the version-1 objects, the rollups cache, and the boundary-hash index")
 end)
 

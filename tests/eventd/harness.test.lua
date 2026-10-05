@@ -401,7 +401,7 @@ test("quit_dump captures the whole SIGQUIT dump, and the stderr reader finds it"
     t:assert(d.complete, "a whole dump: " .. table.concat(d.partial, "; "))
     t:assert_eq(d.status.cause, "clean_exit", "eventd exited cleanly after it")
     t:assert_eq(d.headers, 1, "one header line")
-    t:assert_eq(d.lines.boot_id, eventd.boot_id(nc), "the dump names the boot")
+    t:assert_eq(d.lines.boot_id, "{" .. eventd.boot_id(nc) .. "}", "the dump names the boot")
     t:assert(d.lines.queries and d.lines.queries:find("active="), "queries: " .. tostring(d.lines.queries))
     t:assert(eventd.query(nc, "EVENTS TAKE 1").ok, "and eventd was started again")
     local lines = eventd.stderr(nc, "eventd diagnostic dump", { since = d.since })

@@ -105,13 +105,10 @@ test("records equal in every visible key still come back in one order, and page 
     end
 end)
 
--- PEI-1295 (PEI-TBD-sort-tie-skips-timestamp): with an explicit SORT, sort_rows
--- (executor.rs:1908-1947) appends `timestamp` only when the query has no
--- SORT (1924-1929), so records the SORT keys leave tied go straight to
--- the shard/row-id keys.
+-- With an explicit SORT, records the SORT keys leave tied are still broken
+-- by timestamp before the shard/row-id keys.
 test("records tied on the SORT keys come newest first across shards, then by shard, then row id", {
     spec = "eventd *order.event-tiebreakers-are-timestamp-desc-then-shard-index-asc-then-id-desc",
-    tags = { "known-bug" },
 }, function(t)
     local tag = eventd.marker("evtie")
     local first = tag .. "first"
@@ -137,11 +134,9 @@ test("records tied on the SORT keys come newest first across shards, then by sha
         "tied on k, the newer event comes first though it is in the higher shard")
 end)
 
--- PEI-1295 (PEI-TBD-sort-tie-skips-timestamp) (as above): for logs the tie after the
--- SORT keys goes straight to row id descending.
+-- As above, for logs: after the SORT keys, timestamp before row id.
 test("log records tied on the SORT keys come newest first, then by row id descending", {
     spec = "eventd *order.log-tiebreakers-are-timestamp-desc-then-id-desc",
-    tags = { "known-bug" },
 }, function(t)
     local o = eventd.marker("logtie")
     local ts = eventd.guest_ns(vm) - 60 * 1000000000
@@ -157,12 +152,8 @@ test("log records tied on the SORT keys come newest first, then by row id descen
         "tied on is_error, the newer line still comes first")
 end)
 
--- PEI-1295 (PEI-TBD-metric-tie-skips-labels): sort_metric_rows (executor.rs:3965-3976)
--- orders by timestamp, then name, then sample id; the canonical labels
--- never enter the comparison.
 test("samples tied on timestamp and name are ordered by canonical labels before sample id", {
     spec = "eventd *order.metric-tiebreakers-are-timestamp-name-labels-then-sample-id-all-ascending",
-    tags = { "known-bug" },
 }, function(t)
     local name = "pt" .. eventd.marker("mtie")
     local ts = eventd.guest_ns(vm) - 60 * 1000000000
@@ -209,8 +200,8 @@ end)
 -- "The shard index is the numeric identifier from the shard-NNNN.db
 --  filename."
 -- Route closed: the shard index decides only between events with equal
--- timestamps in different shards (or, with an explicit SORT, as the
--- known-bug above shows), and KMES stamps each event in nanoseconds on
+-- timestamps in different shards (with or without an explicit SORT), and
+-- KMES stamps each event in nanoseconds on
 -- the CPU that emitted it, so no test can produce two events on two CPUs
 -- with one timestamp. The unit test merges three shards holding equal
 -- timestamps and checks the lower shard leads; the index it uses is the

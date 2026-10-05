@@ -11,9 +11,11 @@
 -- The store-file cases need SQLite files the guest cannot build (it ships no
 -- sqlite3), so they are built on the host with python's sqlite3, written into
 -- the stopped store directory, and eventd is started on them: a version-1
--- store (migrated), an unknown and a missing schema_version, and a v2 store
--- missing a required index (all startup failures), and an unreadable file
--- (quarantined and replaced).
+-- and a version-2 store (migrated to version 3), an unknown and a missing
+-- schema_version, and a v2 store missing a required index (all startup
+-- failures), an unreadable file and one holding schema objects but no
+-- metadata entries (quarantined and replaced), and one holding no schema
+-- at all (created afresh in place).
 --
 -- The rest is read off the running store: its file name, its tables and
 -- indexes and metadata, its WAL journal mode, the size of the database file
@@ -215,8 +217,8 @@ end)
 
 -- §5.4 Opening step 2: "Version 1 is migrated transactionally to version 2
 -- by adding the adaptive-rollup cache." (§5.6: the table and its pruning
--- index in one immediate transaction, then version 2.)
-test("a version-1 store is migrated to version 2, gaining the rollups table and index", {
+-- index in one immediate transaction, then version 2, and on to version 3.)
+test("a version-1 store is migrated to version 2, gaining the rollups table and index, then on to 3", {
     spec = "eventd *metricdb.a-version-1-store-is-migrated-transactionally-to-version-2"
         .. " eventd *rollup.a-version-1-store-gains-the-table-and-pruning-index-in-one-immediate-transaction"
         .. " eventd *series.schema-version-1-comprises-series-samples-and-metadata",
@@ -231,8 +233,8 @@ INSERT INTO samples (series_id, boot_id, timestamp, value)
 ]]))
     eventd.start(vm)
     t:assert_eq(eventd.sql(vm, eventd.DB.metrics,
-        "SELECT value FROM metadata WHERE key = 'schema_version'")[1][1], "2",
-        "the store now records version 2")
+        "SELECT value FROM metadata WHERE key = 'schema_version'")[1][1], "3",
+        "the store now records version 3, the current one, by way of 2")
     local schema = eventd.schema(vm, eventd.DB.metrics)
     t:assert(schema.rollups, "the rollups table was added")
     t:assert(schema.idx_rollups_window, "with its pruning index")
@@ -241,11 +243,12 @@ INSERT INTO samples (series_id, boot_id, timestamp, value)
     fresh_store()
 end)
 
--- §5.2 Uniqueness: "For counters and gauges boundaries_hash is null, and
--- SQLite treats nulls as distinct in a unique constraint — so the constraint
--- does not enforce uniqueness for them. What does is the single-writer
--- resolution logic." A store holding two identical gauge series is accepted
--- by eventd's own schema; eventd itself, resolving, never makes such a pair.
+-- §5.2 Uniqueness: "For counters and gauges boundaries is null, and SQLite
+-- treats nulls as distinct in a unique constraint — so the constraint does
+-- not enforce uniqueness for them. What does is the single-writer
+-- resolution logic." A version-2 store holding two identical gauge series
+-- is accepted, and migrated to version 3 with both kept; eventd itself,
+-- resolving, never makes such a pair.
 test("counter/gauge uniqueness comes from resolution, not the UNIQUE constraint", {
     spec = "eventd *series.counter-and-gauge-uniqueness-rests-on-single-writer-resolution-not-the-constraint",
 }, function(t)
@@ -259,7 +262,7 @@ INSERT INTO series (name, labels, type, label_hash) VALUES ('ptdup', '', 1, 5472
     eventd.start(vm)
     t:assert_eq(eventd.sql(vm, eventd.DB.metrics,
         "SELECT COUNT(*) FROM series WHERE name = 'ptdup'")[1][1], 2,
-        "the UNIQUE(name, labels, boundaries_hash) constraint let two identical gauge series in")
+        "the UNIQUE(name, labels, boundaries) constraint holds two identical gauge series")
     local name = eventd.marker("mdbuniq")
     for v = 1, 5 do
         eventd.send_metric(vm, { name = name, type = "gauge", value = v, timestamp = now + v })
@@ -287,9 +290,12 @@ end)
 -- §5.4 Opening step 3: "Verify structural integrity — required tables and
 -- indexes present. Failing this, with SQLite reporting no corruption, is a
 -- startup failure."
+-- §5.4 also: "a version 2 store missing a required table or index fails
+-- startup instead" of being migrated.
 test("a version-2 store missing a required index is a startup failure", {
     spec = "eventd *metricdb.opening-verifies-the-required-tables-and-indexes-are-present"
-        .. " eventd *metricdb.a-structural-failure-without-reported-corruption-is-a-startup-failure",
+        .. " eventd *metricdb.a-structural-failure-without-reported-corruption-is-a-startup-failure"
+        .. " eventd *metricdb.a-version-2-store-is-migrated-transactionally-to-version-3",
 }, function(t)
     local schema = (V1_SCHEMA .. ROLLUPS):gsub("CREATE INDEX idx_series_name ON series%(name%);\n", "")
     install(host_db(schema .. "INSERT INTO metadata VALUES ('schema_version', '2');"))
@@ -314,8 +320,124 @@ test("a corrupt store is quarantined and replaced with a fresh empty store", {
     t:assert_eq(eventd.sql(vm, eventd.DB.metrics, "SELECT COUNT(*) FROM samples")[1][1] >= 0, true,
         "and metrics.db is a working store again")
     t:assert_eq(eventd.sql(vm, eventd.DB.metrics,
-        "SELECT value FROM metadata WHERE key = 'schema_version'")[1][1], "2",
-        "a fresh version-2 store")
+        "SELECT value FROM metadata WHERE key = 'schema_version'")[1][1], "3",
+        "a fresh version-3 store")
+end)
+
+local function corrupt_files()
+    local out = {}
+    for name in vm:run("ls " .. METRICS_DIR).stdout:gmatch("[^\n]+") do
+        if name:find("%.corrupt%.") then out[#out + 1] = name end
+    end
+    return out
+end
+
+--- The schema objects of a store, "type:name" sorted and joined.
+local function objects()
+    local out = {}
+    for _, r in ipairs(eventd.sql(vm, eventd.DB.metrics,
+        "SELECT type || ':' || name FROM sqlite_master WHERE sql IS NOT NULL ORDER BY 1")) do
+        out[#out + 1] = r[1]
+    end
+    return table.concat(out, ",")
+end
+
+local V3_OBJECTS = "index:idx_rollups_window,index:idx_samples_series_timestamp,index:idx_series_boundaries_hash," ..
+    "index:idx_series_label_hash,index:idx_series_name,table:metadata,table:rollups,table:samples,table:series"
+
+-- §5.4 Opening step 2: "Version 2 is migrated transactionally to version 3
+-- by rebuilding the series table under its new uniqueness constraint,
+-- foreign keys off for the rebuild and every identifier kept". With foreign
+-- keys on, dropping the old series table would cascade into the rollups
+-- that reference it; a rollup row surviving is the observable of the
+-- rebuild running with them off.
+test("a version-2 store is migrated to version 3, the series table rebuilt with every identifier kept", {
+    spec = "eventd *metricdb.a-version-2-store-is-migrated-transactionally-to-version-3"
+        .. " eventd *series.schema-version-3-makes-series-unique-on-the-full-boundary-blob",
+}, function(t)
+    local now = guest_past_ns()
+    install(host_db(V1_SCHEMA .. ROLLUPS .. [[
+INSERT INTO metadata VALUES ('schema_version', '2');
+INSERT INTO metadata VALUES ('created_at', '2026-01-01T00:00:00Z');
+INSERT INTO series (id, name, labels, type, label_hash) VALUES (7, 'ptv2gauge', '', 1, 5472609002491880229);
+INSERT INTO series (id, name, labels, type, label_hash, boundaries_hash, boundaries)
+    VALUES (9, 'ptv2hist', '', 2, 5472609002491880229, 12345, x'000000000000f03f0000000000000040');
+INSERT INTO samples (id, series_id, boot_id, timestamp, value)
+    VALUES (100, 7, x'00000000000000000000000000000000', ]] .. now .. [[, 42.0);
+INSERT INTO rollups (series_id, window_start, window_width, transform, function, value, overflow,
+    source_max_sample_id, source_baseline_sample_id) VALUES (7, 0, 60000000000, 0, 0, 42.0, 0, 100, NULL);
+]]))
+    eventd.start(vm)
+    t:assert_eq(eventd.sql(vm, eventd.DB.metrics,
+        "SELECT value FROM metadata WHERE key = 'schema_version'")[1][1], "3", "the store now records version 3")
+    local schema = eventd.schema(vm, eventd.DB.metrics)
+    t:assert(schema.series:find("UNIQUE(name, labels, boundaries)", 1, true),
+        "the series table is unique on the boundary blob: " .. schema.series)
+    t:assert_eq(objects(), V3_OBJECTS, "with idx_series_boundaries_hash added, and nothing lost")
+    local kept = eventd.sql(vm, eventd.DB.metrics,
+        "SELECT id || ':' || name || ':' || type || ':' || IFNULL(boundaries_hash, '-') || ':' || hex(boundaries) "
+        .. "FROM series ORDER BY id")
+    t:assert_eq(json.encode(kept), '[["7:ptv2gauge:1:-:"],["9:ptv2hist:2:12345:000000000000F03F0000000000000040"]]',
+        "every series kept, under its own id, with its boundaries")
+    t:assert_eq(eventd.sql(vm, eventd.DB.metrics, "SELECT series_id FROM samples WHERE id = 100")[1][1], 7,
+        "the sample still references its series by the same id")
+    t:assert_eq(eventd.sql(vm, eventd.DB.metrics, "SELECT COUNT(*) FROM rollups WHERE series_id = 7")[1][1], 1,
+        "and the rollup row referencing it survived the rebuild: foreign keys were off")
+    local rows = eventd.rows(vm, "METRIC ptv2gauge SINCE 10m ago")
+    t:assert(#rows == 1 and rows[1].value == 42, "the version-2 data reads back: " .. json.encode(rows))
+    fresh_store()
+end)
+
+-- §5.4 Creation: "A metric store that does not exist, or whose database
+-- holds no schema at all (what a power cut leaves when it takes the
+-- uncheckpointed creating transaction), is created". The crafted file is
+-- exactly that: a WAL-mode header page and nothing else.
+test("a metric store whose database holds no schema at all is created as new, not quarantined", {
+    spec = "eventd *metricdb.a-metric-store-with-no-schema-is-created-as-new",
+}, function(t)
+    local bytes = host_db("PRAGMA journal_mode=WAL;")
+    t:assert(#bytes > 0 and bytes:byte(19) == 2, "precondition: a WAL-mode database file of " .. #bytes .. " bytes")
+    local before = #corrupt_files()
+    install(bytes)
+    local status = attempt()
+    t:assert_eq(status.state, "active", "eventd started on it: " .. json.encode(status))
+    eventd.ready(vm)
+    t:assert_eq(#corrupt_files(), before, "nothing was quarantined: " .. table.concat(corrupt_files(), " "))
+    t:assert_eq(objects(), V3_OBJECTS, "the store was created in the file, every table and index")
+    t:assert_eq(eventd.sql(vm, eventd.DB.metrics,
+        "SELECT value FROM metadata WHERE key = 'schema_version'")[1][1], "3", "at version 3")
+end)
+
+-- §5.4 Opening step 4: "A database holding schema objects but no metadata
+-- table with entries is not a store eventd could have written; it is
+-- quarantined and replaced like a corrupt one." Both shapes: tables without
+-- a metadata table, and a metadata table with no entries.
+test("a metric store with schema objects but no metadata entries is quarantined and replaced", {
+    spec = "eventd *metricdb.unrecognised-contents-are-quarantined",
+}, function(t)
+    local cases = {
+        { "no metadata table", "CREATE TABLE series (id INTEGER PRIMARY KEY);", "series" },
+        { "an empty metadata table", "CREATE TABLE series (id INTEGER PRIMARY KEY);" ..
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;", "metadata,series" },
+    }
+    for _, c in ipairs(cases) do
+        local bytes = host_db(c[2])
+        local before = {}
+        for _, f in ipairs(corrupt_files()) do before[f] = true end
+        install(bytes)
+        local status = attempt()
+        t:assert_eq(status.state, "active", c[1] .. ": eventd started on a replacement: " .. json.encode(status))
+        eventd.ready(vm)
+        local new = {}
+        for _, f in ipairs(corrupt_files()) do if not before[f] then new[#new + 1] = f end end
+        t:assert_eq(#new, 1, c[1] .. ": the database was quarantined: " .. table.concat(new, " "))
+        -- Not byte for byte: opening put the file in WAL mode before its
+        -- contents were judged. What it held is aside, untouched.
+        t:assert_eq(new[1] and eventd.sql(vm, METRICS_DIR .. new[1], "SELECT group_concat(name) FROM "
+            .. "(SELECT name FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name)")[1][1], c[3],
+            c[1] .. ": the crafted database is what was set aside")
+        t:assert_eq(objects(), V3_OBJECTS, c[1] .. ": a fresh store stands at the path")
+    end
 end)
 
 -- §5.4 Checkpointing: "The metric writer checkpoints at WalCheckpointPages in

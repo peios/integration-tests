@@ -52,6 +52,23 @@ local function retention_pass()
     eventd.set(vm, "MetricMaxBatchSize", "dword:" .. (flip % 2 == 0 and 4000 or 4500)):assert_ok()
 end
 
+--- Hold LogRetentionDays at 60, and wait until eventd has applied it.
+--- Every applied change requests a retention pass, and a pass a previous
+--- test's change requested may still be running: lines older than the
+--- fourteen-day default must not be sent until no pass will delete them
+--- by age. A pass reads its configuration again before every batch, so
+--- none does once 60 is applied. Unsetting it again is itself a change
+--- that starts a pass.
+local function hold_age()
+    local since = eventd.guest_ns(vm)
+    eventd.set(vm, "LogRetentionDays", "dword:60"):assert_ok()
+    eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change
+        .. ' WHERE key == "LogRetentionDays" AND new_value == "60" SINCE 10m ago', function(rs)
+            for _, r in ipairs(rs) do if r.timestamp >= since then return true end end
+            return false
+        end)
+end
+
 --- Send `n` lines in datagrams of 500, as `make(i)` describes each.
 local function send_many(n, make)
     local i = 1
@@ -127,6 +144,9 @@ test("over LogRetentionMaxBytes the oldest lines go, by live size, across boots 
     -- boot-preferring rule would take the other boot first; the oldest-
     -- first rule takes both from the old end. A few lines are past the age
     -- limit too.
+    -- The aged lines are twenty days old: held while everything is
+    -- staged, then released before the size limit is set.
+    hold_age()
     local m = eventd.marker("sz")
     local now = eventd.guest_ns(vm)
     local base = now - 10 * DAY
@@ -156,6 +176,7 @@ INSERT OR IGNORE INTO log_origins VALUES ('%sother');
     -- Aim to remove about a third of the bulk.
     local limit = math.tointeger(live0 - (live0 // 3))
     t:assert(catalogue > 100000, "precondition: the catalogue alone is over 100 KB: " .. catalogue)
+    eventd.unset(vm, "LogRetentionDays"):assert_ok()
     eventd.set(vm, "RetentionDeleteBatchRows", "dword:100"):assert_ok()
     eventd.set(vm, "LogRetentionMaxBytes", "qword:" .. limit):assert_ok()
     local ok = pcall(wait_until, function()
@@ -233,6 +254,9 @@ test("retention plans read-only and deletes through the log writer, never a seco
     spec = "eventd *logretain.log-retention-plans-read-only-and-submits-low-priority-commands-to-the-log-writer"
         .. " eventd *logretain.log-retention-takes-no-writer-mutex-and-opens-no-second-read-write-connection",
 }, function(t)
+    -- The lines are thirty days old: held while they are staged, and
+    -- lowering the limit again is the change that starts the pass watched.
+    hold_age()
     local m = eventd.marker("rw")
     local old = eventd.guest_ns(vm) - 30 * DAY
     send_many(5000, function(i)
@@ -242,9 +266,9 @@ test("retention plans read-only and deletes through the log writer, never a seco
         { timeout = 30, interval = 0.25, desc = "the lines to be stored" })
     local pid = eventd.pid(vm)
     eventd.set(vm, "RetentionDeleteBatchRows", "dword:100"):assert_ok()
-    -- Low priority indeed: an idle log thread takes the next maintenance
-    -- command only after its one-second wait for a datagram
-    -- (log_ingest.rs:92, 106), so 50 commands take most of a minute.
+    eventd.unset(vm, "LogRetentionDays"):assert_ok()
+    -- Fifty delete commands of 100 rows, each a low-priority command the
+    -- log writer takes between its own transactions.
     local most, samples = 0, 0
     local deadline = os.time() + 150
     repeat

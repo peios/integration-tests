@@ -252,15 +252,8 @@ test("pretty is the default format: one self-describing record per line", {
         "and it is what --format pretty writes")
 end)
 
--- PEI-1296 (PEI-TBD-evctl-extension-json-brace): jsonl output of an extension value has one `}` too many, so the line is not JSON.
--- evctl writes an extension value as
--- `{"$extension":{"type":5,"data":"07"}}}` — the closing write_all at
--- evctl/src/output.rs:215 is the literal `"}}}`, three braces where the two
--- opened by the `write!` (whose `{{` are format escapes) need two — so the
--- record's line is not valid JSON. Binary and non-finite floats are fine.
 test("jsonl is one object per record, with tagged objects for what JSON cannot carry", {
     spec = "eventd *evctl.jsonl-writes-one-object-per-record-and-tags-values-json-cannot-carry",
-    tags = { "known-bug" },
 }, function(t)
     local etype = "pt.js" .. eventd.marker()
     eventd.emit(vm, etype, eventd.map{ b = eventd.bin("\0\255"), nan = eventd.float(0 / 0),

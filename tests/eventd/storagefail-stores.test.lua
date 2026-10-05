@@ -341,30 +341,53 @@ test("a failed event commit on a full disk does not stop the writer", {
     t:assert(names:find("eventd-writer-0", 1, true), "with its writer thread alive: " .. names)
 end)
 
--- PEI-1289 (PEI-TBD-retention-pass-aborts-on-full-store): the disk-full write does
--- request an immediate pass (writer.rs:365-369), but retention::pass
--- (retention.rs:113-190) runs the stores in a fixed order and returns at
--- the first error with `?`. With the event store full its own steps fail
--- (retention.rs:124-141), stderr says "retention pass failed and will be
--- retried: … disk is full" every 100 ms, and the log and metric stores
--- are never reached.
+-- The disk-full write requests an immediate pass, and the pass reaches the
+-- log store though the event store's own retention fails for want of
+-- space (§3.6: each store is processed whether or not the one before it
+-- failed, and the pass reports every store that did).
 test("a full disk under the event store triggers a retention run across every store", {
-    spec = "eventd *storagefail.a-disk-full-or-quota-write-failure-triggers-an-immediate-retention-run-on-every-enabled-store",
-    tags = { "known-bug" },
+    spec = "eventd *storagefail.a-disk-full-or-quota-write-failure-triggers-an-immediate-retention-run-on-every-enabled-store"
+        .. " eventd *eventretain.a-store-whose-retention-fails-does-not-stop-the-others",
 }, function(t)
     t:assert(full.old, "the aged log record and the full event store from the previous test")
     local gone = pcall(wait_until, function()
         return #eventd.rows(vm, "LOGS FROM " .. full.old .. " SINCE 30d ago") == 0
     end, { timeout = 15, interval = 0.5, desc = "the aged log record to be retained away" })
     t:assert(gone, "the retention run the full disk triggered reached the log store and removed the aged record")
+    local failed = eventd.stderr_line(vm, "retention pass failed", full.since)
+    t:assert(failed, "the pass itself failed, on the full event store")
+    local m = failed and failed.message or ""
+    t:assert(m:find("event store:", 1, true), "and its failure names the event store: " .. m)
+    t:assert(not m:find("log store:", 1, true), "not the log store, whose retention succeeded: " .. m)
 end)
 
--- PEI-1296 (PEI-TBD-disk-full-stderr-ranges): the event writer's disk-full line is
--- "eventd: event store is full; batch discarded and retention requested:
--- <SQLite error>" (writer.rs:365-369) — no CPU, no sequence range.
+-- §3.6: "After a failed pass, requests are held for one second, doubling to
+-- a minute while passes keep failing". The full event store fails every
+-- pass, and every failed write into it requests another; each failure's
+-- line names the hold before the next, and the passes are that far apart.
+test("after a failed retention pass, requested passes back off from one second, doubling", {
+    spec = "eventd *eventretain.after-a-failed-pass-requested-passes-back-off",
+}, function(t)
+    t:assert(full.since, "the full event store from the earlier test")
+    local lines = eventd.stderr(vm, "retention pass failed and will be retried in",
+        { since = full.since, count = 4, timeout = 30 })
+    t:assert(#lines >= 4, "four failed passes in a row: " .. #lines)
+    local holds = {}
+    for i, l in ipairs(lines) do
+        holds[i] = tonumber(l.message:match("will be retried in (%d+)s"))
+    end
+    t:assert_eq(holds[1], 1, "the first failure holds requests for one second: " .. json.encode(holds))
+    for i = 2, #holds do
+        t:assert_eq(holds[i], math.min(holds[i - 1] * 2, 60), "each further failure doubles the hold, "
+            .. "to at most a minute: " .. json.encode(holds))
+        local gap = (lines[i].timestamp - lines[i - 1].timestamp) / 1e9
+        t:assert(gap >= holds[i - 1] * 0.9, "and no pass ran inside the previous hold (" .. holds[i - 1]
+            .. "s): " .. string.format("%.2f", gap) .. "s apart")
+    end
+end)
+
 test("a failed event batch is logged to stderr with its CPUs and sequence ranges", {
     spec = "eventd *storagefail.a-failed-event-batch-is-logged-to-stderr-with-its-cpus-and-sequence-ranges",
-    tags = { "known-bug" },
 }, function(t)
     local line = eventd.stderr_line(vm,"event store is full", full.since)
     t:assert(line, "the failure reached stderr")

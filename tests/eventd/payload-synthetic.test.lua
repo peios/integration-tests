@@ -138,13 +138,9 @@ end)
 
 test("startup boot_id is the current boot in PCDS canonical (braced, lowercase) form", {
     spec = "eventd *payload.startup-boot-id-is-the-current-boot-in-canonical-guid-form",
-    tags = { "known-bug" },
 }, function(t)
-    -- PEI-1296 (PEI-TBD-startup-boot-id-unbraced): BootId::canonical (boot_id.rs:40-60)
-    -- formats the 8-4-4-4-12 digits with no braces, but PCDS's canonical
-    -- GUID string is the 38-character braced form (PCDS GUID string
-    -- format) — the form eventd itself uses when it renders the boot_id
-    -- column.
+    -- PCDS's canonical GUID string is the 38-character braced form — the
+    -- form eventd itself uses when it renders the boot_id column.
     local s = newest(eventd.T.startup)
     t:assert_eq(s.payload.map.boot_id, "{" .. boot_canonical():lower() .. "}",
         "the kernel boot ID, braced and lowercase")

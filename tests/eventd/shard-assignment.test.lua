@@ -12,7 +12,11 @@
 -- 0 and 2, CPU 1 owns shard 1). The rest of the file walks the count
 -- through restarts, in order: a deleted middle stripe (restart recovery),
 -- 1 (fewer shards than CPUs, and the earlier shards kept), the default
--- (one per CPU), then the range limit (257, then 256).
+-- (one per CPU), then the range limit (257). 256 shards need eventd's
+-- descriptor limit raised (§2.3), and are tried last, each on a one-vCPU
+-- machine of its own seeded StorageShards=256 and made Normal /
+-- RestartPolicy Never: once under the limit eventd inherits, once with
+-- LimitNOFILE seeded into its service definition.
 --
 -- Which shard holds a CPU's events is read straight from the shard files
 -- (the host-side sqlite copy); the routing itself has no other window.
@@ -21,7 +25,7 @@ local eventd = require("helpers.eventd")
 local peinit = require("helpers.peinit")
 local kmes = require("helpers.kmes")
 local sys = require("helpers.sys")
-peinit.claim(1, { cpus = 2 })
+peinit.claim(2, { cpus = 2 }) -- the file's machine, and one 256-shard machine at a time
 
 local SCHED_OTHER, SCHED_FIFO, SCHED_IDLE = 0, 1, 5
 
@@ -421,42 +425,95 @@ test("the default, zero, is one shard per attached ring, and then each CPU has i
     t:assert_eq(keys((wait_where(e1, 300))), '["shard-0001"]', "CPU 1 writes only shard 1")
 end)
 
--- Last in the file: at 256 eventd cannot start, and a Critical service that
--- cannot start takes this VM down.
--- PEI-1290 (PEI-TBD-256-shards-exhaust-fds): eventd accepts StorageShards=256 (config.rs:158)
--- but opens every active shard at startup with a read-write connection and
--- its -wal and -shm (pipeline.rs:82-93), plus read-only connections, under
--- the service's default RLIMIT_NOFILE of 1024, which it never raises; at
--- 256 shards the next open fails with "SQLite error: unable to open
--- database file" and eventd crash-loops.
-test("the shard count tops out at 256", {
+--- The soft and hard "Max open files" of process `pid` on `v`, from
+--- /proc/<pid>/limits.
+local function nofile(v, pid)
+    local ok, text = pcall(v.read_file, v, "/proc/" .. pid .. "/limits")
+    if not ok then text = v:run("cat /proc/" .. pid .. "/limits").stdout end
+    local soft, hard = text:match("Max open files%s+(%S+)%s+(%S+)")
+    return soft, hard
+end
+
+-- §2.3: "eventd neither raises its own descriptor limit nor caps the shard
+-- count to fit it." Here, with no LimitNOFILE in its service definition,
+-- eventd runs under the limit it inherited from peinit, and with three
+-- shards configured it uses three.
+test("eventd runs under the descriptor limit it inherited, raising none", {
+    spec = "eventd *shard.eventd-neither-raises-its-descriptor-limit-nor-caps-the-shard-count",
+}, function(t)
+    t:assert(vm:run("reg get '" .. eventd.SERVICE .. "' LimitNOFILE").exit_code ~= 0,
+        "precondition: eventd's service definition sets no LimitNOFILE")
+    local soft, hard = nofile(vm, eventd.pid(vm))
+    local init_soft, init_hard = nofile(vm, 1)
+    t:assert(soft and init_soft, "both limits were read: eventd " .. tostring(soft) .. ", peinit " .. tostring(init_soft))
+    t:assert_eq(soft, init_soft, "eventd's soft NOFILE limit is peinit's, inherited, not raised")
+    t:assert_eq(hard, init_hard, "and so is its hard limit")
+end)
+
+-- Last in the file. The range, then 256 itself, which needs the descriptor
+-- limit raised (§2.3): on machines of their own, since a Critical service
+-- that cannot start would take this VM down.
+test("the shard count tops out at 256: 257 is not used", {
     spec = "eventd *shard.there-are-between-1-and-256-event-shards",
-    tags = { "known-bug" },
 }, function(t)
     local line = startup_line(function() restart_with(257) end)
     t:assert(line:find("2 KMES buffer(s), 2 active shard(s)", 1, true),
         "257 is not a shard count eventd will use: " .. line)
+end)
 
-    eventd.set(vm, "StorageShards", "dword:256"):assert_ok()
-    local before = eventd.pid(vm)
-    local starts = #startup_lines()
-    vm:run("svctl restart eventd")
+--- Boot a one-vCPU machine whose eventd is seeded StorageShards=256 and
+--- made Normal / RestartPolicy Never, with `values` further service
+--- values. Returns the VM and eventd's settled status.
+local function boot_256(name, values)
+    local v = eventd.boot({
+        name = name,
+        wait = false,
+        config = { { name = "StorageShards", type = "dword", data = 256 } },
+        noncritical = { values = values },
+    })
     local status
     wait_until(function()
-        local r = vm:run("svctl --json status eventd")
+        local r = v:run("svctl --json status eventd")
         if r.exit_code ~= 0 then return false end
         status = json.decode(r.stdout)
-        local pid = status.current_job and status.current_job.pid
-        return (status.state == "active" and pid ~= before) or status.cause == "process_crash"
-    end, { timeout = 90, interval = 0.5, desc = "eventd to start with 256 shards, or fail" })
+        return (status.state == "active" and eventd.query(v, "EVENTS TAKE 1").ok)
+            or status.state == "failed" or status.cause == "process_crash"
+    end, { timeout = 120, interval = 0.5, desc = "eventd to start with 256 shards, or fail" })
+    return v, status
+end
+
+-- §2.3: "Under a 1024-descriptor soft limit, 256 shards do not start".
+-- eventd does not cap the count to fit the limit it inherited; it fails.
+test("256 shards do not start under the inherited descriptor limit", {
+    spec = "eventd *shard.a-high-storage-shards-needs-a-raised-descriptor-limit"
+        .. " eventd *shard.eventd-neither-raises-its-descriptor-limit-nor-caps-the-shard-count",
+}, function(t)
+    local v, status = boot_256("ev-shard256-low", nil)
+    t:assert(status.state ~= "active", "without LimitNOFILE eventd does not run 256 shards: " .. json.encode(status))
+    t:assert_eq(status.cause, "process_crash", "it fails during startup: " .. json.encode(status))
+    t:assert(not eventd.query(v, "EVENTS TAKE 1").ok, "and nothing answers")
+end)
+
+-- §2.3: "a machine configured with a high StorageShards raises eventd's
+-- limit to match, with LimitNOFILE in its service definition (peinit TRM
+-- §3.2)". Seeded at 4096, 256 shards start and are used as given.
+test("with LimitNOFILE raised, eventd runs 256 shards", {
+    spec = "eventd *shard.there-are-between-1-and-256-event-shards"
+        .. " eventd *shard.a-high-storage-shards-needs-a-raised-descriptor-limit",
+}, function(t)
+    local v, status = boot_256("ev-shard256", { { name = "LimitNOFILE", type = "dword", data = 4096 } })
     t:assert_eq(status.state, "active", "eventd runs with 256 shards: " .. json.encode(status))
-    eventd.ready(vm)
-    wait_until(function() return #startup_lines() > starts end,
-        { timeout = 30, interval = 0.5, desc = "the start's log line" })
-    local started = startup_lines()[1]
-    t:assert(started:find("2 KMES buffer(s), 256 active shard(s)", 1, true),
-        "256 is used as given: " .. started)
-    local shards = eventd.shards(vm)
+    local soft, hard = nofile(v, eventd.pid(v))
+    t:assert_eq(soft .. "/" .. tostring(hard), "4096/4096", "under the LimitNOFILE the definition sets")
+    local started
+    wait_until(function()
+        for _, l in ipairs(eventd.rows(v, "LOGS FROM eventd SINCE 1h ago TAKE 500")) do
+            if l.message:find("KMES buffer") then started = l.message end
+        end
+        return started ~= nil
+    end, { timeout = 30, interval = 0.5, desc = "the start's log line" })
+    t:assert(started:find("1 KMES buffer(s), 256 active shard(s)", 1, true), "256 is used as given: " .. started)
+    local shards = eventd.shards(v)
     t:assert_eq(#shards, 256, "with 256 shard databases")
     t:assert_eq(shard_name(shards[256]), "shard-0255", "numbered 0000 to 0255")
 end)

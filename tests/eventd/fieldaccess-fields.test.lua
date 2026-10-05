@@ -201,15 +201,7 @@ end)
 
 test("the object type list has the type's root at level 0 and its fields at level 1", {
     spec = "eventd *fieldaccess.the-object-type-list-is-the-type-root-at-level-0-and-one-field-per-level-1-node",
-    tags = { "known-bug" },
 }, function(t)
-    -- PEI-1288 (PEI-TBD-root-guid-ace-breaks-query): an allowing object ACE naming the
-    -- data type's root GUID (§B) makes every query of the identifier fail
-    -- with "access-control failure: Invalid argument". field_grants takes
-    -- every allowing object ACE's GUID for a field's
-    -- (eventd-client/src/access.rs:249-269), and may_read appends it as a
-    -- level-1 node (eventd/src/query/security.rs:186-196), so the list
-    -- carries the root GUID twice and KACS rejects it.
     local ty = eventd.marker("ptroot")
     emit(ty, { n = 1, extra = "x" })
     emit(ty, { n = 2 })
@@ -331,14 +323,9 @@ local function mq(name) return "METRIC " .. name .. " SINCE 1h ago" end
 
 test("the fixed metric fields are named timestamp, boot_id, name, type and value", {
     spec = "eventd *fieldaccess.the-fixed-metric-field-names",
-    tags = { "known-bug" },
 }, function(t)
-    -- PEI-1296 (PEI-TBD-hidden-metric-timestamp-drops-sample): boot_id, type, name and
-    -- value are each removed from the sample by their names' GUIDs, but a
-    -- sample whose timestamp is hidden vanishes. authorize_row removes the
-    -- field before the series reader places the sample, and timestamp(row)
-    -- then reads 0 (eventd/src/query/executor.rs:1949-1953, :2437-2449), so
-    -- the sample falls outside every window.
+    -- A sample whose timestamp is hidden is still placed by its time, and
+    -- returned without the field.
     local one, two = eventd.marker("ptmf"), eventd.marker("ptmf")
     for _, n in ipairs({ one, two }) do
         eventd.send_metric(vm, { name = n, type = "gauge", value = 5, labels = { device = "d" } })

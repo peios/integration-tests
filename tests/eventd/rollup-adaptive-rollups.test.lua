@@ -1,21 +1,17 @@
 -- eventd TRM §5.6 — adaptive rollups: a disposable query cache seeded by
 -- repeated wide window queries and proven fresh at read time.
 --
--- A defect shapes this file. When a rollup commit leaves fewer rows than
--- AdaptiveRollupMaxRows, prune_rollups computes a negative excess and deletes
--- with a negative LIMIT, which SQLite reads as "no limit": every commit under
--- the cap empties the whole cache (PEI-1286 (PEI-TBD-rollup-prune-negative-limit), the
--- known-bug test below). Rows only survive a commit that lands at or above the
--- cap. So:
+-- The cache is global and pruned by oldest window start, so rows one test
+-- leaves behind (written ones reach an hour into the future) would outlive a
+-- later test's own. `set_cap` therefore empties the cache, with a zero cap,
+-- before it sets the one a test wants. Then:
 --
 --   * the seeding side (thresholds, which windows, recorded proofs, the batch
---     cap, the global row cap) is observed with AdaptiveRollupMaxRows set no
---     higher than one submission, so eventd's own rows survive;
+--     cap, the global row cap) is observed on the rows eventd itself writes;
 --   * the read side (all-or-raw, the validity proof, baselines, non-finite
 --     values) is observed with rollup rows written into the stopped store on
 --     the host — valid proofs, but values offset so a cache-served answer is
---     distinguishable from a raw one. Reading needs no commit, so the defect
---     does not touch it.
+--     distinguishable from a raw one.
 --
 -- One VM with eventd made ErrorControl=Normal / RestartPolicy=Never (so it can
 -- be stopped for a store edit without peinit restarting it). One-minute
@@ -86,12 +82,26 @@ end
 
 local function close(a, b) return a ~= nil and b ~= nil and math.abs(a - b) < 1e-6 end
 
--- Set the global cap. Changing it prunes, which (by the defect) empties the
--- cache whenever it holds fewer rows than the new cap: a clean slate.
-local function set_cap(n)
+-- Set the global cap on a clean slate: a zero cap first empties the cache
+-- (§5.6), then the cap the test wants, waiting until eventd has applied it.
+local cap_now -- the cap this file last applied (nil: the default)
+local function apply_cap(n)
+    if cap_now == n then return end
+    local since = eventd.guest_ns(vm)
     eventd.set(vm, "AdaptiveRollupMaxRows", "dword:" .. n):assert_ok()
-    wait_until(function() return total_rollups() <= n end,
-        { timeout = 15, interval = 0.3, desc = "the cache to settle at cap " .. n })
+    eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. ' WHERE key == "AdaptiveRollupMaxRows"'
+        .. ' AND new_value == "' .. n .. '" SINCE 10m ago', function(rs)
+            for _, r in ipairs(rs) do if r.timestamp >= since then return true end end
+            return false
+        end)
+    cap_now = n
+end
+
+local function set_cap(n)
+    apply_cap(0)
+    wait_until(function() return total_rollups() == 0 end,
+        { timeout = 15, interval = 0.3, desc = "a zero cap to empty the cache" })
+    apply_cap(n)
 end
 
 -- Stop eventd, apply `sql` to the store on the host, put it back, restart.
@@ -161,16 +171,11 @@ test("ingestion never writes rollups and nothing seeds them without a query", {
     t:assert_eq(#rollups(name), 0, "no rollups exist for a series that was ingested but never queried")
 end)
 
--- PEI-1286 (PEI-TBD-rollup-prune-negative-limit): §5.6 says the writer "upserts a
--- candidate … and prunes the oldest window starts until no more than
--- AdaptiveRollupMaxRows remain", so under the cap nothing is pruned. HEAD's
--- prune_rollups (metric_store.rs:705-712) computes `count.saturating_sub(
--- max_rows)` on i64, which is negative under the cap, and passes it as the
--- LIMIT of the delete; SQLite treats a negative LIMIT as unlimited, so every
--- rollup is deleted. The unit test only covers count > cap.
+-- §5.6 says the writer "upserts a candidate … and prunes the oldest window
+-- starts until no more than AdaptiveRollupMaxRows remain", so under the cap
+-- nothing is pruned.
 test("under the cap, a seeding query's windows stay cached", {
     spec = "eventd *rollup.the-writer-upserts-then-prunes-oldest-windows-down-to-adaptiverollupmaxrows",
-    tags = { "known-bug" },
 }, function(t)
     set_cap(100000)
     local name = eventd.marker("rkeep")
@@ -182,8 +187,7 @@ test("under the cap, a seeding query's windows stay cached", {
         "with 100000 rows allowed, the query's windows remain in the cache: " .. #rollups(name))
 end)
 
--- §5.6 Seeding and which windows are cached, observed with a cap the
--- submission exceeds (so eventd's rows survive the prune defect).
+-- §5.6 Seeding and which windows are cached.
 test("seeding needs enough inputs and caches complete, aligned windows with their greatest sample id", {
     spec = "eventd *rollup.seeding-requires-at-least-adaptiverollupminsamples-raw-inputs"
         .. " eventd *rollup.only-complete-epoch-aligned-windows-are-cached"
@@ -338,7 +342,7 @@ test("raw stays authoritative; a zero cap disables rollups live without changing
     end
     wait_until(function() return #rollups(name) > 0 end,
         { timeout = 20, interval = 0.5, desc = "rollups to exist" })
-    eventd.set(vm, "AdaptiveRollupMaxRows", "dword:0"):assert_ok()
+    apply_cap(0)
     wait_until(function() return total_rollups() == 0 end,
         { timeout = 15, interval = 0.5, desc = "a zero cap to empty the cache at once" })
     local off = eventd.query(vm, "METRIC " .. name .. Q .. "AVG_OVER 1m")
@@ -503,8 +507,8 @@ test("streaming continuations neither use nor seed rollups (not observable)", {
 -- Route closed: the bounded non-blocking channel, the writer taking at most
 -- one command only when its receive queue is idle and its batch committed,
 -- and dropping a candidate on a full channel or writer pressure are internal
--- scheduling: every observable outcome is "fewer rows cached", which the
--- prune defect already produces and which never changes an answer.
+-- scheduling: every observable outcome is "fewer rows cached", which pruning
+-- produces too and which never changes an answer.
 test("the candidate channel, writer intake and drop-under-pressure (not observable)", {
     spec = "eventd *rollup.queries-submit-candidates-through-a-bounded-non-blocking-channel"
         .. " eventd *rollup.the-writer-takes-at-most-one-rollup-command-and-only-when-idle-and-committed"

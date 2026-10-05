@@ -627,16 +627,10 @@ end)
 test("quarantine moves the database, its WAL and its shared memory under one suffix, deleting none of them", {
     spec = "eventd *eventdb.quarantine-gives-the-database-wal-and-shm-one-shared-corrupt-timestamp-suffix"
         .. " eventd *eventdb.a-corrupt-store-is-never-deleted-or-automatically-repaired",
-    tags = { "known-bug" },
 }, function(t)
-    -- PEI-1287 (PEI-TBD-quarantine-loses-wal): Shard::open_recovering (shard.rs:76-90)
-    -- quarantines only after Shard::open has failed, and that open runs
-    -- SQLite against the database with its -wal and -shm in place
-    -- (shard.rs:96-110). SQLite opens a present -wal, rebuilds the -shm,
-    -- and on closing the failed connection deletes both, so by the time
-    -- quarantine::database (quarantine.rs:14-21) looks for sidecars there
-    -- are none to move. The WAL, which can hold the newest committed
-    -- transactions, is the part lost.
+    -- The WAL, which can hold the newest committed transactions, must be
+    -- moved aside as it was, not opened (and so deleted) by the failed
+    -- open that led to the quarantine.
     eventd.stop(bad)
     for _, f in ipairs(listing(bad, STORE)) do
         if f:find("corrupt", 1, true) then bad:run("rm -f " .. STORE .. "/" .. f) end
@@ -655,6 +649,91 @@ test("quarantine moves the database, its WAL and its shared memory under one suf
     t:assert_eq(bad:read_file(STORE .. "/shard-0000.db.corrupt." .. ts), body.db, "the database kept byte for byte")
     t:assert_eq(bad:read_file(STORE .. "/shard-0000.db-wal.corrupt." .. ts), body.wal, "the WAL kept")
     t:assert_eq(bad:read_file(STORE .. "/shard-0000.db-shm.corrupt." .. ts), body.shm, "the shared memory kept")
+end)
+
+--- Build a SQLite database on the host from `script` and return its bytes
+--- (the guest ships no sqlite3).
+local function host_db(script)
+    local dir = eventd.host_tmpdir()
+    eventd.host_write(dir .. "/s.sql", script)
+    local run = assert(io.popen("python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); "
+        .. "c.executescript(open(sys.argv[2]).read()); c.commit(); c.close()' "
+        .. dir .. "/db " .. dir .. "/s.sql 2>&1", "r"))
+    local out = run:read("a")
+    assert(run:close(), "building the crafted shard failed: " .. out)
+    local bytes = eventd.host_read(dir .. "/db")
+    os.execute("rm -rf '" .. dir .. "'")
+    return bytes
+end
+
+--- Stop `bad`, put `bytes` in place of shard-0000.db (no -wal or -shm),
+--- start it, and return the quarantined files that are new.
+local function crafted_shard0(bytes)
+    eventd.stop(bad)
+    local before = {}
+    for _, f in ipairs(listing(bad, STORE)) do before[f] = true end
+    eventd.remove_db(bad, SHARD0)
+    bad:write_file(SHARD0, bytes)
+    eventd.start(bad)
+    local new = {}
+    for _, f in ipairs(listing(bad, STORE)) do
+        if not before[f] and f:find(".corrupt.", 1, true) then new[#new + 1] = f end
+    end
+    return new
+end
+
+--- Whether shard-0000.db is a whole shard at the current version.
+local function whole_shard(t, why)
+    local schema = eventd.schema(bad, SHARD0)
+    for _, tbl in ipairs({ "events", "event_types", "receipt_ranges", "metadata" }) do
+        t:assert(schema[tbl], why .. ": table " .. tbl .. " exists")
+    end
+    t:assert(schema.idx_events_timestamp, why .. ": idx_events_timestamp exists")
+    local v = eventd.sql(bad, SHARD0, "SELECT value FROM metadata WHERE key = 'schema_version'")
+    t:assert_eq(v[1] and v[1][1], "1", why .. ": at schema version 1")
+end
+
+-- §3.3 Creation: "A shard database that does not exist, or that holds no
+-- schema at all (what a power cut leaves when it takes the uncheckpointed
+-- creating transaction), is created, in one transaction". The crafted file
+-- is exactly that: a WAL-mode header page and nothing else.
+test("an active shard holding no schema at all is created as new, not quarantined", {
+    spec = "eventd *eventdb.a-shard-with-no-schema-is-created-as-new",
+}, function(t)
+    local bytes = host_db("PRAGMA journal_mode=WAL;")
+    t:assert(#bytes > 0 and bytes:byte(19) == 2, "precondition: a WAL-mode database file of " .. #bytes .. " bytes")
+    local new = crafted_shard0(bytes)
+    t:assert_eq(#new, 0, "nothing was quarantined: " .. table.concat(new, " "))
+    whole_shard(t, "the shard was created in the file")
+    local tag = eventd.marker("ns")
+    emit_stored(bad, "pt.db.noschema", tag)
+end)
+
+-- §3.3 Opening step 5: "A database holding schema objects but no metadata
+-- table with entries is not a shard eventd could have written; it is
+-- quarantined and replaced like a corrupt one." Both shapes: tables
+-- without a metadata table, and a metadata table with no entries.
+test("an active shard with schema objects but no metadata entries is quarantined and replaced", {
+    spec = "eventd *eventdb.unrecognised-contents-are-quarantined",
+}, function(t)
+    local cases = {
+        { "no metadata table", "CREATE TABLE events (id INTEGER PRIMARY KEY);", "events" },
+        { "an empty metadata table", "CREATE TABLE events (id INTEGER PRIMARY KEY);" ..
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;", "events,metadata" },
+    }
+    for _, c in ipairs(cases) do
+        local bytes = host_db(c[2])
+        local new = crafted_shard0(bytes)
+        local aside
+        for _, f in ipairs(new) do if f:match("^shard%-0000%.db%.corrupt%.") then aside = f end end
+        t:assert(aside, c[1] .. ": the database was quarantined: " .. table.concat(new, " "))
+        -- Not byte for byte: opening put the file in WAL mode before its
+        -- contents were judged. What it held is aside, untouched.
+        t:assert_eq(aside and eventd.sql(bad, STORE .. "/" .. aside, "SELECT group_concat(name) FROM "
+            .. "(SELECT name FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name)")[1][1], c[3],
+            c[1] .. ": the crafted database is what was set aside")
+        whole_shard(t, c[1] .. ": a fresh shard stands at the path")
+    end
 end)
 
 -- Route closed: the suffix is the nanosecond clock at quarantine

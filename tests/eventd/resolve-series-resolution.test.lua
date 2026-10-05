@@ -15,15 +15,16 @@
 --
 -- The hash-match verification and the by-(name,label_hash) lookup are proven
 -- by a label-hash collision (two label sets that FNV-collide stay two
--- series); the changed-histogram-boundaries case is the known-bug below,
--- driven by a boundary-blob collision. Both collisions were found with a
+-- series); the changed-histogram-boundaries case is driven by a
+-- boundary-blob collision. Both collisions were found with a
 -- Pollard-rho search over the book's FNV-1a parameters and verified against
 -- eventd's own hash. The cache's key structure, hit/miss cost and
 -- undersized-cache thrash have no observable distinct from the result and are
 -- documented as such.
 --
--- Two VMs at peak: one file-scope, plus a dedicated VM for the known-bug,
--- which can crash the metric thread.
+-- Two VMs at peak: one file-scope, plus a dedicated VM for the boundary
+-- collision, which would take eventd down if the collision were treated as
+-- one series.
 
 local eventd = require("helpers.eventd")
 local peinit = require("helpers.peinit")
@@ -249,18 +250,13 @@ end)
 -- blobs FNV-collide to the same boundaries_hash should still be two distinct
 -- series — the full-blob verification is a no-match, so step 6 inserts a new
 -- row. The boundary pairs below were found to collide under the book's own
--- FNV parameters (§5.2) and are each strictly increasing and finite.
---
--- PEI-1285 (PEI-TBD-histogram-boundary-hash-identity): the code makes the boundary HASH
--- part of series identity via UNIQUE(name, labels, boundaries_hash)
--- (metric_store.rs:21), so the new-series INSERT (resolve_or_insert,
--- metric_store.rs:489) violates it; commit_batch treats the error as fatal
--- (metric_ingest.rs:412), eventd exits with "UNIQUE constraint failed:
--- series.name, series.labels, series.boundaries_hash" and peinit restarts it.
--- Dedicated VM: the failing commit takes eventd down.
+-- FNV parameters (§5.2) and are each strictly increasing and finite. The
+-- series table is unique on the full boundary blob, not its hash (§5.2,
+-- schema version 3), so the second INSERT is no violation. Dedicated VM: a
+-- failing commit would take eventd down.
 test("two histogram series whose boundary hashes collide are still two series", {
-    spec = "eventd *resolve.a-histogram-with-changed-boundaries-is-a-new-series",
-    tags = { "known-bug" },
+    spec = "eventd *resolve.a-histogram-with-changed-boundaries-is-a-new-series"
+        .. " eventd *series.the-series-table-is-unique-on-name-labels-and-boundaries",
 }, function(t)
     local function dbl(bits) return (string.unpack("<d", string.pack("<I8", bits))) end
     -- boundaries_hash(both) == 5602808888786851467, blobs differ (see the
@@ -281,8 +277,7 @@ test("two histogram series whose boundary hashes collide are still two series", 
         { timeout = 30, interval = 0.25, desc = "the first histogram series" })
     -- Second histogram, different boundaries, colliding hash: a new series.
     eventd.send_metric(kb, hist(B))
-    -- Give the store time to gain the second series (it will not; the commit
-    -- aborts on the UNIQUE violation, which takes the metric thread down).
+    -- Give the store time to gain the second series.
     pcall(wait_until, function() return #series_row(kb, name) == 2 end,
         { timeout = 15, interval = 0.5, desc = "a second, distinct histogram series" })
     local count = #series_row(kb, name)

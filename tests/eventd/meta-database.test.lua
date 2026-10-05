@@ -375,14 +375,11 @@ test("a malformed metadata database is replaced by a fresh one at startup", {
     end
 end)
 
--- PEI-1296 (PEI-TBD-meta-recreate-silent): the book has eventd log an error when it
--- throws an invalid metadata database away. MetaStore::open
--- (meta_store.rs:80-85) drops and recreates it without a word, and
--- pipeline.rs:64-67 prints nothing either, so the loss of the accumulated
--- adaptation leaves no trace an operator could find.
+-- The book has eventd log an error when it throws an invalid metadata
+-- database away, so the loss of the accumulated adaptation leaves a trace
+-- an operator can find.
 test("an invalid metadata database is logged as an error and recreated", {
     spec = "eventd *meta.an-invalid-metadata-database-is-logged-and-recreated-from-defaults",
-    tags = { "known-bug" },
 }, function(t)
     eventd.stop(vm)
     local from = eventd.guest_ns(vm)

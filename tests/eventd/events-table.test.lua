@@ -526,12 +526,9 @@ end)
 
 test("a known type adds no catalogue statement to an insert, real or synthetic", {
     spec = "eventd *events.a-known-type-adds-no-catalogue-statement-to-an-insert",
-    tags = { "known-bug" },
 }, function(t)
-    -- PEI-1296 (PEI-TBD-synthetic-catalogue-reinsert): commit_synthetic (shard.rs:334)
-    -- and commit_gaps (shard.rs:258) execute INSERT OR IGNORE INTO
-    -- event_types on every call, without consulting the in-memory set the
-    -- real-event path uses (shard.rs:175).
+    -- Synthetic and gap records consult the same in-memory set as real
+    -- events do.
     instrument()
     local ty = "pt.known." .. eventd.marker("kn")
     local a, b = eventd.marker("ka"), eventd.marker("kb")
@@ -706,32 +703,42 @@ end)
 local ORPHAN = "pt.orphan." .. eventd.marker("orph")
 local OLD_BOOT = string.rep("A5", 16)
 
---- Once per file: plant a forty-day-old event of ORPHAN (its only one),
---- with its catalogue row and receipt, and let age retention delete it.
---- Returns whether the planted event was seen stored first.
-local orphan_planted
-local function plant_orphan()
-    if orphan_planted ~= nil then return orphan_planted end
+--- Plant a forty-day-old event of `ty` (its only one), sequence `seq` of
+--- OLD_BOOT, with its catalogue row and receipt, and let age retention
+--- delete it. Returns whether the planted event was seen stored first.
+local function plant_old(ty, seq)
     instrument()
     local old = eventd.guest_ns(craft) - 40 * 86400 * 1000000000
     eventd.stop(craft)
     eventd.edit_store(craft, SHARD0,
         "INSERT INTO events (boot_id, timestamp, cpu_id, sequence, origin_class, event_type, " ..
         "effective_token_guid, true_token_guid, process_guid, payload) VALUES (X'" .. OLD_BOOT .. "', " ..
-        old .. ", 0, 1, 0, '" .. ORPHAN .. "', zeroblob(16), zeroblob(16), zeroblob(16), X'80'); " ..
-        "INSERT INTO event_types VALUES ('" .. ORPHAN .. "'); " ..
-        "INSERT INTO receipt_ranges VALUES (X'" .. OLD_BOOT .. "', 0, 1, 1);")
+        old .. ", 0, " .. seq .. ", 0, '" .. ty .. "', zeroblob(16), zeroblob(16), zeroblob(16), X'80'); " ..
+        "INSERT INTO event_types VALUES ('" .. ty .. "'); " ..
+        "INSERT INTO receipt_ranges VALUES (X'" .. OLD_BOOT .. "', 0, " .. seq .. ", " .. seq .. ");")
     eventd.start(craft)
-    orphan_planted = eventd.sql(craft, SHARD0,
-        "SELECT count(*) FROM events WHERE event_type = '" .. ORPHAN .. "'")[1][1] == 1
+    local planted = eventd.sql(craft, SHARD0,
+        "SELECT count(*) FROM events WHERE event_type = '" .. ty .. "'")[1][1] == 1
     -- Any configuration change requests a retention pass; the default
     -- EventRetentionDays of 30 then deletes the old event.
     eventd.set(craft, "LogRetentionDays", "dword:13"):assert_ok()
     wait_until(function()
-        return eventd.sql(craft, SHARD0, "SELECT count(*) FROM events WHERE event_type = '" .. ORPHAN .. "'")[1][1] == 0
+        return eventd.sql(craft, SHARD0, "SELECT count(*) FROM events WHERE event_type = '" .. ty .. "'")[1][1] == 0
     end, { timeout = 60, interval = 0.5, desc = "age retention to delete the old event" })
     eventd.unset(craft, "LogRetentionDays")
+    return planted
+end
+
+--- Once per file: plant_old for ORPHAN.
+local orphan_planted
+local function plant_orphan()
+    if orphan_planted == nil then orphan_planted = plant_old(ORPHAN, 1) end
     return orphan_planted
+end
+
+--- Whether `ty` is in SHARD0's catalogue.
+local function catalogued(ty)
+    return eventd.sql(craft, SHARD0, "SELECT count(*) FROM event_types WHERE event_type = '" .. ty .. "'")[1][1] == 1
 end
 
 test("receipt rows survive the retention that deletes their events", {
@@ -746,21 +753,56 @@ test("retention removes a type its deletes orphaned, once rechecked, and never a
     spec = "eventd *events.retention-offers-orphan-type-checks-for-types-its-deletes-touched"
         .. " eventd *events.an-orphan-type-is-rechecked-in-the-deletion-transaction-and-uninterned-after-commit"
         .. " eventd *events.an-unindexed-or-interrupted-orphan-check-is-skipped-rather-than-delaying-ingestion",
-    tags = { "known-bug" },
 }, function(t)
-    -- PEI-1296 (PEI-TBD-no-orphan-type-cleanup): retention deletes event rows only
-    -- (shard.rs:354-376 retain_before/retain_boot); nothing in eventd
-    -- offers, runs, rechecks or skips an orphan-type check, so a type whose
-    -- last event retention deleted stays catalogued for ever.
+    -- Unindexed: a shard starts with no idx_events_event_type, so the check
+    -- retention offered after deleting ORPHAN's only event was skipped,
+    -- and the stale row stays (safe: it can expose nothing).
     t:assert(plant_orphan(), "the type's only event was stored, then deleted by retention")
     local tag = eventd.marker("ing")
     emit_stored(craft, craft, "pt.ev.ingest", { tag = tag }, tag)
-    local cat
-    pcall(wait_until, function()
-        cat = eventd.sql(craft, SHARD0, "SELECT count(*) FROM event_types WHERE event_type = '" .. ORPHAN .. "'")[1][1]
-        return cat == 0
-    end, { timeout = 20, interval = 0.5, desc = "the orphaned type to leave the catalogue" })
-    t:assert_eq(cat, 0, "the orphaned type has been removed from event_types")
+    craft:clock():sleep("3s")
+    t:assert(catalogued(ORPHAN), "with idx_events_event_type not material, the orphan check was skipped")
+
+    -- Indexed: query event_type 22 times, lower the create threshold to 20
+    -- (the drop threshold's default is 10) — an applied change, which
+    -- makes the policy run — and wait for the quiet writer to build the
+    -- index.
+    for _ = 1, 22 do
+        local r = eventd.query(craft, 'EVENTS pt.ev.q WHERE event_type == "pt.x" SINCE 1h ago')
+        t:assert(r.ok, "a query on event_type: " .. tostring(r.stderr))
+    end
+    local function applied(key, value)
+        local since = eventd.guest_ns(craft)
+        eventd.set(craft, key, "dword:" .. value):assert_ok()
+        eventd.wait_rows(craft, "EVENTS " .. eventd.T.config_change
+            .. ' WHERE key == "' .. key .. '" AND new_value == "' .. value .. '" SINCE 10m ago', function(rs)
+                for _, r in ipairs(rs) do if r.timestamp >= since then return true end end
+                return false
+            end)
+    end
+    applied("AdaptiveIndexCreateThreshold", 20)
+    -- The policy run that change triggers can still judge by the threshold
+    -- it held before; one more applied change (15 days: 14 is the default,
+    -- and no change) runs it again under 20.
+    applied("LogRetentionDays", 15)
+    eventd.unset(craft, "LogRetentionDays")
+    local built = pcall(wait_until, function() return eventd.schema(craft, SHARD0).idx_events_event_type ~= nil end,
+        { timeout = 60, interval = 0.5, desc = "idx_events_event_type to be built" })
+    t:assert(built, "idx_events_event_type was built; counters "
+        .. json.encode(eventd.sql(craft, eventd.DB.meta, "SELECT field_path, query_count FROM index_counters"))
+        .. ", desired " .. json.encode(eventd.sql(craft, eventd.DB.meta, "SELECT field_path FROM desired_indexes")))
+    local orphan2 = "pt.orphan2." .. eventd.marker("orph")
+    t:assert(plant_old(orphan2, 2), "a second type's only event was stored, then deleted by retention")
+    local gone = pcall(wait_until, function() return not catalogued(orphan2) end,
+        { timeout = 20, interval = 0.5, desc = "the orphaned type to leave the catalogue" })
+    eventd.unset(craft, "AdaptiveIndexCreateThreshold")
+    t:assert(gone, "with the index material, the orphaned type has been removed from event_types")
+    -- Uninterned too: its next event is catalogued again, with a statement.
+    local before = catlog(craft, orphan2)
+    local tag2 = eventd.marker("again")
+    emit_stored(craft, craft, orphan2, { tag = tag2 }, tag2)
+    t:assert(catalogued(orphan2), "a new event of the removed type puts it back in the catalogue")
+    t:assert_eq(catlog(craft, orphan2), before + 1, "through a catalogue statement: it was no longer interned")
 end)
 
 -- Not observable: receipt compaction is optional ("may prepare", "may lag

@@ -34,8 +34,9 @@
 --      disk. Its events are emitted, the writer is seen blocked (D) in
 --      /proc, and the power goes. The committed events survive, the batch
 --      does not, and no synthetic.gap appears for it.
---   3. PEI-1317, last because it leaves eventd unable to start: fresh
---      stores, power cut a few seconds after creation.
+--   3. A store's creation lost: fresh stores, power cut a few seconds
+--      after creation, and the next start must still come up. Last,
+--      because it throws the earlier stores away.
 --
 -- ext4 flushes on its own: the journal commits every 5 seconds, and one
 -- FLUSH makes the whole of provium's held overlay durable, including WAL
@@ -47,8 +48,9 @@
 -- block device, which would commit the very writes the cut is to drop.
 --
 -- The disk VM is seeded ErrorControl=Normal / RestartPolicy=Never (as in
--- bootstrap-failure.test.lua) so the PEI-1317 failure is one failed start
--- rather than peinit's Critical policy rebooting the machine for ever.
+-- bootstrap-failure.test.lua) so a start that fails after a cut is one
+-- failed start rather than peinit's Critical policy rebooting the machine
+-- for ever.
 -- Nothing else here reads either value.
 
 local eventd = require("helpers.eventd")
@@ -157,7 +159,7 @@ local FIFREEZE = 0xC0045877
 --- the cut never saw. `vm:reset()` returns once the agent serves (Phase
 --- 1.5); eventd is a Phase 2 service, so the second boot's Phase 2 mark is
 --- waited for (`expect` consumed the first boot's). Readiness is left to
---- the caller, since PEI-1317's case expects eventd not to come up.
+--- the caller, which judges whether eventd came up.
 local function power_cut(v)
     for _, store in ipairs(eventd.STORE_DISK_ORDER) do
         v:disk(eventd.STORE_DISK[store]):power_cut()
@@ -300,10 +302,10 @@ end
 ---
 --- The stores were created on this machine's first boot, and a log or
 --- metric store's creating transaction sits in its WAL until a checkpoint:
---- cut the power before one and the next start fails (PEI-1317, the
---- known-bug test at the end). A clean restart checkpoints every store as
---- its last connection closes; the main files alone then hold the schema,
---- and no later cut can take it.
+--- cut the power before one and the next start creates the store afresh
+--- (the test at the end), losing what the cuts here are to measure. A
+--- clean restart checkpoints every store as its last connection closes;
+--- the main files alone then hold the schema, and no later cut can take it.
 local settled = false
 local function settle()
     if settled then return end
@@ -532,20 +534,16 @@ test("no gap record is written for a batch lost to power loss", {
         "no gap record of the old boot was written after the cut")
 end)
 
--- PEI-1317 (powerloss-uncheckpointed-store-creation-is-fatal): a log or
--- metric store whose creating transaction was never checkpointed is left,
--- after a power cut, as a database file with no schema (the file and its
--- directory entry durable, the WAL holding CREATE_SCHEMA not). The next
--- start sees the file exists, so log_store.rs `open` skips CREATE_SCHEMA
--- (`if !existed`), and `validate_schema` fails: "log-store SQLite error:
--- no such table: metadata" (metric_store.rs has the same shape). eventd
--- fails startup on every boot from then on; in the image (Critical,
--- OnFailure) peinit reboots the machine for ever. The book's restart is
--- "Nothing manual … finds its databases consistent". No spec: the log and
--- metric anchors are homed by the passing tests above.
-test("eventd starts after power is lost before a fresh store was checkpointed", {
-    tags = { "known-bug" },
-}, function(t)
+-- A log or metric store whose creating transaction was never checkpointed
+-- is left, after a power cut, as a database file with no schema (the file
+-- and its directory entry durable, the WAL holding the creation not). The
+-- next start creates such a store afresh rather than failing on it; the
+-- book's restart is "Nothing manual … finds its databases consistent". No
+-- spec: the cut can as well land after the creation is durable, so this
+-- does not prove the no-schema anchors, which the lifecycle files prove on
+-- crafted schemaless files; the power-loss anchors are homed by the
+-- passing tests above.
+test("eventd starts after power is lost before a fresh store was checkpointed", {}, function(t)
     -- Fresh stores on the same disks: stop eventd, empty the three store
     -- directories, and make that emptiness durable (sync) so the cut
     -- cannot bring the old stores back. The default journal commit
