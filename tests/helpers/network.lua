@@ -23,12 +23,39 @@ local M = {}
 M.CONTROL = "/run/netd/control.sock"
 M.KEY = [[Machine\System\Network]]
 
+--- A provium bridge whose host-side name is unique to this run.
+---
+--- provium names the host's bridge after the Lua name, and each TAP after
+--- the VM and bridge names, so two files that both said `bridge("lan")`
+--- would land on one host bridge when ptrun runs them at the same time,
+--- and each gateway would answer the other's machine. The name here has
+--- a random part (Linux allows 15 characters). `tag` is a short label
+--- for the reader of a capture ("lan", "wan").
+math.randomseed(os.time() ~ (tonumber(tostring({}):match("0x(%x+)"), 16) or 0))
+function M.bridge(tag)
+    local name = string.format("%s%06x", (tag or "n"):sub(1, 6), math.random(0, 0xFFFFFF))
+    return provium:bridge(name)
+end
+
 --- Boot the machine under test on `o.bridges` (one NIC per bridge, in
 --- order). Every other option is `helpers.peinit.boot`'s. Returns the VM.
+---
+--- `o.gateway` (or a list, `o.gateways`): name the machine's MACs as the
+--- gateway's peers (`gw:peer`), so the host's own chatter on the bridge
+--- is ignored. Frames the machine sent while booting are still queued on
+--- the gateway's socket and are read at its next pump.
 function M.boot(o)
     o = o or {}
     o.name = o.name or "sut"
-    return peinit.boot(o)
+    local vm = peinit.boot(o)
+    local gws = o.gateways or { o.gateway }
+    if gws[1] then
+        for _, link in ipairs(M.links(vm)) do
+            local mac = vm:read_file("/sys/class/net/" .. link .. "/address"):match("%x%x:%x%x:%x%x:%x%x:%x%x:%x%x")
+            for _, g in ipairs(gws) do g:peer(mac) end
+        end
+    end
+    return vm
 end
 
 -- ---------------------------------------------------------------------------

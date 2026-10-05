@@ -416,13 +416,26 @@ local function annotate(f)
     return f
 end
 
+--- Listen only to `mac` (6 bytes or text), and to any other peer named
+--- the same way. The host's own end of the bridge and its TAPs carry
+--- IPv6 link-local addresses and talk on the bridge (mDNS, router and
+--- neighbour solicitations); once a peer is named, frames from anything
+--- else are dropped unread, so they are neither answered nor counted.
+--- `network.boot{gateway = gw}` names the machine under test.
+function G:peer(mac)
+    if #mac ~= 6 then mac = M.mac(mac) end
+    self.peers = self.peers or {}
+    self.peers[mac] = true
+end
+
 --- Read every frame waiting (within `wait_ms` of quiet, default 50),
 --- record it in `self.seen` with the time it was read, and hand it to
---- the handlers. Frames the gateway sent itself are skipped.
+--- the handlers. Frames the gateway sent itself are skipped, and so is
+--- every frame from a source that is not a named peer, once one is.
 function G:pump(wait_ms)
     local n = 0
     for _, f in ipairs(ntfe.frames(self.vm, self.ps, wait_ms or 50)) do
-        if f.src ~= self.mac then
+        if f.src ~= self.mac and (not self.peers or self.peers[f.src]) then
             annotate(f)
             f.at = self:now()
             self.seen[#self.seen + 1] = f
