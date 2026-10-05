@@ -13,7 +13,7 @@
 --
 -- The DHCPv6 source (step 4 of each list) cannot be shown on the shipped
 -- policy: the gateway's REPLY (fe80::gw:547 → fe80::machine:546) never
--- reaches netd (PEI-TBD-dhcp6-baseline, found by the dhcp6 testset). The
+-- reaches netd (PEI-1366, found by the dhcp6 testset). The
 -- passing tests therefore run without a DHCPv6 server and check steps
 -- 1–3; the last test asserts the TRM's step 4 and is tagged known-bug.
 --
@@ -145,7 +145,7 @@ test("with Dns.Offered the DHCPv6 reply's non-link-local servers and its domains
         -- Restart the clients (and the O-flag DHCPv6 client with them) so
         -- the information request goes to a server that answers.
         profile({ ["Dns.Domains"] = "multi:prof.example" })
-        -- PEI-TBD-dhcp6-baseline: on the shipped policy the gateway's
+        -- PEI-1366: on the shipped policy the gateway's
         -- REPLY never reaches netd, so fd77::54 and v6.example never
         -- appear; the list stops after the routers' entries.
         local ok, err = pcall(expect, t, { "10.77.0.1", "fd77::53", "fd77::54" },
