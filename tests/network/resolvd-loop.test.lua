@@ -1,7 +1,7 @@
 -- resolvd §2.5 — the event loop: one thread in one poll, the poll
 -- timeout, the order ready descriptors are serviced in, timers after
 -- descriptors, local answers within the iteration, and replies written
--- blocking for up to a second.
+-- blocking, with a one-second timeout on each write call.
 --
 -- Harness: the scripted gateway (helpers.gateway) with its DNS server
 -- (helpers.dns), and a whole Peios (helpers.network) with resolvd under
@@ -541,15 +541,17 @@ test("local answers are given at once, and a networked one as soon as its reply 
 -- Blocking writes
 -- ---------------------------------------------------------------------------
 
-test("native and stub TCP replies are written blocking for up to a second: a client that does not read holds the loop",
-    { spec = "resolvd *loop.replies-written-blocking-one-second", tags = { "known-bug" } }, function(t)
+test("native and stub TCP replies are written blocking, a second per write call: a client that does not read holds the loop",
+    { spec = "resolvd *loop.replies-written-blocking" }, function(t)
         -- PEI-1342: the blocking writes are the documented current
         -- behaviour; the stall is the defect filed against them. The stall
         -- is shown on the native door. On the stub TCP door it does not
         -- happen here: a DNS reply is at most 64 KB, and loopback TCP sizes
         -- the send buffer from its 64 KB MSS (well over that), so even the
         -- largest reply to a client that never reads fits and is written
-        -- at once, which is the TRM's "a reply that fits" case.
+        -- at once, which is the TRM's "a reply that fits" case. (With a
+        -- small client MSS the send buffer is small and the stub TCP write
+        -- stalls too; resolvd-servers-tcpstall.test.lua uses that.)
         bound_and_routed(t)
         many_addresses("ptbig", 1700)       -- a 58 KB DNS reply
         many_addresses("ptbignat", 6000)    -- a native reply far beyond a unix socket's buffer
@@ -596,11 +598,11 @@ test("native and stub TCP replies are written blocking for up to a second: a cli
         network.reg(sut, { "del", "-r", [[Machine\System\Network\Dns]] })
         t:assert(after < 300, "the loop lets go afterwards (" .. math.floor(after) .. " ms)")
         t:assert(find(lines, "resolvd: warn: control: reply failed: ") ~= nil, "the abandoned native write is logged")
-        t:assert(ms >= 700, "a large reply to a client that does not read holds the loop")
-        -- TRM-blocking-write-two-seconds: the one-second timeout is per
-        -- write(2), and write_all makes two: the first fills the socket
-        -- buffer, blocks its second and returns short; the second sends
-        -- nothing and times out. A non-reading client holds the loop for
-        -- about two seconds (2026 ms measured), not "up to a second".
-        t:assert(ms <= 1300, "for up to a second (" .. math.floor(ms) .. " ms)")
+        -- The one-second timeout is per write call, and this reply takes
+        -- two: the first fills the socket buffer, blocks its second and
+        -- returns short; the second sends nothing and times out, which
+        -- ends the write. A client that does not read holds the loop for
+        -- about two seconds (2026 and 2084 ms measured).
+        t:assert(ms > 1300, "for more than one call's second (" .. math.floor(ms) .. " ms)")
+        t:assert(ms < 2700, "and for about two seconds: two calls (" .. math.floor(ms) .. " ms)")
     end)

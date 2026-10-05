@@ -179,8 +179,8 @@ test("at the ceiling, synthetic names and cache hits are answered as usual, and 
         drain(t, rest)
     end)
 
-test("later attempts are not checked against the ceiling, so the count can pass 4 096",
-    { spec = "resolvd *engine-servers.retries-not-checked-against-ceiling", tags = { "known-bug" } }, function(t)
+test("later attempts are not checked against the ceiling, and each takes its own transaction's place, so the count stays at 4 096",
+    { spec = "resolvd *engine-servers.retries-not-checked-against-ceiling" }, function(t)
         t:assert(raised, "the descriptor limit was raised")
         local c0 = rstatus().counters
         local p = flood("d", 4300, 200)
@@ -193,9 +193,9 @@ test("later attempts are not checked against the ceiling, so the count can pass 
             c1.refused - c0.refused, max - rest))
         t:assert(sent >= 3 * CEILING - 50,
             "the held questions' second and third attempts went out at the ceiling (" .. sent .. " sent)")
-        -- TRM-inflight-cannot-pass: every retry is sent after its own
-        -- transaction is removed (a timeout's or a truncated reply's), so
-        -- the count never rises above 4 096; the most held was 4 096.
-        t:assert(max - rest > CEILING, "more than 4 096 transactions were in flight at some moment (" .. (max - rest) .. ")")
+        -- Every retry is sent after its own transaction is removed (a
+        -- timeout's, a failure's or a truncated reply's), so it takes that
+        -- transaction's place and the count never rises above 4 096.
+        t:assert_eq(max - rest, CEILING, "the count reached 4 096 and never rose above it")
         drain(t, rest)
     end)

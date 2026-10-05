@@ -658,12 +658,14 @@ test("a key repeated in the top-level map is an error; keys inside a skipped val
         })
     end)
 
--- TRM-unknown-key-large-uint: an unknown key holding a uint64 above
--- i64::MAX is not skipped: `skip` reads integers through `read_int`,
--- which refuses them, so the request fails with "malformed message:
--- unexpected value type". Every other value type below is skipped.
-test("an unknown key is skipped whatever its value: nil, boolean, integer, string, binary, array, map",
-    { spec = "resolvd *native-framing.unknown-keys-skipped", tags = { "known-bug" } }, function(t)
+-- PEI-1347 (widened): an unknown key holding a uint64 above i64::MAX is
+-- not skipped: `skip` reads integers through `read_int`, which refuses
+-- them, so the request fails with "malformed message: unexpected value
+-- type", wherever in the value the integer sits. Every other value below
+-- is skipped. The PSPU test `nri-native.unknown-keys-ignored` asserts the
+-- spec.
+test("an unknown key is skipped when its value is nil, boolean, integer, string, binary, array or map; an integer of 2^63 or more inside it fails as unexpected value type",
+    { spec = "resolvd *native-framing.unknown-keys-skipped" }, function(t)
         ready(t)
         expect_all(t, {
             { "nil", M("query", E("status"), "zz", "\xc0"), true },
@@ -676,7 +678,10 @@ test("an unknown key is skipped whatever its value: nil, boolean, integer, strin
             { "a map", M("query", E("status"), "zz", "\x82\xa1a\x01\xa1b\x92\xc0\xc2"), true },
             { "every one at once, around the query", M("z1", "\xc0", "z2", "\xc3", "query", E("status"), "z3", "\xc4\x01x",
                 "z4", "\x90", "z5", "\x80"), true },
-            { "an integer above i64::MAX (uint64)", M("query", E("status"), "zz", "\xcf" .. string.rep("\xff", 8)), true },
+            { "an integer above i64::MAX (uint64)", M("query", E("status"), "zz", "\xcf" .. string.rep("\xff", 8)), UT },
+            { "2^63 exactly (uint64)", M("query", E("status"), "zz", "\xcf\x80" .. string.rep("\0", 7)), UT },
+            { "2^63 two arrays down", M("query", E("status"), "zz", "\x91\x91\xcf\x80" .. string.rep("\0", 7)), UT },
+            { "2^63 as a map key", M("query", E("status"), "zz", "\x81\xcf\x80" .. string.rep("\0", 7) .. "\xc0"), UT },
         })
     end)
 

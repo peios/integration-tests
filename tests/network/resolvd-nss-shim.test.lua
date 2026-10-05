@@ -978,22 +978,22 @@ test("the module exports the six entry points and no other symbol, and each asks
         t:assert_eq(r[9].ttl, -77, "gethostbyaddr_r has no TTL out")
     end)
 
-test("the module links the codec and libc only: no shared object outside glibc is needed",
-    { spec = "resolvd *nss-module.links-codec-and-libc-only", tags = { "known-bug" } }, function(t)
-        -- TRM-nss-links-libgcc-s: the module's DT_NEEDED is libgcc_s.so.1,
-        -- libc.so.6 and ld-linux-x86-64.so.2; the TRM names the codec and
-        -- libc only and does not mention libgcc_s.
+test("the module needs libgcc_s.so.1, libc.so.6 and ld-linux-x86-64.so.2, and not libpeios; the codec is compiled in",
+    { spec = "resolvd *nss-module.link-dependencies" }, function(t)
+        -- PEI-1374: libgcc_s.so.1 is needed as well as libc and the loader,
+        -- so every resolving process also loads GCC's runtime. This test
+        -- asserts the module as built; the PSPU test below asserts the spec.
         local r = pt(t, { { "elf", MODULE } })
         t:log("needed: " .. list(r[1].needed))
-        local glibc = { ["libc.so.6"] = true, ["ld-linux-x86-64.so.2"] = true }
         t:assert(#r[1].needed > 0, "the module's dynamic section was read")
-        local has_libc = false
-        for _, n in ipairs(r[1].needed) do
-            if n == "libc.so.6" then has_libc = true end
+        local needed = {}
+        for i, n in ipairs(r[1].needed) do
+            needed[i] = n
             t:assert(not n:find("peios", 1, true), "it does not link libpeios (" .. n .. ")")
-            t:assert(glibc[n], "needed " .. n .. " is part of glibc")
         end
-        t:assert(has_libc, "it links libc")
+        table.sort(needed)
+        t:assert_eq(table.concat(needed, " "), "ld-linux-x86-64.so.2 libc.so.6 libgcc_s.so.1",
+            "exactly libgcc_s, libc and the dynamic loader")
     end)
 
 test("the shim links against libc and the wire codec and nothing else",

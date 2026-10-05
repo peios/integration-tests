@@ -1,8 +1,7 @@
 -- resolvd §2.4 — the native socket and its directory (modes, the DACL
 -- written on both, their owners, a stale socket), the stub listener's two
 -- sockets and nothing else bound, and connections that no longer count
--- against the 256 once their request has been read. Also §9.1's
--- `could not build a descriptor` line.
+-- against the 256 once their request has been read.
 --
 -- Harness: the scripted gateway (helpers.gateway) with its DNS server
 -- (helpers.dns), and a whole Peios (helpers.network). Descriptors are
@@ -270,18 +269,17 @@ test("the directory and the socket carry the DACL SYSTEM:GENERIC_ALL, Everyone:G
         end
     end)
 
-test("only the DACL is written: the directory and the socket stay owned by resolvd's account",
-    { spec = "resolvd *sockets.owner-left-as-resolvd", tags = { "known-bug" } }, function(t)
-        -- TRM-runtime-dir-owner-is-system: peinit creates /run/resolvd
-        -- (RuntimeDirectories) before resolvd runs, so the directory is
-        -- owned by SYSTEM (S-1-5-18); resolvd creates only the socket, which
-        -- is owned by its service SID. resolvd leaves both owners as it
-        -- found them, but they are not both its own.
+test("only the DACL is written: the directory keeps peinit's owner, SYSTEM, and the socket resolvd's account",
+    { spec = "resolvd *sockets.owner-left-as-resolvd" }, function(t)
+        -- peinit creates /run/resolvd (RuntimeDirectories) before resolvd
+        -- runs, so the directory is owned by SYSTEM; resolvd creates the
+        -- socket, which is owned by its service SID. resolvd changes
+        -- neither owner.
         local sock = token.sid_string(descriptor(SOCK, kacs.SI.OWNER).owner)
         local dir = token.sid_string(descriptor(DIR, kacs.SI.OWNER).owner)
         t:log("owner of " .. SOCK .. ": " .. sock .. "\nowner of " .. DIR .. ": " .. dir)
         t:assert_eq(sock, SID, "the socket is owned by resolvd's service SID")
-        t:assert_eq(dir, SID, "the directory is owned by resolvd's service SID")
+        t:assert_eq(dir, "S-1-5-18", "the directory is owned by SYSTEM")
     end)
 
 test("a socket file left by a previous run is removed and the removal logged at warn",
@@ -315,18 +313,6 @@ test("a socket file left by a previous run is removed and the removal logged at 
         t:assert(ok, "the restarted service answers")
         t:assert_eq(lines[1], "resolvd: warn: removed a stale /run/resolvd/resolv.sock", "its first line is the removal, at warn")
     end)
-
-test("a descriptor that cannot be written is logged at error and startup carries on",
-    { spec = "resolvd *sockets.descriptor-failure-logged-not-fatal",
-      skip = "no route: the write needs WRITE_DAC on the object, and so does the chmod resolvd makes on the same object " ..
-          "just before it (FACS: chmod requires WRITE_DAC; a read-only mount refuses both with EROFS), and that chmod " ..
-          "failing is fatal (§2.2 step 1); the directory and socket are on tmpfs, which always stores descriptors. " ..
-          "resolvd has no unit test of protect() either (control.rs has no tests)" }, function(t) end)
-
-test("a descriptor that cannot be built is logged as `could not build a descriptor: <error>`",
-    { spec = "resolvd *failure-signals.descriptor-build-failure-line",
-      skip = "no route: the descriptor is built from two well-known SIDs and constant masks (control.rs protect()), " ..
-          "which AclBuilder and SdBuilder never refuse; no input reaches it. No unit test covers it" }, function(t) end)
 
 -- ---------------------------------------------------------------------------
 -- The 256

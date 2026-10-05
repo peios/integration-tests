@@ -4,8 +4,8 @@
 -- resolvd writes the query on the first POLLOUT after connecting, so in
 -- the ordinary course nothing can come between the handshake and the
 -- write. This file makes room by stalling resolvd's single loop thread
--- with a defect the TRM records (PEI-1342, `loop.replies-written-
--- blocking-one-second`): a stub TCP reply is written blocking, so a stub
+-- with a defect the TRM records (PEI-1342,
+-- `loop.replies-written-blocking`): a stub TCP reply is written blocking, so a stub
 -- client that asks for a large cached answer and never reads stops the
 -- loop while the write waits (each write call up to a second; with
 -- partial progress, about three seconds in all). The client reading its
