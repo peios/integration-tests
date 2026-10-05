@@ -170,6 +170,13 @@ test("a failed read of watch events is logged and the watch re-armed; the key is
         t:assert(record > 16384, "the record does not fit resolvd's 16 384-byte buffer")
         t:assert(path_bytes + 1 + NAME_LEN <= 16383, "the path, value name included, is a legal one")
 
+        -- phase2 can complete before resolvd has made its socket; wait for
+        -- it to answer, so the probes below never meet a missing socket.
+        wait_until(function()
+            local s = network.call(sut, { query = "status" }, { path = SOCK })
+            return s ~= nil and s.ok == true
+        end, { timeout = 30, interval = 0.25, desc = "resolvd answering" })
+
         -- Setup: the sentinel, a static name, and the deep keys (their
         -- creation events fit the buffer and are read as usual).
         apply({ keys = {
