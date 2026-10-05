@@ -24,7 +24,7 @@
 --
 -- A connection is "pass" (handshake), "reject" (ECONNREFUSED: the RST)
 -- or "drop" (nothing within 1.5 s). Over IPv6 link-local an inbound
--- REJECT is not answered (PEI-TBD-ntfe-reject-ll6, the last test), so
+-- REJECT is not answered (PEI-1383, the last test), so
 -- link-local probes use the PASS ports, where the outcome is the
 -- backstop's DROP or the fact's PASS and no refusal is involved.
 --
@@ -380,7 +380,7 @@ test("pulling the cable makes the facts absent: Status Network goes, the kernel'
 test("an inbound REJECT on eth0 answers an IPv6 peer with a reset, at a link-local address as at a global one",
     { spec = "PKM *ntfe-seat.inbound-refusal-routed-to-peer", tags = { "known-bug" } },
     function(t)
-        -- PEI-TBD-ntfe-reject-ll6: an inbound TCP SYN to eth0's
+        -- PEI-1383: an inbound TCP SYN to eth0's
         -- link-local address that a Flow rule REJECTs is judged REJECT
         -- (verdict_reject +1 per SYN) but no reset is sent: the refusal
         -- degrades to DROP (reject_degraded +1 per SYN) and the peer's

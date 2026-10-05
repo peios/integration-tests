@@ -448,7 +448,8 @@ test("pulling the cable drops the level to absent and stops nothing; a dependent
 test("a dependent on netd:addressed is released once the machine's level has reached addressed, as netd §8.2 says",
     { spec = "netd *readiness.publish-on-change", tags = { "known-bug" } },
     function(t)
-        -- TRM-readiness-level-reached: netd §8.2 says peinit "holds a
+        -- PEI-1384 (decided: netd publishes the set of levels that hold,
+        -- peinit matches membership): netd §8.2 says peinit "holds a
         -- service that Requires = ["network:<level>"] until the level
         -- reaches it", which on netd's ordered levels reads as "at least
         -- that level". peinit matches a level exactly (peinit §7.5,
