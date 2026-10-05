@@ -47,9 +47,10 @@ end
 
 --- An impersonation token for `user`, in Administrators.
 ---
---- Administrators because the control socket's descriptor admits SYSTEM
---- and Administrators and nobody else: a principal the socket refused at
---- `connect()` would tell a test nothing about what peinit captured.
+--- Administrators because what peinit lets an administrator do is what
+--- most control tests exercise. Reaching the socket needs less: since
+--- PEI-1231 its descriptor admits SYSTEM, Administrators and every
+--- authenticated user (peinit TRM §10.1).
 --- SeChangeNotifyPrivilege because a minted token holds no privileges at
 --- all, and without it the walk to /run/services/peinit fails on
 --- traverse before the socket is reached.

@@ -11,9 +11,9 @@
 -- requests are later sent under can be made to differ on purpose.
 --
 -- The oracle is a `ServiceSecurity` descriptor that tells the two apart.
--- The control socket admits only SYSTEM and Administrators, so the
--- second principal is a member of Administrators — otherwise the kernel
--- would refuse it at `connect()` and peinit would never be asked. The
+-- The second principal is a member of Administrators (helpers.peinit_client's
+-- mint_admin), though since PEI-1231 the control socket admits any
+-- authenticated user, so the kernel would let a plain user connect too. The
 -- descriptor on `pt-peer` then grants that principal's user SID every
 -- service right and SYSTEM none: a `status` evaluated as the minted user
 -- is answered, and the same `status` evaluated as SYSTEM is refused.
