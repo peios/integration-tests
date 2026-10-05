@@ -412,16 +412,43 @@ test("non-MAC LSMs stack safely alongside KACS",
         local names, raw = registered_lsms()
         local present = {}
         for _, n in ipairs(names) do present[n] = true end
+        -- Yama is not among them: it is not built (the two cases below).
         local allowed = { capability = true, pkm = true, landlock = true,
-                          lockdown = true, yama = true, integrity = true,
+                          lockdown = true, integrity = true,
                           ima = true, evm = true, safesetid = true,
                           loadpin = true }
         local found = 0
         for _, n in ipairs(names) do
             t:assert(allowed[n], n .. " is not a permitted non-MAC LSM: " .. tostring(raw))
-            if n == "landlock" or n == "lockdown" or n == "yama" then found = found + 1 end
+            if n == "landlock" or n == "lockdown" then found = found + 1 end
         end
         t:assert(found > 0,
-            "at least one of landlock/lockdown/yama stacks with KACS: " .. tostring(raw))
+            "at least one of landlock/lockdown stacks with KACS: " .. tostring(raw))
+    end)
+
+-- Yama is not built: its relational ptrace_scope would decide every
+-- attach to a non-descendant ahead of the process descriptor and PIP
+-- dominance (§3.7). "Not built" has two independent witnesses: the
+-- registered stack in securityfs/lsm, and the kernel.yama sysctl
+-- directory Yama registers when it initialises. (The kernel-only guest
+-- carries no copy of the build configuration: its root is the
+-- initramfs, and the composed root holds only /boot.)
+
+test("Yama is not registered in the LSM stack",
+    { spec = "PKM *cred.dac.yama-not-built" }, function(t)
+        local names, raw = registered_lsms()
+        local present = {}
+        for _, n in ipairs(names) do present[n] = true end
+        t:assert(present.pkm, "the list is the real one — KACS is on it: " .. tostring(raw))
+        t:assert(not present.yama, "yama is not registered: " .. tostring(raw))
+    end)
+
+test("Yama's ptrace_scope sysctl does not exist",
+    { spec = "PKM *cred.dac.yama-not-built" }, function(t)
+        -- The control: /proc/sys/kernel is there and populated.
+        t:assert(sys.stat(vm, "/proc/sys/kernel/osrelease"), "/proc/sys/kernel is mounted")
+        local st, errno = sys.stat(vm, "/proc/sys/kernel/yama")
+        t:assert(not st, "the kernel.yama sysctl directory is absent")
+        t:assert_eq(errno, sys.E.NOENT, "ENOENT: " .. sys.errname(errno or 0))
     end)
 
