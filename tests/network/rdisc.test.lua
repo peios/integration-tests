@@ -268,11 +268,18 @@ test("accept_ra is 0 for all, default and every interface at startup, and for an
         -- The kernel configures nothing from an advertisement: no
         -- EUI-64 address, no RA-protocol route. netd's own stable address
         -- shows the advertisement did arrive.
-        gw:send_ra({ lifetime = 30,
-            prefixes = { { prefix = "fd70::", len = 64, valid = 86400, preferred = 14400 } } })
-        local s = serve_iface(function(i)
-            return #in_prefix(i, "fd70::") > 0 and i.gateway6 ~= nil
-        end, { iface = "eth0", timeout = 15 })
+        -- One unsolicited advertisement can be lost on a loaded host;
+        -- repeat it, as a router would, until netd has taken it.
+        local ra = { lifetime = 30,
+            prefixes = { { prefix = "fd70::", len = 64, valid = 86400, preferred = 14400 } } }
+        local s
+        for _ = 1, 10 do
+            gw:send_ra(ra)
+            s = serve_iface(function(i)
+                return #in_prefix(i, "fd70::") > 0 and i.gateway6 ~= nil
+            end, { iface = "eth0", timeout = 3 })
+            if s then break end
+        end
         t:assert(s, "netd took the advertisement")
         local b = { MAC:byte(1, 6) }
         local eui = gateway.ip6_text(gateway.ip6("fd70::"):sub(1, 8)

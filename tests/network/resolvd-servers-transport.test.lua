@@ -233,17 +233,22 @@ test("TCP: a connection that is refused, or closed before a whole reply, fails t
         -- The last SYN can still be queued on the gateway's packet socket
         -- when the question ends; read it before counting.
         gw:pump(300)
-        local syns = 0
+        -- A connection attempt is a source port: a SYN retransmitted
+        -- under load (its RST lost or late) is the same attempt.
+        local ports, syns = {}, 0
         for _, f in ipairs(gw.seen) do
             if f.ip and f.ip.protocol == 6 then
                 local raw = f.raw
                 local l4 = 15 + (raw:byte(15) & 0xF) * 4
-                local dport = string.unpack(">I2", raw, l4 + 2)
+                local sport, dport = string.unpack(">I2I2", raw, l4)
                 local flags = raw:byte(l4 + 13)
-                if dport == 53 and flags & 0x12 == 0x02 then syns = syns + 1 end
+                if dport == 53 and flags & 0x12 == 0x02 and not ports[sport] then
+                    ports[sport] = true
+                    syns = syns + 1
+                end
             end
         end
-        t:assert_eq(syns, 3, "three connection attempts, each refused")
+        t:assert_eq(syns, 3, "three connection attempts (distinct source ports), each refused")
         t:assert(elapsed < 1.5, string.format("each refusal failed the attempt at once (%.2f s)", elapsed))
     end)
 

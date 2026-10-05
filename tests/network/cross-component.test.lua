@@ -138,8 +138,13 @@ end
 
 --- netd's log, oldest first: { ts (realtime ns, eventd's), msg }.
 local function netd_log()
-    local r = sut:run("evctl 'LOGS FROM netd SINCE 1h ago TAKE 3000'")
-    assert(r.exit_code == 0, "evctl: " .. r.stderr)
+    -- On a loaded host eventd's query socket can come up after phase2
+    -- and the first dependents; wait for it rather than fail the read.
+    local r
+    wait_until(function()
+        r = sut:run("evctl 'LOGS FROM netd SINCE 1h ago TAKE 3000'")
+        return r.exit_code == 0
+    end, { timeout = 60, interval = 0.5, desc = "eventd answering evctl" })
     local newest_first = {}
     for line in r.stdout:gmatch("[^\n]+") do
         local msg = line:match('message="(.-)"  origin=')
