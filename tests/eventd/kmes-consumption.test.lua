@@ -504,7 +504,8 @@ test("without SeSecurityPrivilege in its token eventd cannot attach and fails to
     })
     -- No stage wait: the agent is up before Phase 2, and the window before
     -- recovery is what the assertions need.
-    local nosec = peinit.boot({ name = "ev-kmes-nosec", cpus = 2, files = seed, stage = false })
+    local nosec = peinit.boot({ name = "ev-kmes-nosec", cpus = 2,
+        files = peinit.merge(seed, eventd.override_files()), stage = false })
     -- Assert quickly: once eventd's restarts are exhausted, the Critical
     -- policy takes the machine (and this agent) to recovery.
     local status

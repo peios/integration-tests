@@ -30,6 +30,18 @@ local nc = eventd.boot({
     config = { { name = "LogRetentionDays", type = "dword", data = 11 } },
 })
 
+test("an eventd staged through PT_EVENTD_ROOT is the one that runs", {
+    skip = not os.getenv("PT_EVENTD_ROOT"),
+}, function(t)
+    local staged = eventd.override_files()["usr/sbin/eventd"]
+    t:assert(staged, "PT_EVENTD_ROOT carries usr/sbin/eventd")
+    local running = vm:read_file("/proc/" .. eventd.pid(vm) .. "/exe")
+    t:assert(running == staged[1], "the running eventd is the staged binary ("
+        .. #running .. " bytes running, " .. #staged[1] .. " staged)")
+    local psb = vm:read_file("/proc/" .. eventd.pid(vm) .. "/psb")
+    t:assert(psb:find("pip_trust=8192", 1, true), "and it carries the TCB signature: " .. psb)
+end)
+
 test("eventd answers on its query socket once the boot is done", {}, function(t)
     local rows = eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " TAKE 5")
     t:assert(#rows >= 1, "a startup record is queryable: " .. #rows)

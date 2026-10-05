@@ -205,6 +205,34 @@ function M.config_seed(values, extra_keys)
     return peinit.seed("zz-pt-eventd-config", keys)
 end
 
+--- An unreleased eventd, staged over the image's, when the run asks for one.
+---
+--- `PT_EVENTD_ROOT` names a host directory laid out as a package payload
+--- (`usr/sbin/eventd`, `usr/bin/evctl`): normally the unpacked payloads of
+--- a `pekit package --local` build, whose binaries are built and PIP-signed
+--- exactly as a release's are. Each regular file under it is staged into
+--- the root before peinit runs, so every boot of the run starts that eventd
+--- from its first instruction. This is how a fix is proven against the
+--- suite before it is released. Unset, it stages nothing.
+---
+---   PT_EVENTD_ROOT=/path/to/root ~/.local/bin/ptrun tests/eventd/
+function M.override_files()
+    local root = os.getenv("PT_EVENTD_ROOT")
+    if not root or root == "" then return {} end
+    local files = {}
+    local list = assert(io.popen("cd '" .. root .. "' && find usr -type f", "r"))
+    for rel in list:lines() do
+        local f = assert(io.open(root .. "/" .. rel, "rb"))
+        local bytes = f:read("*a")
+        f:close()
+        local exec = rel:match("^usr/s?bin/") ~= nil
+        files[rel] = { bytes, exec = exec }
+    end
+    list:close()
+    assert(next(files), "PT_EVENTD_ROOT " .. root .. " holds no files under usr/")
+    return files
+end
+
 --- Boot a peinit VM and wait until eventd answers a query.
 ---
 --- opts (all optional):
@@ -225,7 +253,7 @@ end
 --- exactly one of each.
 function M.boot(opts)
     opts = opts or {}
-    local files = {}
+    local files = M.override_files()
     if opts.noncritical then
         local nc = opts.noncritical == true and {} or opts.noncritical
         for k, v in pairs(M.service_seed(nc)) do files[k] = v end
