@@ -74,8 +74,16 @@ local function resident(name, target, boot)
     return { path = [[Machine\System\Services\]] .. name, values = values }
 end
 
+-- netd's log lines are this file's clock for when a level was published,
+-- and they reach eventd through peinit's non-blocking relay into a log
+-- socket that queues max_dgram_qlen datagrams (10 by default): on a
+-- loaded host a burst overflows it and lines are dropped, as the log path
+-- allows (eventd §4.1, PSPU §3.4). A full run once lost every readiness
+-- line after the first. The queue length is read when a socket is made,
+-- and eventd makes its socket at boot, so it is raised on the command line.
 local sut = network.boot({
     bridges = { lan }, gateway = gw,
+    append = "sysctl.net.unix.max_dgram_qlen=512",
     files = peinit.seed("zz-pt-cross", {
         { path = [[Machine\System]] },
         { path = [[Machine\System\Services]] },
@@ -86,6 +94,8 @@ local sut = network.boot({
         resident("pt-x-addressed2", "netd:addressed", false),
     }),
 })
+assert(sut:read_file("/proc/sys/net/unix/max_dgram_qlen"):match("%d+") == "512",
+    "the log socket's queue was raised")
 
 -- ---------------------------------------------------------------------------
 -- Local instruments
