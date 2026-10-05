@@ -130,13 +130,13 @@ test("a flow record carries conntrack's view of the flow and NTFE's extension",
         t:assert_eq(f.sentences[0].generation, s.generation, "the sentence in slot 0")
         t:assert_eq(f.sentences[0].rule_hash, ntfe.name_hash("tagger"), "naming its rule")
         t:assert_eq(f.sentences[1].generation, 0, "an empty slot 1")
-        t:assert_eq(f.n_tags, 8, "and of the nine tags it carries, eight")
+        t:assert_eq(f.n_tags, 9, "and the nine tags it carries, by count")
         local listed = 0
         for hash, value in pairs(f.tags) do
             listed = listed + 1
             t:assert_eq(hash, ntfe.name_hash("t" .. (value - 100)), "each by its name's hash, with its value")
         end
-        t:assert_eq(listed, 8, "eight tags listed")
+        t:assert_eq(listed, 8, "of which the record lists eight")
         sys.close(peer, c); sys.close(vm, a); sys.close(vm, l)
 
         -- ICMP: the identifier stands where the source port would, and

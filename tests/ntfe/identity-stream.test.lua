@@ -114,18 +114,9 @@ test("an end that could not be attributed is confessed in the status and on the 
 
 test("an end that could not be attributed is confessed on the flow record's slot",
     { spec = "PKM *ntfe-identity.unattributed-end-confessed",
-      tags = { "known-bug" },
-      -- PEI-1308. ntfe_flow_identity() (flow.c)
-      -- counts identity_unresolved and the view carries the flag to the
-      -- event, but it skips recording an end whose kind is ABSENT, and
-      -- the inbound seat's unseen loopback sender is exactly that
-      -- (identity.c returns ABSENT + unresolved). So the record's slot 0
-      -- has owner_recorded clear and the dump reports it all zero:
-      -- unresolved false, while the event for the same judgment says
-      -- unresolved (the test above). The other two causes the TRM
-      -- names (no KACS state, an unstamped inet socket) are recorded,
-      -- but no task on a running system lacks a token, so the guest
-      -- cannot reach them.
+      -- The unseen loopback sender (ABSENT + unresolved) once left its
+      -- slot all zero (PEI-1308). The other two causes the TRM names (no
+      -- KACS state, an unstamped inet socket) no guest task can reach.
     }, function(t)
         E:replace(id.policy())
         local _, _, rec = inject(t, 7511)

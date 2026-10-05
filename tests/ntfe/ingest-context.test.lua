@@ -212,17 +212,9 @@ test("an interface whose Status cannot be read is skipped, and the rest are read
 
 test("an interface whose key cannot be enumerated is skipped, and the stage does not refuse",
     { spec = "PKM *ntfe-ingest.context-stage-never-refuses " ..
-             "PKM *ntfe-ingest.unreadable-record-skipped", tags = { "known-bug" },
-      -- PEI-1306. The TRM: "Nothing in the
-      -- stage refuses. A record that cannot be read is logged and
-      -- skipped." An interface whose own key fails its ENUM_CHILDREN
-      -- (the round trip that finds Status) aborts the whole stage
-      -- instead: ntfe_interface_child_cb returns the error from
-      -- ntfe_for_each_child, ntfe_refresh_context fails, the new table
-      -- is not published (lo keeps the network it stood on before) and
-      -- the walk's last_ingest_error is EIO (observed: 5). The same
-      -- code path fails the stage on a failed enumeration of
-      -- `Networks\` or `Interfaces\` themselves.
+             "PKM *ntfe-ingest.unreadable-record-skipped",
+      -- An interface whose own key failed its ENUM_CHILDREN once aborted
+      -- the whole stage with EIO (PEI-1306).
     }, function(t)
         ing.replace_inventory(E, NETWORKS, { ["if-lo"] = { Name = "lo", Network = DMZ } })
         ing.stage_inventory(E, NETWORKS, {
@@ -239,6 +231,32 @@ test("an interface whose key cannot be enumerated is skipped, and the stage does
         t:assert_eq(s.last_ingest_error, 0, "the walk does not fail")
         t:assert_eq(s.contexts, 1, "the unreadable interface is skipped")
         t:assert(c.id, "and the readable one has its new context")
+    end)
+
+test("a Networks or Interfaces list that cannot be read keeps the previous table, and the rules stage stands",
+    { spec = "PKM *ntfe-ingest.unreadable-list-keeps-previous-table" }, function(t)
+        for _, list in ipairs({ "Networks", "Interfaces" }) do
+            ing.replace(E, lab_probes())
+            local before = ing.replace_inventory(E, NETWORKS, { ["if-lo"] = { Name = "lo", Network = LAB } })
+            -- One walk reads a new rule and an inventory that moves lo to
+            -- the other network, and cannot list `list`.
+            ing.stage(E, lab_probes({ fresh = { ["DstPort.Equal"] = 6740, Priority = 1, Actions = { "REJECT" } } }))
+            ing.stage_inventory(E, NETWORKS, { ["if-lo"] = { Name = "lo", Network = DMZ } })
+            local s
+            failing(lcs.OP.ENUM_CHILDREN, E.src:lookup(NET .. "\\" .. list), function()
+                ing.poke(E)
+                s = ing.settle(E)
+            end)
+            local fresh, c, dmz = ing.verdict(vm, 6740), lo_context(), ing.verdict(vm, 6704)
+            t:assert(s.last_ingest_error ~= 0, list .. ": the failure is the walk's error: " .. s.last_ingest_error)
+            t:assert_eq(s.generation, before.generation + 1, list .. ": one generation, the rules'")
+            t:assert_eq(fresh, "reject", list .. ": the new rule is in force")
+            t:assert_eq(s.contexts, 1, list .. ": the table still holds its one entry")
+            t:assert(c.id and c.name and c.trust, list .. ": lo keeps the network it stood on")
+            t:assert_eq(dmz, "pass", list .. ": and is not moved to the other one")
+        end
+        ing.replace(E, lab_probes())
+        ing.replace_inventory(E, NETWORKS, { ["if-lo"] = { Name = "lo", Network = LAB } })
     end)
 
 -- ---- bounds ---------------------------------------------------------------

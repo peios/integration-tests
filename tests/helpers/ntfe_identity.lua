@@ -158,7 +158,8 @@ function M.guid_pcds(b)
 end
 
 --- The same 16 bytes hex-encoded in storage order with 8-4-4-4-12
---- hyphens: what the kernel's bridge renders today.
+--- hyphens: what the kernel's bridge rendered before PEI-1309, kept to
+--- show that text no longer names the process.
 function M.guid_storage_order(b)
     local h = (b:gsub(".", function(c) return string.format("%02x", c:byte()) end))
     return h:sub(1, 8) .. "-" .. h:sub(9, 12) .. "-" .. h:sub(13, 16) .. "-"

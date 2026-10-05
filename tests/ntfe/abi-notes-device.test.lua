@@ -466,6 +466,29 @@ test("a gap in the sequence is exactly the number of records the ring overwrote"
         sys.close(vm, fd)
     end)
 
+test("a read that faults has already taken its records: they are lost, and only the gap says so",
+    { spec = "PKM *ntfe-abi-notes.read-efault-consumes-records" }, function(t)
+        local fd = raw.open(vm)
+        quiet(vm, fd)
+        events(1)
+        local last = raw.drain(vm, fd)
+        t:assert_eq(#last, 1, "one record read")
+        local s0 = E:status()
+        events(3)
+        local ret, errno = raw.read(vm, fd, 3 * ntfe.EVENT_SIZE, { addr = raw.BAD_ADDR })
+        t:assert_eq(ret, -1, "a read of three into an unmapped buffer copies nothing")
+        t:assert_eq(errno, sys.E.FAULT, "and faults")
+        events(1)
+        local after = raw.drain(vm, fd)
+        t:assert_eq(#after, 1, "the three are gone from the ring: only the next one is there")
+        if after[1] then
+            t:assert_eq(after[1].seq - last[1].seq - 1, 3, "and the sequence skips the three")
+        end
+        t:assert_eq(E:status().events_dropped, s0.events_dropped,
+            "which no counter records: events_dropped did not move")
+        sys.close(vm, fd)
+    end)
+
 test("events_dropped is the running total of overwritten records",
     { spec = "PKM *ntfe-abi-notes.events-dropped-running-total" }, function(t)
         local fd = raw.open(vm)

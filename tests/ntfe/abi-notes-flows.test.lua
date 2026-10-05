@@ -243,14 +243,9 @@ test("`sentence_rule_hash` is FNV-1a-64 of the attributing path relative to the 
     end)
 
 test("`sentence_rule_hash` of a path longer than the event's field is of the whole path",
-    { spec = "PKM *ntfe-abi-notes.flow-rec-rule-hash-fnv1a-64", tags = { "known-bug" },
-      -- PEI-1308. flow.c computes the hash
-      -- over `out.attributed`, the copy already cut to 95 bytes for the
-      -- event, so a rule whose path is longer hashes as its first 95
-      -- bytes. Seen live: a 121-byte path's sentence carries
-      -- hash(path:sub(1, 95)), not hash(path). Nothing in flow.c marks
-      -- the truncation as intended; the hash should be taken over the
-      -- untruncated attribution.
+    { spec = "PKM *ntfe-abi-notes.flow-rec-rule-hash-fnv1a-64",
+      -- The hash was once taken over the event's 95-byte copy of the
+      -- path (PEI-1308).
     }, function(t)
         local a, b = string.rep("a", 60), string.rep("b", 60)
         flow_policy({ all = { Actions = { "PASS" } },
@@ -264,6 +259,16 @@ test("`sentence_rule_hash` of a path longer than the event's field is of the who
         t:assert_eq(f.sentences[0].rule_hash, ntfe.name_hash(a .. "/" .. b),
             "the hash is of the attributing path, all 121 bytes of it")
     end)
+
+test("`fail-closed` is never a sentence's: a failed evaluation is not cached",
+    { spec = "PKM *ntfe-abi-notes.flow-rec-fail-closed-never-cached", covered_by = "kunit:pkm_kunit_ntfe",
+      skip = "an evaluation fails only when its GFP_ATOMIC allocation is refused, which " ..
+             "the kernel under test cannot be made to do (CONFIG_FAULT_INJECTION is not " ..
+             "set), so no guest flow can carry the outcome; runs under " ..
+             "ntfe_kunit_eval_failure_fails_closed, which fails a Flow dispatch's " ..
+             "evaluation, finds slot 0's generation still 0, and sees the flow's next " ..
+             "packet judged and sentenced" },
+    function(t) end)
 
 -- ---- conntrack's view ----
 
@@ -363,12 +368,8 @@ test("`tag_hash` and `tag_value` hold up to 8 present tags by name hash and valu
     end)
 
 test("`n_tags` is the flow's total, so above 8 some are not listed",
-    { spec = "PKM *ntfe-abi-notes.flow-rec-n-tags-is-total", tags = { "known-bug" },
-      -- PEI-1308. flow.c fills `n_tags` as
-      -- min(peios_ntfe_tags_snapshot(...), PEIOS_NTFE_FLOW_MAX_TAGS): the
-      -- snapshot returns the full count of present tags, and the record
-      -- clamps it to 8. Seen live: a flow carrying ten tags reports
-      -- n_tags 8, so a reader cannot tell that two were left out.
+    { spec = "PKM *ntfe-abi-notes.flow-rec-n-tags-is-total",
+      -- `n_tags` was once clamped to the 8 listed (PEI-1308).
     }, function(t)
         tagging(7747, 10)
         local rx, tx = udp_to_peer(7746, 7747)
@@ -435,14 +436,8 @@ test("the per-slot identity arrays are flattened at fixed strides: slot 1's user
     end)
 
 test("each slot of a loopback flow holds its own end's identity",
-    { spec = "PKM *ntfe-abi-notes.flow-rec-owner-kind-per-slot", tags = { "known-bug" },
-      -- PEI-1301. The outbound seat resolves a
-      -- loopback flow's other end with ntfe_identity_receiver(), whose
-      -- early-demux shortcut takes skb->sk when it is a full socket; at
-      -- LOCAL_OUT skb->sk is the *sending* socket, so slot 1 records the
-      -- sender. Seen live: a worker (pid 221) connecting to a listener
-      -- the agent (pid 1) owns gives owner_pid[0] = owner_pid[1] = 221,
-      -- and both Flow events of the flow say local = remote = 221.
+    { spec = "PKM *ntfe-abi-notes.flow-rec-owner-kind-per-slot",
+      -- Slot 1 once recorded the sender (PEI-1301).
     }, function(t)
         local W = vm:spawn_worker()
         local wpid = W:syscall(sys.NR.getpid).ret

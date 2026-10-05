@@ -118,6 +118,52 @@ test("the hook framework and conntrack are kept",
             "a REJECT is phrased as a reset: " .. tostring(why))
     end)
 
+test("with conntrack's helpers off no flow is expected by another, and Related is false on every one",
+    { spec = "PKM *ntfe-engine.helpers-off-related-never-true" }, function(t)
+        -- An FTP control connection is where a helper would read a PORT
+        -- command and expect the data connection it names. With none,
+        -- that connection is a flow of its own like any other.
+        E:replace({
+            RawPacket = PASS_ALL, Packet = PASS_ALL,
+            Flow = {
+                all = { Actions = { "PASS" } },
+                related = { ["Related.Equal"] = 1, Priority = 10, Actions = { "REJECT" } },
+            },
+        })
+        local ctl_l = assert(ntfe.tcp_listen(vm, "127.0.0.1", 21))
+        local data_l = assert(ntfe.tcp_listen(vm, "127.0.0.1", 6106))
+        local fds = {}
+        local _, events = E:during(function()
+            local ctl = assert(ntfe.tcp_connect(vm, "127.0.0.1", 21))
+            local srv = assert(ntfe.tcp_accept(vm, ctl_l))
+            fds = { ctl, srv }
+            -- 23 * 256 + 218 = 6106.
+            ntfe.send(vm, ctl, "PORT 127,0,0,1,23,218\r\n")
+            t:assert(ntfe.recv(vm, srv), "a PORT command crosses the control connection")
+            ntfe.send(vm, srv, "200 PORT command successful.\r\n")
+            ntfe.recv(vm, ctl)
+            local data, why = ntfe.tcp_connect(vm, "127.0.0.1", 6106, 500)
+            t:assert(data, "the data connection it names is made: " .. tostring(why))
+            if data then fds[#fds + 1] = data end
+            local u = assert(ntfe.udp_connect(vm, "127.0.0.1", 69))
+            ntfe.send(vm, u, "\0\1file\0octet\0")
+            fds[#fds + 1] = u
+        end)
+        local flow_judged = ntfe.matching(events, { layer = ntfe.LAYER.FLOW })
+        t:assert(#ntfe.matching(flow_judged, { dst_port = 6106 }) >= 1,
+            "the data connection was judged by the Flow layer: " .. ntfe.describe(flow_judged))
+        t:assert_eq(#ntfe.matching(events, { attributed = "related" }), 0,
+            "and no flow, control, data or TFTP, was Related: " .. ntfe.describe(flow_judged))
+        local flows = assert(E:flows())
+        t:assert(#flows > 0, "conntrack holds the flows")
+        for _, f in ipairs(flows) do
+            t:assert_eq(f.related, 0, string.format(
+                "and the dump calls none of them related (%d -> %d)", f.src_port, f.dst_port))
+        end
+        for _, fd in ipairs(fds) do sys.close(vm, fd) end
+        sys.close(vm, ctl_l); sys.close(vm, data_l)
+    end)
+
 test("every policy frontend is configured out",
     { spec = "PKM *ntfe-engine.policy-frontends-configured-out" }, function(t)
         for _, path in ipairs({

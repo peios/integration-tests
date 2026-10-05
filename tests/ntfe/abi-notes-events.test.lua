@@ -492,14 +492,9 @@ test("a PROGRAM end carries its process's guid, pid and comm, its user SID and s
     end)
 
 test("on a loopback flow, each end's fields are its own program's",
-    { spec = "PKM *ntfe-abi-notes.event-program-end-fields", tags = { "known-bug" },
-      -- PEI-1301. At the outbound seat the other
-      -- end of a loopback flow is resolved by ntfe_identity_receiver(),
-      -- whose early-demux shortcut takes skb->sk when it is a full
-      -- socket; at LOCAL_OUT that is the *sending* socket, so the
-      -- receiver is reported as the sender and recorded so for the flow.
-      -- Seen live: a worker (pid 221) connecting to a listener the agent
-      -- (pid 1) owns gives, at both seats, local_pid = remote_pid = 221.
+    { spec = "PKM *ntfe-abi-notes.event-program-end-fields",
+      -- The receiver was once reported as the sender at both seats
+      -- (PEI-1301).
     }, function(t)
         local W = vm:spawn_worker()
         local wpid = W:syscall(sys.NR.getpid).ret

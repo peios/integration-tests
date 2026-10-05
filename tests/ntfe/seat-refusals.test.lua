@@ -229,19 +229,12 @@ test("every seat can refuse IP traffic, in both families: ingress, LOCAL_IN and 
     end)
 
 test("every seat can refuse IP traffic, in both families: egress",
-    { spec = "PKM *ntfe-seat.every-seat-can-refuse-ip",
-      tags = { "known-bug" },
-      -- PEI-1300. At the egress seat
-      -- skb->data is at the Ethernet header, but the frame-less reject
-      -- builders read the transport header at ip_hdrlen() from skb->data,
-      -- so the answer quotes the wrong bytes. Seen live by tapping lo: a
-      -- Packet-layer REJECT of an outbound SYN to port 7024 forges a RST
-      -- from port 16390 to port 16384 (0x4006, 0x4000: the IP header's
-      -- frag/TTL/protocol words), which no socket owns; the connect
-      -- times out with refusals_emitted +1. A UDP send refused there
-      -- puts nothing on loopback at all and the socket never fails.
-      -- Upstream, nft_reject_netdev registers for NF_NETDEV_INGRESS
-      -- only, so these builders were never run at an egress hook there.
+    { spec = "PKM *ntfe-seat.every-seat-can-refuse-ip PKM *ntfe-seat.refusal-built-from-network-header",
+      -- At the egress seat skb->data is at the Ethernet header, and the
+      -- frame-less reject builders read from skb->data as if it were the
+      -- IP header; the answer was once built from the wrong bytes (a RST
+      -- from port 16390 to 16384) until the packet was pulled to its
+      -- network header for the build (PEI-1300).
     }, function(t)
         refuse_at_each(t, {
             { "Packet", ntfe.SEAT.EGRESS, ntfe.LAYER.PACKET, false },
@@ -281,6 +274,34 @@ test("from the ingress seat the refusal goes straight back to the wire peer, its
         sys.close(vm, l)
     end)
 
+test("the ingress seat refuses only on an Ethernet device: at loopback's, a REJECT degrades",
+    { spec = "PKM *ntfe-seat.ingress-refusal-needs-ethernet" }, function(t)
+        -- One rule for every inbound frame to the port, whatever device
+        -- it arrives on; `in` keeps it off loopback's egress seat.
+        use({ RawPacket = { refused = { ["Direction.Equal"] = "in", ["DstPort.Equal"] = 7040,
+                                        Actions = { "REJECT" } } } })
+        local l = assert(ntfe.tcp_listen(vm, "0.0.0.0", 7040))
+        local d1 = E:during(function()
+            local _, why = ntfe.tcp_connect(peer, net.addr, 7040, 500)
+            t:assert_eq(why, sys.E.CONNREFUSED, "veth0 is Ethernet: its ingress seat refuses the peer")
+        end)
+        t:assert_eq(d1.refusals_emitted, 1, "with a refusal sent")
+        local delta, events = E:during(function()
+            local _, why = ntfe.tcp_connect(vm, "127.0.0.1", 7040, 300)
+            t:assert_eq(why, "timeout", "on loopback the same rule answers nothing")
+        end)
+        local ev = ntfe.matching(events, { attributed = "refused", seat = ntfe.SEAT.INGRESS, ifindex = LO })
+        t:assert_eq(#ev, 1, "the SYN was refused at loopback's ingress seat: " .. ntfe.describe(events))
+        if ev[1] then
+            t:assert_eq(ev[1].verdict, REJECT, "the event still says REJECT")
+            t:assert(ev[1].reject_degraded, "flagged REJECT_DEGRADED")
+        end
+        t:assert_eq(delta.reject_degraded, 1, "counted as degraded")
+        t:assert_eq(delta.refusals_emitted, 0, "and nothing was sent")
+        t:assert(not ntfe.tcp_accept(vm, l, 20), "the dropped SYN never reached the listener")
+        sys.close(vm, l)
+    end)
+
 test("from every other seat the refusal is routed and sent through LOCAL_OUT",
     { spec = "PKM *ntfe-seat.non-ingress-refusal-routed-through-local-out" }, function(t)
         local l = assert(ntfe.tcp_listen(vm, net.addr, 7023))
@@ -301,9 +322,7 @@ test("from every other seat the refusal is routed and sent through LOCAL_OUT",
         t:assert_eq(delta.refusals_emitted, 1, "the outbound refusal was sent")
         t:assert_eq(delta.refusals_bypassed, 4,
             "across LOCAL_OUT, loopback's two device seats and LOCAL_IN")
-        -- And from egress, the same routed path. (What it carries from
-        -- there is wrong — see the egress known-bug above — but the route
-        -- it takes is the one this statement is about.)
+        -- And from egress, the same routed path.
         use({ Packet = { out = on_port(7024, "REJECT") } })
         delta = E:during(function()
             ntfe.tcp_connect(vm, net.peer_addr, 7024, 100)
@@ -377,40 +396,29 @@ test("an outbound refusal fails the local socket at once, and nothing reaches th
         for _, fd in ipairs({ l1, l2, l6 }) do sys.close(peer, fd) end
     end)
 
-test("an outbound IPv6 Prohibited refusal fails a TCP connect at once",
-    { spec = "PKM *ntfe-seat.outbound-refusal-fails-local-socket-at-once",
-      tags = { "known-bug" },
-      -- PEI-1307. Seen live: a
-      -- 100 ms connect times out with refusals_emitted +1; a 2.5 s one
-      -- fails EACCES with refusals_emitted +2, i.e. only at the first SYN
-      -- retransmission's refusal. The IPv4 twin (ICMP 3/13) fails at
-      -- once, and a Refused IPv6 connect (a RST) does too. Consistent
-      -- with the first ICMPv6 error reaching tcp_v6_err while connect()
-      -- still owns the socket and being filed as a soft error — a
-      -- hypothesis, since the IPv4 path has the same owned-socket check.
-    }, function(t)
+test("an outbound IPv6 Prohibited refusal fails a TCP connect at once, with EACCES",
+    { spec = "PKM *ntfe-seat.outbound-refusal-fails-local-socket-at-once" },
+    -- The refused SYN is refused inside connect(), which holds the
+    -- socket; TCP files an ICMP error reaching a held socket as a soft
+    -- one. The answer is sent a tick later instead (PEI-1307), so it
+    -- fails the connect long before the first SYN retransmission (1 s).
+    function(t)
         use({ Flow = { prohibited = on_port(7029, "REJECT(Prohibited)") } })
         local l = assert(ntfe.tcp_listen(peer, PEER6, 7029))
-        local _, why = ntfe.tcp_connect(vm, PEER6, 7029, 100)
-        t:assert(why ~= "timeout", "the connect fails before a SYN retransmission: " .. tostring(why))
+        local _, why = ntfe.tcp_connect(vm, PEER6, 7029, 300)
+        t:assert_eq(why, sys.E.ACCES, "the connect fails before a SYN retransmission")
         sys.close(peer, l)
     end)
 
-test("an outbound IPv6 Prohibited refusal fails the socket with ECONNREFUSED or EHOSTUNREACH",
-    { spec = "PKM *ntfe-seat.outbound-refusal-fails-local-socket-at-once",
-      tags = { "known-bug" },
-      -- PEI-1311 (TRM). ICMPv6 type 1 code 1
-      -- maps to EACCES in icmpv6_err_convert, so a Prohibited refusal
-      -- over IPv6 fails the socket with EACCES, not either errno the TRM
-      -- names; the code plainly intends the kernel's own mapping, so the
-      -- TRM's list is the thing to widen. Seen live on a UDP send.
-    }, function(t)
+test("an outbound IPv6 Prohibited refusal fails a UDP socket with EACCES",
+    { spec = "PKM *ntfe-seat.outbound-refusal-fails-local-socket-at-once" },
+    -- ICMPv6 type 1 code 1 maps to EACCES in icmpv6_err_convert.
+    function(t)
         use({ Flow = { prohibited = on_port(7029, "REJECT(Prohibited)") } })
         local u = assert(ntfe.udp_connect(vm, PEER6, 7029))
         ntfe.send(vm, u, "x")
         local _, why = ntfe.recv(vm, u, 200)
-        t:assert(why == sys.E.CONNREFUSED or why == sys.E.HOSTUNREACH,
-            "the socket fails with one of the two: " .. tostring(why))
+        t:assert_eq(why, sys.E.ACCES, "the socket fails with EACCES")
         sys.close(vm, u)
     end)
 
@@ -536,6 +544,71 @@ test("a REJECT with nothing to send degrades to DROP: counted, flagged, its kind
             t:assert_eq(delta.reject_degraded, 1, what .. ": counted in reject_degraded")
             t:assert_eq(delta.refusals_emitted, 0, what .. ": and nothing was sent")
         end
+        sys.close(vm, sink)
+    end)
+
+test("a first fragment is declined by the builders' checksum check, one they do not verify is answered, and LOCAL_IN sees it whole",
+    { spec = "PKM *ntfe-seat.first-fragment-declined-by-checksum" }, function(t)
+        use({
+            RawPacket = {
+                summed = { ["Ttl.Equal"] = 51, Actions = { "REJECT" } },
+                unsummed = { ["Ttl.Equal"] = 52, Actions = { "REJECT" } },
+            },
+            Packet = { whole = { ["Ttl.Equal"] = 53, Actions = { "REJECT" } } },
+        })
+        local sink = assert(ntfe.udp_bind(vm, "0.0.0.0", 7041))
+        -- A 48-byte UDP datagram split at 24: a first fragment whose
+        -- checksum covers bytes it does not carry, and the rest.
+        local function fragments(ttl, id, zero_csum)
+            local seg = ntfe.udp(net.peer_addr, net.addr, 5000, 7041, string.rep("f", 40))
+            if zero_csum then seg = seg:sub(1, 6) .. "\0\0" .. seg:sub(9) end
+            return seat.ip4_raw_frame(net, ntfe.ipv4(net.peer_addr, net.addr, 17, 24,
+                    { id = id, frag = 0x2000, ttl = ttl }) .. seg:sub(1, 24)),
+                seat.ip4_raw_frame(net, ntfe.ipv4(net.peer_addr, net.addr, 17, 24,
+                    { id = id, frag = 3, ttl = ttl }) .. seg:sub(25))
+        end
+        local function send(frames)
+            seat.flush(peer, wire)
+            local answers
+            local delta, events = E:during(function()
+                for _, f in ipairs(frames) do ntfe.send_frame(peer, wire, f) end
+                answers = seat.from_vm(peer, net, wire, 150, function(f)
+                    return f.icmp and f.icmp.type == 3
+                end)
+            end)
+            return delta, events, answers
+        end
+
+        local first = fragments(51, 0x51)
+        local delta, events, answers = send({ first })
+        local ev = ntfe.matching(events, { attributed = "summed" })
+        t:assert(#ev == 1 and ev[1].reject_degraded,
+            "a first fragment's checksum fails the builder, and the REJECT degrades: " .. ntfe.describe(events))
+        t:assert_eq(delta.refusals_emitted, 0, "nothing is sent for it")
+        t:assert_eq(#answers, 0, "and nothing reaches the wire")
+
+        first = fragments(52, 0x52, true)
+        delta, events, answers = send({ first })
+        ev = ntfe.matching(events, { attributed = "unsummed" })
+        t:assert(#ev == 1 and not ev[1].reject_degraded,
+            "one with a zero UDP checksum, which the builder skips, is not degraded: " .. ntfe.describe(events))
+        t:assert_eq(delta.refusals_emitted, 1, "it is answered")
+        t:assert(#answers == 1 and answers[1].icmp.code == 3,
+            "with a port-unreachable on the wire")
+
+        -- Both halves: RawPacket passes each at ingress, and the Packet
+        -- layer meets the datagram reassembled.
+        delta, events, answers = send({ fragments(53, 0x53) })
+        ev = ntfe.matching(events, { attributed = "whole" })
+        t:assert_eq(#ev, 1, "the Packet layer judged one datagram, not two fragments: " .. ntfe.describe(events))
+        if ev[1] then
+            t:assert_eq(ev[1].seat, ntfe.SEAT.LOCAL_IN, "at LOCAL_IN")
+            t:assert_eq(ev[1].length, 68, "all 68 bytes of it, reassembled")
+            t:assert_eq(ev[1].dst_port, 7041, "with its ports")
+            t:assert(not ev[1].reject_degraded, "and its REJECT was not degraded")
+        end
+        t:assert_eq(delta.refusals_emitted, 1, "a whole datagram passes the checksum check and is answered")
+        t:assert_eq(#answers, 1, "on the wire")
         sys.close(vm, sink)
     end)
 

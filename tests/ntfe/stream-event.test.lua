@@ -220,17 +220,8 @@ test("an event's path is relative to the layer key",
 
 test("a Flow event carries both endpoints' identities, as binary SIDs",
     { spec = "PKM *ntfe-stream.flow-event-carries-endpoint-identities",
-      tags = { "known-bug" },
-      -- PEI-1301. The far end of a loopback
-      -- flow is recorded as the sender itself: connecting from the agent
-      -- (pid 1) to a listener a worker owns (the listeners dump says pid
-      -- 220), the LOCAL_OUT Flow event's remote, the LOCAL_IN event's
-      -- local and the flow record's slot 1 all read pid 1 and the
-      -- connecting thread's comm. identity.c ntfe_identity_receiver()
-      -- takes skb->sk as an early-demux result whenever it is a full
-      -- socket, but at LOCAL_OUT skb->sk is the socket that sent the
-      -- packet, so the "receiver lookup run early" never runs. The local
-      -- end's fields are right.
+      -- The far end of a loopback flow was once recorded as the sender
+      -- itself (PEI-1301).
     }, function(t)
         local far_pid = far:syscall(39).ret
         local name = vm:syscall(157, { -- prctl(PR_GET_NAME)

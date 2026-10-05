@@ -157,6 +157,10 @@ local function unpack_value(b, at)
         local n = b:byte(at + 1)
         return b:sub(at + 2, at + 1 + n), at + 2 + n
     end
+    if tag == 0xda then
+        local n = string.unpack(">I2", b, at + 1)
+        return b:sub(at + 3, at + 2 + n), at + 3 + n
+    end
     if tag == 0xc0 then return nil, at + 1 end
     if tag == 0xcc then return string.unpack(">I1", b, at + 1), at + 2 end
     if tag == 0xcd then return string.unpack(">I2", b, at + 1), at + 3 end

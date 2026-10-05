@@ -37,11 +37,8 @@ end
 local function hms(h, m, s) return h * 3600 + m * 60 + s end
 
 -- The `Local.Process` text of a 16-byte GUID: lowercase 8-4-4-4-12.
-local function guid_text(g)
-    local hex = g:gsub(".", function(c) return string.format("%02x", c:byte()) end)
-    return hex:sub(1, 8) .. "-" .. hex:sub(9, 12) .. "-" .. hex:sub(13, 16) .. "-"
-        .. hex:sub(17, 20) .. "-" .. hex:sub(21, 32)
-end
+-- The process GUID's PCDS text, as Local.Process reads it (PEI-1309).
+local guid_text = require("helpers.ntfe_identity").guid_pcds
 
 -- ---- the flow state ----
 

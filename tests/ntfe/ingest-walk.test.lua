@@ -168,6 +168,42 @@ for _, c in ipairs({
         end)
 end
 
+test("an integer of the wrong length refuses the walk, in a rule or in CurrentReportingLevel",
+    { spec = "PKM *ntfe-ingest.wrong-length-integer-refuses-walk" }, function(t)
+        local function with(priority, level)
+            return ing.policy({
+                r = { ["DstPort.Equal"] = 6623, Priority = priority, Actions = { "REJECT" } },
+            }, { values = level and { CurrentReportingLevel = level } or nil })
+        end
+        -- Each one's well-formed twin first, so every refusal is of length
+        -- alone and leaves a policy standing to be kept.
+        for _, c in ipairs({
+            { typed(T.DWORD, string.pack("<I4", 3)), typed(T.DWORD, "\3\0"), nil,
+              "a two-byte REG_DWORD Priority" },
+            { typed(T.DWORD, string.pack("<I4", 3)), typed(T.DWORD, "\3\0\0\0\0"), nil,
+              "a five-byte REG_DWORD Priority" },
+            { typed(T.DWORD_BIG_ENDIAN, string.pack(">I4", 3)),
+              typed(T.DWORD_BIG_ENDIAN, string.pack(">I8", 3)), nil,
+              "an eight-byte REG_DWORD_BIG_ENDIAN Priority" },
+            { typed(T.QWORD, string.pack("<i8", 3)), typed(T.QWORD, string.pack("<I4", 3)), nil,
+              "a four-byte REG_QWORD Priority" },
+            { 3, 3, typed(T.DWORD, "\2\0\0"), "a three-byte REG_DWORD CurrentReportingLevel",
+              typed(T.DWORD, string.pack("<I4", 2)) },
+            { 3, 3, typed(T.QWORD, string.pack("<I4", 2)), "a four-byte REG_QWORD CurrentReportingLevel",
+              typed(T.QWORD, lcs.qword(2)) },
+        }) do
+            local good_priority, bad_priority, bad_level, what, good_level = c[1], c[2], c[3], c[4], c[5]
+            local good = ing.replace(E, with(good_priority, good_level))
+            t:assert_eq(good.last_ingest_error, 0, what .. ": the same value at its proper length is accepted")
+            local bad = ing.replace(E, with(bad_priority, bad_level))
+            t:assert_eq(bad.last_ingest_error, ing.EINVAL, what .. " refuses the walk")
+            t:assert_eq(bad.generation, good.generation, what .. ": nothing is published")
+            t:assert_eq(bad.reporting_level, good.reporting_level, what .. ": the level in force stays")
+        end
+        t:assert_eq(ing.verdict(vm, 6623), "reject", "and the rule as it was still judges")
+        ing.replace(E, ing.policy())
+    end)
+
 -- ---- the digest ---------------------------------------------------------
 
 test("everything fed to the builder is digested; anything else is not",
@@ -271,16 +307,17 @@ local IMPOSSIBLE = {
     { "Packet", { ["Start.Hour.GreaterThan"] = "-1" }, "Start.* in Packet" },
     -- (DstMac in Flow needs a frame with a MAC: ingest-context, with
     -- the peer.)
-    -- The cases below hold where the TRM says they never do (the
-    -- known-bug test after this one).
-    { "RawPacket", { ["FlowState.Equal"] = "new" }, "FlowState in RawPacket", bug = true },
-    { "Flow", { ["Length.GreaterThan"] = 0 }, "Length in Flow", bug = true },
-    { "Flow", { ["TcpFlags.Has"] = { "SYN" } }, "TcpFlags in Flow", bug = true },
-    { "Flow", { ["Fragment.Equal"] = 0 }, "Fragment in Flow", bug = true },
-    { "Flow", { ["Ttl.GreaterThan"] = 0 }, "Ttl in Flow", bug = true },
-    { "Flow", { ["Dscp.Equal"] = 0 }, "Dscp in Flow", bug = true },
-    { "Flow", { ["EtherType.Equal"] = "ipv4" }, "EtherType in Flow", bug = true },
-    { "Flow", { ["FlowState.Equal"] = "new" }, "FlowState in Flow", bug = true },
+    -- The per-packet facts below are in the snapshot every layer is
+    -- judged from; they once matched where the lint says they never do,
+    -- until such a condition was built never to hold (PEI-1302).
+    { "RawPacket", { ["FlowState.Equal"] = "new" }, "FlowState in RawPacket" },
+    { "Flow", { ["Length.GreaterThan"] = 0 }, "Length in Flow" },
+    { "Flow", { ["TcpFlags.Has"] = { "SYN" } }, "TcpFlags in Flow" },
+    { "Flow", { ["Fragment.Equal"] = 0 }, "Fragment in Flow" },
+    { "Flow", { ["Ttl.GreaterThan"] = 0 }, "Ttl in Flow" },
+    { "Flow", { ["Dscp.Equal"] = 0 }, "Dscp in Flow" },
+    { "Flow", { ["EtherType.Equal"] = "ipv4" }, "EtherType in Flow" },
+    { "Flow", { ["FlowState.Equal"] = "new" }, "FlowState in Flow" },
 }
 
 local function impossible()
@@ -302,34 +339,7 @@ test("conditions on facts impossible at their layer are linted, not refused",
         t:assert_eq(s.last_ingest_error, 0, "a policy full of them is accepted")
         t:assert(s.generation > before.generation, "and published")
         for i, c in ipairs(IMPOSSIBLE) do
-            if not c.bug then
-                t:assert_eq(ing.verdict(vm, 6660 + i), "pass", c[3] .. " is never true")
-            end
-        end
-    end)
-
-test("per-packet facts are never true in a Flow forest, nor FlowState in a RawPacket one",
-    { spec = "PKM *ntfe-ingest.layer-impossible-facts-lint-not-refuse", tags = { "known-bug" },
-      -- PEI-1302. The TRM lists
-      -- `Length`, `TcpFlags`, `Fragment`, `Ttl`, `Dscp`, `EtherType`,
-      -- `DstMac` and `FlowState` as never true in a Flow forest, and
-      -- `FlowState` as never true in RawPacket. Live, a Flow rule on any
-      -- of the other seven matches the connection's first packet and
-      -- its REJECT is the verdict (events attribute LOCAL_OUT Flow
-      -- REJECT to the lint rule; DstMac, tested with the peer in
-      -- ingest-context, is indeed never true); a RawPacket `FlowState.Equal new`
-      -- rule matches at the EGRESS seat (the event shows seat 2, layer
-      -- 1, REJECT degraded to a drop). The bridge's snapshot conversion
-      -- (ntfe_runtime.rs, snapshot_from_c) copies every per-packet fact
-      -- and flow_state into every layer's snapshot; only tags and the
-      -- flow-only facts are withheld by layer. pnp-core's own lint says
-      -- the Flow snapshot is never given them.
-    }, function(t)
-        impossible()
-        for i, c in ipairs(IMPOSSIBLE) do
-            if c.bug then
-                t:assert_eq(ing.verdict(vm, 6660 + i), "pass", c[3] .. " is never true")
-            end
+            t:assert_eq(ing.verdict(vm, 6660 + i), "pass", c[3] .. " is never true")
         end
     end)
 

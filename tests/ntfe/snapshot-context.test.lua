@@ -171,6 +171,29 @@ test("an interface's network id longer than the bound is truncated at ingestion"
         t:assert_eq(raw, "cut", "the id keeps its first 39 bytes: " .. d)
     end)
 
+test("a network record whose key name is 40 bytes or more is ignored, record and all",
+    { spec = "PKM *ntfe-snapshot.overlong-network-id-name-ignored" }, function(t)
+        -- veth0 names the record by the same key name each time. Its
+        -- Network is truncated to 39 bytes on the way in; a record kept
+        -- under a truncated id would join it and lend its Name and Trust.
+        local fits, long = string.rep("f", 39), string.rep("L", 40)
+        local probes = { long = { ["Network.Name.Equal"] = "long-record", Priority = 40 } }
+        for k, v in pairs(CONTEXT_PROBES) do probes[k] = v end
+        publish(t, { RawPacket = probes })
+
+        inventory({ [fits] = { Name = "fitting-record", Trust = "home" } },
+            { ["if-veth0"] = { Name = "veth0", Network = fits } })
+        local raw, _, d = inbound(7712)
+        t:assert_eq(raw, "full", "a 39-byte name is a record, joined with its Name and Trust: " .. d)
+
+        local s = inventory({ [long] = { Name = "long-record", Trust = "home" } },
+            { ["if-veth0"] = { Name = "veth0", Network = long } })
+        t:assert_eq(s.last_ingest_error, 0, "a 40-byte one fails nothing")
+        t:assert_eq(s.contexts, 1, "and veth0 still stands on a network")
+        local raw2, _, d2 = inbound(7713)
+        t:assert_eq(raw2, "idonly", "but the record is not there to join: an id, no Name, no Trust: " .. d2)
+    end)
+
 test("the packet layers read the network record's fields, the same ones the interface layer reads",
     { spec = "PKM *ntfe-snapshot.network-facts-match-interface-layer" }, function(t)
         -- The interface layer is netd's, judged in userspace, and there is
@@ -207,15 +230,17 @@ test("the Rust mirror of the snapshot matches the C struct field for field",
         -- core reads it.
         inventory({ [HOME] = { Name = "palfrey-home", Trust = "home" } },
             { ["if-veth0"] = { Name = "veth0", Network = HOME } })
+        -- (EtherType is per packet: the Flow forest never has it.)
         local every = {
-            ["Direction.Equal"] = "in", ["Interface.Equal"] = "veth0", ["EtherType.Equal"] = "ipv4",
+            ["Direction.Equal"] = "in", ["Interface.Equal"] = "veth0",
             ["SrcMac.Equal"] = H.mac_text(net.peer_mac), ["SrcAddr.Equal"] = net.peer_addr,
             ["DstAddr.Equal"] = net.addr, ["Protocol.Equal"] = "udp",
             ["SrcPort.Equal"] = 5000, ["DstPort.Equal"] = 7711,
             ["Time.Year.GreaterThan"] = 2000, ["Network.Id.Equal"] = HOME,
             ["Network.Name.Equal"] = "palfrey-home", ["Network.Trust.Equal"] = "home",
         }
-        local packet = { ["DstMac.Equal"] = H.mac_text(net.mac), ["Length.Equal"] = 28,
+        local packet = { ["EtherType.Equal"] = "ipv4",
+                         ["DstMac.Equal"] = H.mac_text(net.mac), ["Length.Equal"] = 28,
                          ["Ttl.Equal"] = 64, ["Dscp.Equal"] = 0, ["Fragment.Equal"] = 0,
                          ["TcpFlags.Present"] = 0, ["FlowState.Equal"] = "new" }
         for k, v in pairs(every) do packet[k] = v end

@@ -111,19 +111,13 @@ test("a replaced generation's forests are freed",
         ing.replace(E, ing.policy())
     end)
 
--- Last in the file: today it panics the kernel.
+-- Last in the file: a regression would panic the kernel.
 test("a rule at depth 12 below its root is read, built and enforced",
-    { spec = "PKM *ntfe-ingest.walk-bounded-depth-12-and-4096-rules", tags = { "known-bug" },
-      -- PEI-1299. The walk admits depth 12
-      -- (it refuses only depth > 12), but building a 13-rule chain
-      -- overflows the kernel stack: pnp_core::ingest::build_rule recurses
-      -- once per level with a large frame, called from
-      -- ntfe_rust_builder_build on system_wq. The guest dies at once
-      -- ("Kernel panic - not syncing: Fatal exception", RSP at the
-      -- stack's guard page, CR2 = RSP - 8, trace build_rule ->
-      -- parse_condition -> ntfe_rust_builder_build -> ntfe_build_layer
-      -- -> peios_ntfe_refresh_workfn). A 12-rule chain builds. Any
-      -- writer of the Rules key can panic the machine.
+    { spec = "PKM *ntfe-ingest.walk-bounded-depth-12-and-4096-rules",
+      -- Building a 13-rule chain whose rules carry conditions once
+      -- overflowed the kernel stack in pnp_core's recursive build_rule,
+      -- about a kilobyte a level, and panicked the machine (PEI-1299);
+      -- the build and the evaluation walk with a heap stack now.
     }, function(t)
         local s = ing.replace(E, chain(13))
         t:assert_eq(s.last_ingest_error, 0, "a root and twelve nested exceptions are read")

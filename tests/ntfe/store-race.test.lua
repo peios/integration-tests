@@ -165,7 +165,7 @@ test("readers on one CPU walk a table another CPU is growing, and never see a ta
             "and no reader saw a present tag before its value was written")
         for n = 11, 18 do
             local f = flow_tags(n)
-            t:assert_eq(f.n_tags, 8, "flow " .. n .. " reports its first eight tags")
+            t:assert_eq(f.n_tags, 12, "flow " .. n .. " counts its twelve tags (the record lists eight)")
             t:assert_eq(f.tags[ntfe.name_hash("g8")], sent_total(n),
                 "with the values the contended writers left")
         end

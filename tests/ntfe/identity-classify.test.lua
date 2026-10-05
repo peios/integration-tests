@@ -182,16 +182,9 @@ test("inbound UDP to a broadcast or multicast address is shared, with no princip
 
 test("inbound UDP to a multicast group one socket receives is still shared",
     { spec = "PKM *ntfe-identity.inbound-multicast-broadcast-udp-shared",
-      tags = { "known-bug" },
-      -- PEI-1305. The TRM puts multicast `shared`
-      -- before any lookup. identity.c's receiver resolution first takes
-      -- `skb->sk` when early demux set it, and UDP's multicast early
-      -- demux sets it whenever exactly one socket matches the group and
-      -- port — so a group with one receiver reads `program`, that
-      -- socket's owner. With two sockets on the port early demux finds
-      -- none and the same datagram reads `shared` (the test above).
-      -- The TRM also orders "shared before any lookup" ahead of "early
-      -- demux may already have found it"; the code does the opposite.
+      -- UDP's multicast early demux attaches the one socket a group
+      -- datagram matches, and that socket was once taken as the receiver
+      -- before the shared check, reading `program` (PEI-1305).
     }, function(t)
         E:replace(id.policy())
         local only = assert(ntfe.udp_bind(w, "0.0.0.0", 7121))

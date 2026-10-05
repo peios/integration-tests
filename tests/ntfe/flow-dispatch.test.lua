@@ -1,7 +1,8 @@
 -- PKM §6.8 — The Flow layer, one judgment per local endpoint: the flow
--- dispatch behind the Packet layer, the sentence a tracked packet reads
--- instead of evaluating, the untracked packet that has no flow to
--- judge, re-judgment of a stale sentence, and the flow view — the
+-- dispatch behind the Packet layer inbound and ahead of it outbound, the
+-- sentence a tracked packet reads instead of evaluating, the untracked
+-- packet that has no flow to judge, re-judgment of a stale sentence,
+-- and the flow view — the
 -- original tuple and the originator's direction, which a packet in the
 -- reply direction is judged as, while its refusal still answers the
 -- packet in hand.
@@ -66,19 +67,10 @@ test("a connection is judged once, and every later packet of it reads the senten
             "every later packet, both ways, applied the sentence: " .. delta.flow_cached)
     end)
 
-test("the flow dispatch is reached only by a packet the Packet layer passed",
+test("the flow dispatch runs inbound at LOCAL_IN once Packet passes, outbound at LOCAL_OUT before any Packet judgment",
     {
         spec = "PKM *ntfe-flow.dispatch-after-packet-pass",
-        -- PEI-1311 (TRM). True inbound, where
-        -- LOCAL_IN runs Packet and then the flow dispatch. Outbound the
-        -- dispatch runs at LOCAL_OUT before the Packet layer has seen the
-        -- packet (seats.c, peios_ntfe_hook_local_out; §6.2's own seat table
-        -- says "LOCAL_OUT: the flow's sentence or Flow", and the policy
-        -- reference puts Flow "first outbound (before Packet)"): a SYN the
-        -- Packet layer drops at egress has already been judged and
-        -- sentenced by the Flow layer. The §6.8 sentence holds for one
-        -- direction only.
-        tags = { "known-bug" },
+        -- PEI-1311: the TRM once had every dispatched packet pass Packet first.
     },
     function(t)
         E:replace({
@@ -90,7 +82,23 @@ test("the flow dispatch is reached only by a packet the Packet layer passed",
             },
             Flow = PASS_ALL,
         })
-        local l = assert(ntfe.tcp_listen(vm, net.addr, 7010))
+        -- Inbound, Packet first: a SYN it passes goes on to the dispatch...
+        local l = assert(ntfe.tcp_listen(vm, net.addr, 7012))
+        local _, passed = E:during(function()
+            local c = ntfe.tcp_connect(peer, net.addr, 7012)
+            t:assert(c, "an inbound SYN the Packet layer passes connects")
+            if c then sys.close(peer, c) end
+        end)
+        sys.close(vm, l)
+        local pkt = ntfe.matching(passed, { layer = ntfe.LAYER.PACKET, seat = ntfe.SEAT.LOCAL_IN, dst_port = 7012 })
+        local flw = nf.flow_events(passed, { seat = ntfe.SEAT.LOCAL_IN, dst_port = 7012 })
+        t:assert(#pkt >= 1 and #flw == 1, "it was judged by both at LOCAL_IN: " .. ntfe.describe(passed))
+        if pkt[1] and flw[1] then
+            t:assert(pkt[1].seq < flw[1].seq, "the Packet layer first, then the flow dispatch")
+        end
+
+        -- ...and one it drops never reaches it.
+        l = assert(ntfe.tcp_listen(vm, net.addr, 7010))
         local _, inbound = E:during(function()
             local _, why = ntfe.tcp_connect(peer, net.addr, 7010, 300)
             t:assert_eq(why, "timeout", "an inbound SYN the Packet layer drops goes unanswered")
@@ -99,19 +107,25 @@ test("the flow dispatch is reached only by a packet the Packet layer passed",
         t:assert(#ntfe.matching(inbound, { layer = ntfe.LAYER.PACKET, attributed = "no-in" }) >= 1,
             "it was dropped by the Packet layer: " .. ntfe.describe(inbound))
         t:assert_eq(#nf.flow_events(inbound, { dst_port = 7010 }), 0,
-            "and never reached the Flow layer")
+            "and never reached the flow dispatch")
 
+        -- Outbound, the dispatch first: the Packet layer judges at egress,
+        -- after it, so a SYN Packet drops has already been sentenced.
         local pl = assert(ntfe.tcp_listen(peer, net.peer_addr, 7011))
         local _, outbound = E:during(function()
             local _, why = ntfe.tcp_connect(vm, net.peer_addr, 7011, 300)
             t:assert_eq(why, "timeout", "an outbound SYN the Packet layer drops goes unanswered")
         end)
         sys.close(peer, pl)
-        t:assert(#ntfe.matching(outbound, { layer = ntfe.LAYER.PACKET, attributed = "no-out" }) >= 1,
-            "it was dropped by the Packet layer: " .. ntfe.describe(outbound))
-        t:assert_eq(#nf.flow_events(outbound, { dst_port = 7011 }), 0,
-            "and, as the TRM states it, never reached the Flow layer either: "
-            .. ntfe.describe(nf.flow_events(outbound, { dst_port = 7011 })))
+        local dropped = ntfe.matching(outbound, { layer = ntfe.LAYER.PACKET, attributed = "no-out" })
+        local judged = nf.flow_events(outbound, { dst_port = 7011 })
+        t:assert(#dropped >= 1, "it was dropped by the Packet layer: " .. ntfe.describe(outbound))
+        t:assert(#judged >= 1, "yet the flow dispatch judged it: " .. ntfe.describe(outbound))
+        if dropped[1] and judged[1] then
+            t:assert_eq(judged[1].seat, ntfe.SEAT.LOCAL_OUT, "at LOCAL_OUT")
+            t:assert_eq(dropped[1].seat, ntfe.SEAT.EGRESS, "while Packet judged it at egress")
+            t:assert(judged[1].seq < dropped[1].seq, "after the dispatch, not before it")
+        end
     end)
 
 test("an untracked packet has no flow to judge, and the Packet verdict stands",

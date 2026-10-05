@@ -273,6 +273,63 @@ test("a DROP or REJECT on a new flow kills the entry, so a retry is a fresh flow
         sys.close(vm, rx)
     end)
 
+test("a Refused reset to a confirmed TCP flow moves it to CLOSE, whose short timeout ends it",
+    { spec = "PKM *ntfe-flow.refused-tcp-flow-set-closing" },
+    function(t)
+        -- A loopback connection's inbound end is judged at LOCAL_IN, after
+        -- POST_ROUTING confirmed the entry. Its SYN is new, so no teardown
+        -- reset crosses conntrack: only the refusal can move the state,
+        -- and the dump's remaining lifetime says which state it is.
+        local CLOSE = "/proc/sys/net/netfilter/nf_conntrack_tcp_timeout_close"
+        local close_timeout = tonumber(assert(nf.read_file(vm, CLOSE)))
+        flow_policy({
+            all = { Actions = { "PASS" } },
+            refused = { ["Direction.Equal"] = "in", ["DstPort.Equal"] = 7170, Actions = { "REJECT" } },
+            prohibited = { ["Direction.Equal"] = "in", ["DstPort.Equal"] = 7171,
+                           Actions = { "REJECT(Prohibited)" } },
+        })
+        local l1 = assert(ntfe.tcp_listen(vm, "127.0.0.1", 7170))
+        local l2 = assert(ntfe.tcp_listen(vm, "127.0.0.1", 7171))
+        local function syn(port, sport)
+            local _, why = ntfe.tcp_connect(vm, "127.0.0.1", port, 200, { bind = { "127.0.0.1", sport } })
+            return why, nf.flow(E, { protocol = ntfe.IPPROTO.TCP, src_port = sport, dst_port = port })
+        end
+
+        local why, f = syn(7170, 40170)
+        t:assert_eq(why, sys.E.CONNREFUSED, "the inbound end refuses the SYN with a reset")
+        t:assert(f, "and the confirmed flow outlives its refused packet")
+        if f then
+            t:assert_eq(f.sentences[1].verdict, ntfe.VERDICT.REJECT, "holding the inbound end's REJECT")
+            t:assert(f.timeout_secs <= close_timeout, string.format(
+                "with CLOSE's lifetime left (%d s at most): %d", close_timeout, f.timeout_secs))
+        end
+        local _, g = syn(7171, 40171)
+        t:assert(g, "a Prohibited refusal leaves its confirmed flow as well")
+        if g then
+            t:assert(g.timeout_secs > close_timeout,
+                "but sends no reset, and the flow keeps the lifetime the SYN gave it: " .. g.timeout_secs)
+        end
+
+        -- With CLOSE lasting one second, the refused flow is gone within it.
+        t:assert(nf.write_file(vm, CLOSE, "1").ret > 0, "(CLOSE's timeout is set to one second)")
+        local ok, err = pcall(function()
+            local _, h = syn(7170, 40172)
+            t:assert(h and h.timeout_secs <= 1, "a refused flow has a second to live")
+            local gone = false
+            for _ = 1, 30 do
+                vm:clock():sleep(0.1)
+                if not nf.flows_matching(assert(E:flows()), { src_port = 40172 })[1] then
+                    gone = true
+                    break
+                end
+            end
+            t:assert(gone, "and conntrack ends it when the second is up")
+        end)
+        nf.write_file(vm, CLOSE, tostring(close_timeout))
+        sys.close(vm, l1); sys.close(vm, l2)
+        if not ok then error(err, 0) end
+    end)
+
 test("a flow with no extension has nowhere to hold a sentence and is evaluated on every packet",
     { spec = "PKM *ntfe-flow.no-extension-evaluated-per-packet PKM *ntfe-stream.confess-flow-uncached" },
     function(t)

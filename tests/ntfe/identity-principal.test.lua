@@ -171,26 +171,20 @@ test("every Principal question is answered from a thousand-group token in the ju
 
 test("Local.Process names the process by its GUID in the canonical text",
     { spec = "PKM *ntfe-identity.principal-view-without-copying-groups",
-      tags = { "known-bug" },
-      -- PEI-1309. The bridge's guid_text()
-      -- (kacs/ntfe_runtime.rs) hex-encodes the 16 bytes in storage
-      -- order, so Data1, Data2 and Data3 come out byte-reversed against
-      -- PCDS §2 (String Format), which writes them as numbers. A rule
-      -- naming a process by its PCDS text never matches; the storage-
-      -- order text does (asserted below as the evidence). pnpd's own
-      -- guid_text (pnp/pnpd/src/sid.rs, guid_text_is_hyphenated_lowercase)
-      -- uses the same storage order, so kernel and viewer agree with
-      -- each other and both disagree with PCDS: a conflict for the
-      -- coordinator to settle, not an obvious TRM slip.
+      -- The text was once the sixteen bytes in storage order, which no
+      -- PCDS text matches (PEI-1309).
     }, function(t)
         local guid = id.process_guid(t, vm, w)
         local s = socket_of({ user_sid = token.SID.TEST_USER })
-        local storage = holds(t, s, "storage-order", { ["Local.Process.Equal"] = id.guid_storage_order(guid) })
         local canonical = holds(t, s, "pcds-text", { ["Local.Process.Equal"] = id.guid_pcds(guid) })
         local upper = holds(t, s, "pcds-text-upper", { ["Local.Process.Equal"] = id.guid_pcds(guid):upper() })
+        local braced = holds(t, s, "pcds-braced", { ["Local.Process.Equal"] = "{" .. id.guid_pcds(guid) .. "}" })
+        local storage = holds(t, s, "storage-order", { ["Local.Process.Equal"] = id.guid_storage_order(guid) })
         close(s)
-        t:log("storage-order text " .. id.guid_storage_order(guid) .. " matched: " .. tostring(storage))        t:assert(canonical, "the GUID's PCDS text " .. id.guid_pcds(guid) .. " names the process")
+        t:assert(canonical, "the GUID's PCDS text " .. id.guid_pcds(guid) .. " names the process")
         t:assert(upper, "in either case")
+        t:assert(braced, "braced, as PCDS writes it canonically")
+        t:assert(not storage, "and the storage-order text " .. id.guid_storage_order(guid) .. " does not")
     end)
 
 test("a group's attributes are read live from the token: disabling a group shows at the next judgment",

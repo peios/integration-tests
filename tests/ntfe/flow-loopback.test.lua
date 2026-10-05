@@ -236,17 +236,10 @@ test("every cached packet of a loopback flow answers to the stricter sentence: D
 
 test("the packet that re-judges one endpoint answers to the other's stricter sentence too",
     {
-        spec = "PKM *ntfe-flow.loopback-stricter-sentence-applies",
-        -- PEI-1303. flow.c,
-        -- peios_ntfe_flow_dispatch(): when this endpoint's evaluation
-        -- yields REJECT, the refusal is sent and NF_DROP returned at once
-        -- (lines 441-451), before the comparison with the other
-        -- endpoint's sentence (460-466). So the one packet that re-judges
-        -- the outbound endpoint to REJECT is refused with that endpoint's
-        -- kind even when the inbound endpoint holds a current DROP or a
-        -- stricter REJECT(Refused); every later (cached) packet does
-        -- answer to the stricter, which the test above shows.
-        tags = { "known-bug" },
+        spec = "PKM *ntfe-flow.loopback-stricter-sentence-applies PKM *ntfe-flow.loopback-stricter-decided-before-refusal",
+        -- The packet that re-judged an endpoint to REJECT was once
+        -- refused with that endpoint's kind before the other endpoint's
+        -- stricter sentence was consulted (PEI-1303).
     },
     function(t)
         -- Both cases run before either is asserted, so a failure reports

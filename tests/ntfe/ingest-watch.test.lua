@@ -123,24 +123,44 @@ test("one watch on the Network key notes a write at any depth beneath it, and no
         ing.settle(E)
     end)
 
-test("a security descriptor change beneath the Network key is a noted mutation",
-    { spec = "PKM *ntfe-ingest.one-unbounded-watch-on-network-key", tags = { "known-bug" },
-      -- PEI-1311 (TRM). The TRM arms the watch "for
-      -- every mutation"; LCS delivers the Network watch only VALUE_SET,
-      -- VALUE_DELETED, SUBKEY_CREATED, SUBKEY_DELETED and KEY_DELETED
-      -- (pkm_lcs_internal_watch_event_deliverable), so REG_IOC_SET_SECURITY
-      -- on a rule key returns 0 and changes_noted does not move. A
-      -- descriptor cannot change a forest, so the code is plainly
-      -- intended; the TRM should say which mutations.
+test("the watch is delivered a value set, a value deleted, a subkey created, a subkey deleted and a key deleted, and no descriptor change",
+    { spec = "PKM *ntfe-ingest.one-unbounded-watch-on-network-key",
+      -- PEI-1311: the TRM once armed the watch "for every mutation", descriptors included.
     }, function(t)
-        local gate = ing.open(E, "Rules\\Flow\\gate")
-        local before = E:status()
-        local r = ing.quick(E, function(w)
-            return lcs.set_security_async(w, gate, lcs.SI.DACL, lcs.permissive_sd())
+        local function noted() return E:status().changes_noted end
+        ing.settle(E)
+        local home = ing.open(E, "Profiles\\home")
+        local n = noted()
+        ing.quick_write(E, home, "Watched", 1)
+        t:assert_eq(noted(), n + 1, "a value set is noted")
+        n = noted()
+        local r = lcs.delete_value(E.src, E.writer, home, "Watched")
+        t:assert_eq(r.ret, 0, "(the value is deleted)")
+        t:assert_eq(noted(), n + 1, "a value deleted is noted")
+        n = noted()
+        r = ing.quick_create(E, "Profiles\\home\\watched")
+        t:assert(r.ret >= 0, "(the subkey is created)")
+        t:assert_eq(noted(), n + 1, "a subkey created is noted")
+        n = noted()
+        local d = lcs.delete_key(E.src, E.writer, r.ret)
+        t:assert_eq(d.ret, 0, "(the subkey is deleted)")
+        t:assert_eq(noted(), n + 2,
+            "a deletion is noted twice: the subkey deleted from its parent, the key deleted itself")
+        sys.close(E.writer, r.ret)
+        ing.settle(E)
+
+        -- A descriptor change is delivered to nobody here: noted is
+        -- unmoved, and no walk starts once the debounce has passed.
+        local m = E.src:mark()
+        n = noted()
+        r = ing.quick(E, function(w)
+            return lcs.set_security_async(w, home, lcs.SI.DACL, lcs.permissive_sd())
         end)
-        t:assert_eq(r.ret, 0, "the descriptor is changed")
-        t:assert_eq(E:status().changes_noted, before.changes_noted + 1,
-            "and the change is noted")
+        t:assert_eq(r.ret, 0, "(the descriptor is changed)")
+        t:assert_eq(noted(), n, "a descriptor change is not delivered")
+        ing.pump(E, 150)
+        t:assert_eq(walks_since(m), 0, "and starts no walk")
+        sys.close(E.writer, home)
     end)
 
 test("NTFE reads Rules, Interfaces and Networks beneath the key and nothing else",

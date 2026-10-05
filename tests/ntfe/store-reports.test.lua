@@ -104,7 +104,7 @@ test("the payload is a string-keyed map of the attribution, level, seat, verdict
         local after = vm:clock():get_ns()
         t:assert(#reports >= 1, "the refused SYN is reported")
         local r, keys = reports[1].report, reports[1].keys
-        local want = { "rule", "level", "layer", "seat", "verdict", "reject_kind",
+        local want = { "rule", "rule_hash", "level", "layer", "seat", "verdict", "reject_kind",
                        "direction", "interface", "ifindex", "ether_type", "family",
                        "protocol", "src", "dst", "src_port", "dst_port", "flow_state",
                        "length", "generation", "t_ns" }
@@ -114,6 +114,7 @@ test("the payload is a string-keyed map of the attribution, level, seat, verdict
         local ev = ntfe.matching(events, { layer = ntfe.LAYER.PACKET, dst_port = 7510 })[1]
         t:assert(ev, "the verdict event is there to compare with")
         t:assert_eq(r.rule, "guard/ssh", "rule: the attribution path")
+        t:assert_eq(r.rule_hash, ntfe.name_hash("guard/ssh"), "rule_hash: its FNV-1a-64")
         t:assert_eq(r.level, 4, "level")
         t:assert_eq(r.layer, "Packet", "layer")
         t:assert_eq(r.seat, "local-in", "seat")
@@ -201,19 +202,20 @@ test("the payload is one map16 whose count is patched to the keys written",
     end)
 
 -- A long text form for both IPv6 addresses (39 characters: no zero
--- group to compress), and a rule path past the 255 characters a string
--- is truncated to.
+-- group to compress), and a rule path too long for the room they leave.
 local V6_SRC = "fd12:3456:789a:bcde:f012:3456:789a:bcd1"
 local V6_DST = "fd12:3456:789a:bcde:f012:3456:789a:bcd2"
 local LONG_A, LONG_B, LONG_C = string.rep("r", 120), string.rep("s", 120), string.rep("t", 30)
 
-test("a payload that would overflow the buffer drops the event rather than emit a truncated one",
-    { spec = "PKM *ntfe-store.report-overflow-drops-event" }, function(t)
+test("a rule path too long for the payload is cut to fit and said, and the event still goes",
+    { spec = "PKM *ntfe-store.report-long-rule-cut-and-said" }, function(t)
+        -- Such a report was once dropped silently (PEI-1310).
         local leaf = { ["Direction.Equal"] = "in", ["DstPort.Equal"] = 7541, Actions = { "REPORT(5)" } }
         local s = E:replace(with(nil, {
             [LONG_A] = { children = { [LONG_B] = { children = { [LONG_C] = leaf } } } },
             short = { ["Direction.Equal"] = "in", ["DstPort.Equal"] = 7542, Actions = { "REPORT(5)" } },
         }))
+        local path = LONG_A .. "/" .. LONG_B .. "/" .. LONG_C
         t:assert_eq(s.last_ingest_error, 0, "a 272-character rule path is accepted")
         local function frame(dport)
             local udp = S.udp6(V6_SRC, V6_DST, 40000, dport, "x")
@@ -224,14 +226,20 @@ test("a payload that would overflow the buffer drops the event rather than emit 
         t:assert_eq(#control, 1, "the frame reported by a short-named rule is one event")
         t:assert_eq(d.reports_emitted, 1, "emitted")
         t:assert_eq(control[1].report.src, V6_SRC, "naming the long addresses")
-        -- The long path encodes as a 255-byte str8 (2 + 255) where
-        -- "short" took a fixstr (1 + 5): the same report, 251 bytes longer.
-        local would = #control[1].payload_bytes + (2 + 255) - (1 + #"short")
-        t:assert(would > 512, "the long-named rule's report would need " .. would .. " bytes")
-        local dropped, dd = reporting(function() ntfe.send_frame(peer, pfd, frame(7541)) end)
-        t:assert_eq(dd.fx_reports, 1, "its REPORT is issued")
-        t:assert_eq(#dropped, 0, "but no event reaches KMES")
-        t:assert_eq(dd.reports_emitted, 0, "and none is counted as emitted")
+        t:assert(not control[1].report.rule_truncated, "a short path is not cut")
+        -- The long path as a str16 (3 + 272) where "short" took a fixstr
+        -- (1 + 5): the same report, 269 bytes longer.
+        local would = #control[1].payload_bytes + (3 + #path) - (1 + #"short")
+        t:assert(would > 512, "the whole long path would need " .. would .. " bytes")
+        local cut, dd = reporting(function() ntfe.send_frame(peer, pfd, frame(7541)) end)
+        t:assert_eq(#cut, 1, "the long-named rule's report reaches KMES")
+        t:assert_eq(dd.reports_emitted, 1, "and is counted as emitted")
+        local r = cut[1] and cut[1].report or {}
+        t:assert(#cut[1].payload_bytes <= 512, "inside the 512-byte buffer: " .. #cut[1].payload_bytes)
+        t:assert_eq(r.rule_truncated, 1, "rule_truncated says the path was cut")
+        t:assert(#r.rule < #path and path:sub(1, #r.rule) == r.rule,
+            "rule is a prefix of the path: " .. #r.rule .. " of " .. #path .. " characters")
+        t:assert_eq(r.rule_hash, ntfe.name_hash(path), "and rule_hash names the whole path")
     end)
 
 test("reports_emitted counts the events that reached the ring",

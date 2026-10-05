@@ -112,14 +112,9 @@ end
 
 test("the outbound seat resolves both ends of a loopback flow on its first packet",
     { spec = "PKM *ntfe-identity.loopback-outbound-seat-resolves-both-ends",
-      tags = { "known-bug" },
-      -- PEI-1301. The other end is resolved
-      -- by ntfe_identity_receiver() on the outbound packet, whose first
-      -- step takes `skb->sk` as an early-demuxed receiver; at LOCAL_OUT
-      -- `skb->sk` is the *sending* socket, so the far end is recorded as
-      -- the sender. Here the receiver's socket was stamped TEST_USER_2
-      -- in pid W_PID and both ends read SYSTEM in pid 1 (the agent), in
-      -- the LOCAL_OUT event and in the record's slot 1.
+      -- At LOCAL_OUT `skb->sk` is the sending socket, and it was once
+      -- taken for an early-demuxed receiver, recording the sender at both
+      -- ends (PEI-1301).
     }, function(t)
         local events, rec, port = loopback_flow(t, "both-ends")
         local out = id.flow_events(events, { seat = ntfe.SEAT.LOCAL_OUT, dst_port = port })
@@ -137,12 +132,8 @@ test("the outbound seat resolves both ends of a loopback flow on its first packe
 
 test("the inbound seat reads a loopback flow's ends from the record: Local its own, Remote the sender",
     { spec = "PKM *ntfe-identity.loopback-inbound-local-own-remote-sender",
-      tags = { "known-bug" },
-      -- PEI-1301. The inbound seat reads
-      -- what the outbound seat recorded, and that recorded the sender
-      -- for both slots (see the test above), so the LOCAL_IN judgment's
-      -- Local is the sender (SYSTEM, pid 1) instead of the receiving
-      -- socket (TEST_USER_2, pid W_PID). Remote is right, by accident.
+      -- The inbound seat reads what the outbound seat recorded, which
+      -- once named the sender for both slots (PEI-1301).
     }, function(t)
         local events, _, port = loopback_flow(t, "inbound")
         local inb = id.flow_events(events, { seat = ntfe.SEAT.LOCAL_IN, dst_port = port })
