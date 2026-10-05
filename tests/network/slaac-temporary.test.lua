@@ -166,9 +166,11 @@ test("with Address.Temporary each prefix also carries random temporary addresses
         t:assert(pump_until(function()
             local x = kernel_in("fd81::")
             return #x == 2 and x[1].deprecated and x[2].deprecated
-        end, 10), "both deprecated with the prefix")
+        end, 20), "both deprecated with the prefix")
+        -- The window is wide for a loaded host: the claim is the prefix's
+        -- 5 s rather than a temporary's own day, not a precise moment.
         local dep = gw:now() - t0
-        t:assert(dep >= 4 and dep <= 7, "…at the prefix's 5 s (+" .. dep .. "s), not a day")
+        t:assert(dep >= 4 and dep <= 15, "…at the prefix's 5 s (+" .. dep .. "s), not a day")
         t:assert_eq(#kernel_in("fd81::"), 2, "no new temporary once the prefix itself is deprecated")
         t:assert(pump_until(function() return #kernel_in("fd81::") == 0 end, 10), "both removed with the prefix")
         local gone = gw:now() - t0

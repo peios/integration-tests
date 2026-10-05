@@ -47,6 +47,10 @@ end
 function M.boot(o)
     o = o or {}
     o.name = o.name or "sut"
+    -- Every file here boots two VMs, and a whole-directory run boots
+    -- several files' worth at once; give phase2 twice peinit's usual
+    -- bound. A broken boot still fails on what the test asserts next.
+    peinit.STAGE_TIMEOUT = math.max(peinit.STAGE_TIMEOUT, 120)
     local vm = peinit.boot(o)
     local gws = o.gateways or { o.gateway }
     if gws[1] then

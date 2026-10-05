@@ -230,6 +230,9 @@ test("TCP: a connection that is refused, or closed before a whole reply, fails t
         gw.dns_listener = assert(ntfe.tcp_listen(gw.vm, "::", 53))
         t:assert_eq(outcome, "unavailable", "every TCP retry refused: unavailable")
         t:assert_eq(#asked("tcrst-6.tr.test", "udp"), 3, "three attempts over UDP")
+        -- The last SYN can still be queued on the gateway's packet socket
+        -- when the question ends; read it before counting.
+        gw:pump(300)
         local syns = 0
         for _, f in ipairs(gw.seen) do
             if f.ip and f.ip.protocol == 6 then
