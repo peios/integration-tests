@@ -44,6 +44,16 @@ end
 --- gateway's peers (`gw:peer`), so the host's own chatter on the bridge
 --- is ignored. Frames the machine sent while booting are still queued on
 --- the gateway's socket and are read at its next pump.
+---
+--- `o.log_queue` (default 512; false keeps the kernel's 10): the queue
+--- length of eventd's log socket. Most files read netd's and resolvd's
+--- log lines back through evctl, and those lines reach eventd through
+--- peinit's non-blocking relay into a socket that queues
+--- net.unix.max_dgram_qlen datagrams: on a loaded host a burst overflows
+--- the default and lines are dropped, as the loss-tolerant log path
+--- allows (eventd §4.1, PSPU §3.4). Full runs lost readiness and startup
+--- lines that way. The length is read when a socket is made, and eventd
+--- makes its socket at boot, so it is set on the command line.
 function M.boot(o)
     o = o or {}
     o.name = o.name or "sut"
@@ -51,7 +61,16 @@ function M.boot(o)
     -- several files' worth at once; give phase2 twice peinit's usual
     -- bound. A broken boot still fails on what the test asserts next.
     peinit.STAGE_TIMEOUT = math.max(peinit.STAGE_TIMEOUT, 120)
+    local qlen = o.log_queue == nil and 512 or o.log_queue
+    if qlen then
+        local token = "sysctl.net.unix.max_dgram_qlen=" .. qlen
+        o.append = o.append and (o.append .. " " .. token) or token
+    end
     local vm = peinit.boot(o)
+    if qlen then
+        assert(vm:read_file("/proc/sys/net/unix/max_dgram_qlen"):match("%d+") == tostring(qlen),
+            "the log socket's queue length was set")
+    end
     local gws = o.gateways or { o.gateway }
     if gws[1] then
         for _, link in ipairs(M.links(vm)) do
