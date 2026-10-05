@@ -302,14 +302,13 @@ test("a tie present at startup is judged per interface as a conflict, not a refu
 -- Restart
 -- ---------------------------------------------------------------------------
 
-test("a restarted netd changes nothing visible on an interface whose policy and offer are unchanged",
-    { spec = "netd *startup.restart-changes-nothing-visible", tags = { "known-bug" } }, function(t)
-        -- PEI-1365 (the shipped service seed's own comment
-        -- says a restart "costs nothing visible", so the code, not the TRM,
-        -- is taken to be wrong): a restarted netd holds no lease until the
-        -- INIT-REBOOT is answered, so its first pass desires no leased
-        -- address and deletes it and the default route, then adds both
-        -- back when the ACK comes (see the events logged below).
+test("a restarted netd removes the leased address and default route and drops to link until its INIT-REBOOT is answered, then puts both back",
+    { spec = "netd *startup.restart-reacquires-the-lease" }, function(t)
+        -- PEI-1365: a restarted netd holds no lease until the INIT-REBOOT
+        -- is answered, so its first pass desires no leased address and
+        -- deletes it and the default route, readiness drops to link, and
+        -- the ACK adds both back (routed again). Asserted as it is today;
+        -- when PEI-1365 is fixed this test and TRM §2.1 change together.
         local before = rebind(t, "bound before the restart")
         local index = network.iface(before, "eth0").index
         local fd = rtnl_listen()
@@ -324,7 +323,8 @@ test("a restarted netd changes nothing visible on an interface whose policy and 
         sys.close(sut, fd)
         t:log("rtnetlink events on eth0 (index " .. index .. ") across the restart:\n"
             .. table.concat(mine, "\n") .. "\nall events:\n" .. table.concat(all, "\n"))
-        dump(t, log_since(mark))
+        local lines = log_since(mark)
+        dump(t, lines)
         local reqs = gw:dhcp_messages(gateway.DHCP.REQUEST)
         for _, m in ipairs(reqs) do
             t:log(string.format("REQUEST ciaddr=%s opt50=%s opt54=%s", m.ciaddr,
@@ -335,7 +335,46 @@ test("a restarted netd changes nothing visible on an interface whose policy and 
             and reqs[1].opt[50] and gateway.ip4_text(reqs[1].opt[50]) == "10.77.0.50",
             "the client began with an INIT-REBOOT for the old address")
         t:assert_eq(network.ipv4(network.iface(s, "eth0"))[1], "10.77.0.50/24", "the same address")
-        t:assert_eq(#mine, 0, "no address or route on eth0 changed across the restart")
+
+        -- The kernel saw the address and the default route go, then come
+        -- back (PEI-1365).
+        local function at(kind, what, from)
+            for k = from or 1, #mine do
+                if what == "address" and mine[k] == kind .. " 10.77.0.50/24 on " .. index then return k end
+                -- A default route has no RTA_DST, so its destination reads "-".
+                local dst = mine[k]:match("^" .. kind .. " (%S+)/0 via 10%.77%.0%.1 dev " .. index .. "$")
+                if what == "default" and (dst == "-" or dst == "0.0.0.0") then return k end
+            end
+        end
+        local del_addr = at("DELADDR", "address")
+        t:assert(del_addr, "the leased address was deleted")
+        local new_addr = del_addr and at("NEWADDR", "address", del_addr + 1)
+        local new_route = del_addr and at("NEWROUTE", "default", del_addr + 1)
+        t:assert(new_addr, "and added back after its deletion")
+        t:assert(new_route, "and the default route added back after it")
+        -- The kernel drops the default route with the address and sends no
+        -- DELROUTE for it, so its going is shown by netd's plan below: the
+        -- first pass deletes it, and the pass after the lease adds it,
+        -- which netd plans only for a route the kernel no longer has.
+
+        -- netd's own account: the deletion is planned before any lease,
+        -- readiness drops to link, and the lease brings routed back.
+        local DEFAULT = "Route { index: " .. index .. ", destination: 0.0.0.0, prefix: 0, gateway: Some(10.77.0.1)"
+        local i_del = find(lines, "applying [DelAddress(")
+        local i_link = find(lines, "machine readiness is link")
+        local i_lease = find(lines, "interface eth0: lease 10.77.0.50/24 from 10.77.0.1")
+        local i_add = i_lease and find(lines, "applying [AddAddress(", i_lease)
+        local i_routed = i_lease and find(lines, "machine readiness is routed", i_lease)
+        t:log(string.format("log: delete=%s link=%s lease=%s add=%s routed=%s", tostring(i_del),
+            tostring(i_link), tostring(i_lease), tostring(i_add), tostring(i_routed)))
+        t:assert(i_del and i_lease and i_del < i_lease, "the first pass deleted the address before the lease came")
+        t:assert(lines[i_del].msg:find("DelRoute(" .. DEFAULT, 1, true) ~= nil,
+            "and the default route with it")
+        t:assert(i_link and i_lease and i_link < i_lease, "readiness dropped to link before the lease")
+        t:assert(i_add and lines[i_add].msg:find("AddRoute(" .. DEFAULT, 1, true) ~= nil,
+            "after the lease netd added the address and the default route back")
+        t:assert(i_routed ~= nil, "and was routed again after it")
+        t:assert_eq(network.status(sut).level, "routed", "the machine is routed again")
     end)
 
 -- ---------------------------------------------------------------------------

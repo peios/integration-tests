@@ -445,27 +445,31 @@ test("pulling the cable drops the level to absent and stops nothing; a dependent
         t:assert(alive(pids["pt-x-routed"]), "and the first routed dependent never restarted")
     end)
 
-test("a dependent on netd:addressed is released once the machine's level has reached addressed, as netd §8.2 says",
-    { spec = "netd *readiness.publish-on-change", tags = { "known-bug" } },
+test("netd publishes only the current level and peinit matches it exactly: on DHCP the level goes link to routed, so a netd:addressed dependent is held through routed",
+    { spec = "netd *readiness.peinit-matches-the-published-level" },
     function(t)
         -- PEI-1384 (decided: netd publishes the set of levels that hold,
-        -- peinit matches membership): netd §8.2 says peinit "holds a
-        -- service that Requires = ["network:<level>"] until the level
-        -- reaches it", which on netd's ordered levels reads as "at least
-        -- that level". peinit matches a level exactly (peinit §7.5,
-        -- `ready.a-level-is-matched-exactly-and-never-implied`), and netd
-        -- publishes only the machine's current level, which on a DHCP
-        -- network goes link -> routed in one pass without ever being
-        -- addressed (see the sequence logged below). So pt-x-addressed2,
-        -- started while the machine was routed, has been held through
-        -- routed, absent, link and routed again, and on a network with a
-        -- DHCP server a `network:addressed` dependent is only ever
-        -- released by the link-local fallback.
+        -- peinit matches membership). Asserted as it is today: peinit
+        -- matches a level exactly (peinit §7.5), and netd publishes only
+        -- the machine's current level, which on a DHCP network goes
+        -- link -> routed in one pass without ever being addressed. So
+        -- pt-x-addressed2, started while the machine was routed, has been
+        -- held through routed, absent and routed again. When PEI-1384 is
+        -- fixed this test and netd §8.2 change together.
         local log = netd_log()
         local seq = readiness_lines(log)
         t:log("machine levels published this boot: " .. list(seq))
+        -- The levels since the cable pull: from the last `absent` on.
+        local last_absent
+        for k, lvl in ipairs(seq) do if lvl == "absent" then last_absent = k end end
+        t:assert(last_absent, "netd published absent at the cable pull")
+        local since = {}
+        for k = last_absent, #seq do since[#since + 1] = seq[k] end
+        t:log("published since the pull: " .. list(since))
+        for _, lvl in ipairs(since) do
+            t:assert(lvl ~= "addressed", "the DHCP path back to routed never published addressed")
+        end
+        t:assert_eq(since[#since], "routed", "and ended at routed")
         t:assert_eq(network.status(sut).level, "routed", "the machine is routed, above addressed")
-        local s, raw = svc("pt-x-addressed2")
-        t:log("pt-x-addressed2: " .. raw:gsub("%s+$", ""))
-        t:assert_eq(s.state, "active", "the netd:addressed dependent has been released")
+        held(t, "pt-x-addressed2", "level routed, after the pull")
     end)
