@@ -357,6 +357,29 @@ test("an inbound refusal is routed out to the peer with our address as its sourc
         sys.close(vm, l)
     end)
 
+test("an inbound refusal to a link-local peer is routed out the link it came in on",
+    { spec = { "PKM *ntfe-seat.inbound-refusal-routed-to-peer", "PKM *ntfe-seat.inbound-link-local-answer-routed-on-ingress" },
+      tags = { "known-bug" } }, function(t)
+        -- PEI-1383: the answer was routed with ip6_route_me_harder, which
+        -- scopes a link-local lookup to the refused packet's own route's
+        -- device — for an inbound packet, the local delivery route's
+        -- loopback — so it found no route and degraded to DROP.
+        assert(seat.addr6(vm, net.name, "fe80::9:1"))
+        assert(seat.addr6(peer, net.peer, "fe80::9:2"))
+        local scope = assert(ntfe.if_index(peer, net.peer))
+        use({ Flow = { refused = on_port(7100, "REJECT") } })
+        local l = assert(ntfe.tcp_listen(vm, "::", 7100))
+        local fd, why
+        local delta = E:during(function()
+            fd, why = ntfe.tcp_connect(peer, "fe80::9:1", 7100, 1500, { scope = scope })
+        end)
+        if fd then sys.close(peer, fd) end
+        t:assert_eq(why, sys.E.CONNREFUSED, "the peer is refused, not left to time out")
+        t:assert_eq(delta.refusals_emitted, 1, "the refusal was sent")
+        t:assert_eq(delta.reject_degraded, 0, "and did not degrade")
+        sys.close(vm, l)
+    end)
+
 test("an outbound refusal fails the local socket at once, and nothing reaches the wire",
     { spec = "PKM *ntfe-seat.outbound-refusal-fails-local-socket-at-once" }, function(t)
         use({ Flow = {

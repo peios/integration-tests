@@ -183,6 +183,14 @@ test("a deadline expiring after dispatch returns ETIMEDOUT and detaches the call
         sys.close(w, fd)
     end)
 
+test("a response that completes before a signalled caller is detached wins over the signal",
+    { spec = "PKM *source.dispatch.completion-beats-a-signal",
+      covered_by = "kunit:pkm_lcs_kunit_source",
+      skip = "a race between a signal and the completer inside one kernel lock section; " ..
+             "a guest cannot place a signal there. Runs under " ..
+             "pkm_lcs_kunit_source_completion_beats_signal (PEI-1389)" },
+    function(t) end)
+
 test("the deadline is checked before admission is attempted, not only after a contention round is lost",
     { spec = "PKM *source.dispatch.deadline-checked-before-admission",
       covered_by = "kunit:pkm_lcs_kunit_source",

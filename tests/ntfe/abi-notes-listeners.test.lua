@@ -242,3 +242,21 @@ test("listeners are copied out 32 at a time, and a dump of more is whole",
         t:assert_eq(cut.count, 33, "a buffer one past a batch holds 33")
         close_all(vm, fds)
     end)
+
+test("forty sockets in one hash bucket, more than a batch, are all written",
+    { spec = "PKM *ntfe-abi-notes.bound-listener-batch-32", tags = { "known-bug" } }, function(t)
+        -- PEI-1377: a bucket was walked once, so past the 32nd socket in
+        -- one bucket the rest were counted in `total` but never written:
+        -- `count < total` with room to spare. One SO_REUSEPORT group on
+        -- one port shares one bucket.
+        local fds = {}
+        for _ = 1, 40 do
+            fds[#fds + 1] = sock(vm, { type = ntfe.SOCK_DGRAM, opts = { { SOL_SOCKET, SO_REUSEPORT, 1 } },
+                bind = { "0.0.0.0", 7920 } })
+        end
+        local d = raw.dump(vm, E.dev, "listeners", 512)
+        t:assert_eq(d.ret, 0, "the dump succeeds")
+        t:assert_eq(d.count, d.total, "with room for all, all are written")
+        t:assert_eq(#listed(7920, ntfe.IPPROTO.UDP), 40, "every member of the group is listed")
+        close_all(vm, fds)
+    end)
