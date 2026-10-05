@@ -11,8 +11,8 @@
 --
 -- The subjects are two staged services differing only in
 -- `ErrorControl`, a third Critical one narrowed by `RequiredPrivileges`,
--- and the image's own login-console, which is the one service on the
--- machine with a `TTYPath`.
+-- and the image's own login-console, whose `TTYPath` is the system
+-- console.
 
 local peinit = require("helpers.peinit")
 peinit.claim(1)
@@ -199,14 +199,24 @@ test("a service with a TTYPath owns its terminal on all three streams; one witho
         },
     },
     function(t)
-        -- The image's login-console is the one service with a TTYPath.
-        -- It is triggered on boot:settled, so it starts some way after
-        -- the boot mark.
+        -- The image's login-console has a TTYPath (as do its login-ttyN
+        -- siblings on the virtual consoles). It is triggered on
+        -- boot:settled, so it starts some way after the boot mark.
         local pid = main_pid("login-console")
         local fds = descriptors(pid)
+        -- It asked for `/dev/console`, and what it is given is the device
+        -- that alias names on this boot: §11.6 resolves `/dev/console` in a
+        -- TTYPath from the last entry of /sys/class/tty/console/active,
+        -- `tty0` pinned to `/dev/tty1`, so that a VT switch cannot move a
+        -- session (PEI-1187). On this profile that is the serial port.
+        local active = vm:read_file("/sys/class/tty/console/active")
+        local last
+        for name in active:gmatch("%S+") do last = name end
+        t:assert(last, "the kernel names an active console: " .. active)
+        local endpoint = "/dev/" .. ((last == "tty0") and "tty1" or last)
         for _, stream in ipairs({ 0, 1, 2 }) do
-            t:assert_eq(fds[stream], "/dev/console",
-                "stream " .. stream .. " is the terminal it asked for")
+            t:assert_eq(fds[stream], endpoint,
+                "stream " .. stream .. " is the terminal it asked for, resolved")
         end
         -- Not the daemon wiring: the /dev/null descriptor and both pipe
         -- pairs were closed, so its output is not captured for logging.

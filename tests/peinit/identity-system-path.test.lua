@@ -126,7 +126,12 @@ test("a minted token stays in the logon session peinit was given at boot",
             return found
         end
 
-        local mine, theirs = logon_sid(token_of(1)), logon_sid(token_of(pid_of("eventd")))
+        -- authd rather than eventd: eventd declares `Identity=Service`
+        -- since eventd 0.1.9 and takes the authd path (§4.3), so its token
+        -- is the authority's, in a session the authority made. authd is
+        -- still `Identity=SYSTEM`, and is the platform daemon this path
+        -- exists for — the one that mints, and so cannot be minted for.
+        local mine, theirs = logon_sid(token_of(1)), logon_sid(token_of(pid_of("authd")))
         t:assert_eq(#mine, 1, "peinit's token names one logon session")
 
         -- Exactly one, not two: peinit filters the template's logon-SID
@@ -143,16 +148,22 @@ test("a minted token gains the service's own SID and the Service group",
     { spec = "peinit *token.the-service-sid-and-service-group-are-added" },
     function(t)
         -- Two groups, and only those two: everything else in a minted
-        -- token comes from the template.
-        local mine, theirs = token_of(1), token_of(pid_of("eventd"))
+        -- token comes from the template. authd is the subject because it
+        -- is a SYSTEM service the image starts (eventd, the subject here
+        -- once, declares `Identity=Service` now and is the authority's).
+        -- Its RequiredPrivileges narrow the privilege set (§4.5), not the
+        -- groups, so the group comparison is unaffected.
+        local mine, theirs = token_of(1), token_of(pid_of("authd"))
+        t:assert_eq(theirs.principal.user, "S-1-5-18",
+            "authd runs on a SYSTEM token, so peinit minted it")
         local added = {}
         for sid in pairs(theirs.groups) do
             if mine.groups[sid] == nil then added[sid] = true end
         end
 
-        -- eventd's per-service SID, derived by the rule of §4.4 from the
-        -- name "eventd".
-        local service_sid = "S-1-5-80-1963885778-1835409261-1671587836-2279113866-1994761124"
+        -- authd's per-service SID, derived by the rule of §4.4 from the
+        -- name "authd" (identity-service-sids.test.lua has the table).
+        local service_sid = "S-1-5-80-3733847795-2198956809-1841698210-3923492485-3570583468"
         t:assert(added[service_sid], "the per-service SID was added")
         t:assert(added["S-1-5-6"], "and so was the Service group")
         t:assert_eq(count(added), 2, "and nothing else was")
@@ -213,9 +224,13 @@ test("every SYSTEM token peinit mints carries SYSTEM and Administrators full con
         -- SYSTEM token had no default DACL at all; green since 0.0.5-2.
     },
     function(t)
-        -- The four the bootstrap circle is about must be up and among the
-        -- tokens read, so that an empty sweep cannot pass.
-        local required = { "registryd", "lpsd", "authd", "eventd" }
+        -- The bootstrap circle's SYSTEM services must be up and among the
+        -- tokens read, so that an empty sweep cannot pass. That is
+        -- registryd and authd: lpsd and eventd declare `Identity=Service`
+        -- in the lpsd-service.reg and eventd-service.reg the image ships,
+        -- so they take the authd path and their tokens are not peinit's
+        -- to mint.
+        local required = { "registryd", "authd" }
         for _, name in ipairs(required) do pid_of(name) end
 
         -- Every service running on a SYSTEM token rather than a sample:

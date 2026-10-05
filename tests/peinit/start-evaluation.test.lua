@@ -76,23 +76,27 @@ local SERVICES = {
         { name = "PreStartCheckTimeout", type = "dword", data = 3 },
         { name = "Conditions", type = "multi", data = { "path:/" } },
     } },
-    -- Two services that want /dev/tty3 (a spare virtual console, so the
-    -- image's own login-console on /dev/console is untouched). The waiter
-    -- carries a filesystem condition, so its start forks a helper; freezing
-    -- the helper holds it pending while the holder takes the terminal.
+    -- Two services that want /dev/tty9, a virtual console nothing in the
+    -- image claims. It used to be /dev/tty3, until the image's
+    -- login-console.reg grew login-tty1..3 (PEI-1187): login-tty3 holds
+    -- /dev/tty3 from boot:settled on, so the waiter was skipped at the
+    -- cacheable pass with TtyUnavailable and never forked the helper this
+    -- test freezes. The waiter carries a filesystem condition, so its
+    -- start forks a helper; freezing the helper holds it pending while
+    -- the holder takes the terminal.
     { path = [[Machine\System\Services\pt-tty-holder]], values = {
         { name = "ImagePath", type = "sz", data = "/bin/sleep" },
         { name = "Arguments", type = "multi", data = { "3600" } },
         { name = "Identity", type = "sz", data = "SYSTEM" },
         { name = "Readiness", type = "dword", data = 1 },
-        { name = "TTYPath", type = "sz", data = "/dev/tty3" },
+        { name = "TTYPath", type = "sz", data = "/dev/tty9" },
     } },
     { path = [[Machine\System\Services\pt-tty-waiter]], values = {
         { name = "ImagePath", type = "sz", data = "/bin/sleep" },
         { name = "Arguments", type = "multi", data = { "3600" } },
         { name = "Identity", type = "sz", data = "SYSTEM" },
         { name = "Readiness", type = "dword", data = 1 },
-        { name = "TTYPath", type = "sz", data = "/dev/tty3" },
+        { name = "TTYPath", type = "sz", data = "/dev/tty9" },
         { name = "PreStartCheckTimeout", type = "dword", data = 30 },
         { name = "Conditions", type = "multi", data = { "path:/" } },
     } },
@@ -257,15 +261,15 @@ test("the terminal is re-checked after the helper returns, not carried over from
             return ok and events:find("populated 1") or nil
         end, { timeout = 15, interval = 0.3, desc = "the waiter's helper to be pending" })
 
-        -- At the cacheable pass /dev/tty3 was free, so the waiter got past
+        -- At the cacheable pass /dev/tty9 was free, so the waiter got past
         -- the terminal gate and into the helper. Now the holder takes the
         -- terminal while the helper is stuck.
         local holder = wait_until(function()
             vm:run("svctl start pt-tty-holder")
             local out = json.decode(vm:run("svctl --json status pt-tty-holder").stdout)
             return out.state == "active" and out or nil
-        end, { timeout = 30, interval = 0.5, desc = "pt-tty-holder to take /dev/tty3" })
-        t:assert_eq(holder.state, "active", "the holder now owns /dev/tty3")
+        end, { timeout = 30, interval = 0.5, desc = "pt-tty-holder to take /dev/tty9" })
+        t:assert_eq(holder.state, "active", "the holder now owns /dev/tty9")
 
         -- Thaw the helper. It reports `path:/` satisfied, so the condition
         -- passes -- the only thing that can stop the waiter now is the

@@ -171,22 +171,32 @@ test("every service's reported identity is the one its token actually carries",
             LocalService = "S-1-5-19",
             NetworkService = "S-1-5-20",
         }
-        local checked = 0
+        --
+        -- Only where the identity predicts one, as the TRM says. eventd
+        -- declares `Identity=Service` (eventd-service.reg in the image):
+        -- PGSS Logon §2.19's virtual account, whose user SID is the
+        -- service's own and is authd's to resolve, so peinit has nothing
+        -- to compare it against and it is passed over here rather than
+        -- counted. The predicting four — registryd and authd on SYSTEM,
+        -- and this file's own LocalService and NetworkService residents —
+        -- are what make `checked` mean something.
+        local checked, passed_over = 0, {}
         for _, service in ipairs({ "registryd", "eventd", "netd", "authd",
                                    "resolvd", "pt-authd-local", "pt-authd-network" }) do
             local status = vm:run("svctl status " .. service).stdout
             local identity = status:match("identity: (%S+)")
             local pid = status:match("pid: (%d+)")
-            if identity and pid then
-                t:assert(predicted[identity],
-                    service .. " declares an identity that predicts a SID: " .. identity)
+            if identity and pid and predicted[identity] then
                 t:assert_eq(token_of(pid).principal.user, predicted[identity],
                     service .. " is reported as " .. identity ..
                         " and holds that identity's SID")
                 checked = checked + 1
+            elseif identity then
+                passed_over[#passed_over + 1] = service .. "=" .. identity
             end
         end
-        t:assert(checked > 3, "several services were checked, not none (" .. checked .. ")")
+        t:assert(checked > 3, "several services were checked, not none (" .. checked ..
+            "; passed over as predicting no SID: " .. table.concat(passed_over, ", ") .. ")")
     end)
 
 test("a ServiceAttest from anything but PID 1 is refused, even when the peer is SYSTEM",

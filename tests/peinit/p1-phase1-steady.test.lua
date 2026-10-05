@@ -183,14 +183,31 @@ test("the clock is set from the hardware RTC, read as UTC, through the fallback 
         },
     },
     function(t)
-        -- This guest has no /dev/rtc — devtmpfs creates rtc0 and nothing
-        -- makes the alias — so every boot of this profile takes the
-        -- fallback, and a clock that is right is the proof that it
-        -- worked. A peinit that opened only /dev/rtc would be in
-        -- recovery instead (see p1-recovery.test.lua, which removes rtc0
-        -- as well and gets exactly that).
+        -- devtmpfs creates rtc0 and no /dev/rtc, so at Phase 1 — which is
+        -- when peinit reads the clock — every boot of this profile takes
+        -- the fallback, and a clock that is right is the proof that it
+        -- worked. A peinit that opened only /dev/rtc would be in recovery
+        -- instead (see p1-recovery.test.lua, which removes rtc0 as well
+        -- and gets exactly that).
+        --
+        -- The alias does turn up later, and that is why this used to fail
+        -- in suite runs and pass alone (PEI-1325). The image's eudev, a
+        -- Phase 2 service, makes `/dev/rtc -> rtc0` from its
+        -- 50-peios-default.rules once its coldplug reaches the rtc device:
+        -- after peinit has set the clock, and at a moment that depends on
+        -- how loaded the host is. So the premise is not "absent" but "never
+        -- a device node of its own": either missing, or eudev's symlink to
+        -- the very node the fallback opened.
         local primary = vm:run("stat -c %F /dev/rtc")
-        t:assert(not primary:ok(), "/dev/rtc is absent: " .. primary.stdout)
+        if primary:ok() then
+            t:assert(primary.stdout:find("symbolic link", 1, true),
+                "/dev/rtc, if present, is eudev's alias rather than a node: " .. primary.stdout)
+            local target = vm:run("readlink /dev/rtc")
+            t:assert_eq(target.stdout:gsub("%s+$", ""), "rtc0",
+                "and the alias names rtc0, the device the fallback reads")
+            t:assert_eq(vm:run("svctl --json status eudev").stdout:match('"state":"([^"]+)"'),
+                "active", "eudev, the Phase 2 service that makes it, is running")
+        end
         local fallback = vm:run("stat -c %F /dev/rtc0")
         fallback:assert_ok()
         t:assert(fallback.stdout:find("character"), "/dev/rtc0 is the device: " .. fallback.stdout)
