@@ -328,6 +328,17 @@ local function ready(i)
     return false
 end
 
+--- eth0 bound and its fd77 address settled, serving the gateway until
+--- it is. An Interface rule change in an earlier test restarts eth0's
+--- clients, and the gateway answers only while a test serves it: under a
+--- loaded host the restart can land after that test stopped serving, and
+--- eth0 then waits unbound for the next test to answer it.
+local function eth_ready()
+    local s = network.serve_until(gw, sut, ready, { iface = true, timeout = 90 })
+    assert(s, "eth0 bound, with an fd77 address")
+    settled(eth.index)
+end
+
 -- ---------------------------------------------------------------------------
 
 test("on a joined interface every IPv4 address (169.254 included) and every non-link-local IPv6 address is netd's; a protocol-200 route is netd's, but only main-table unicast routes with an output interface are read; the kernel's fe80::/10 is never touched",
@@ -477,7 +488,7 @@ end)
 test("an address whose flags alone change is re-added in place (a replace), never deleted; DAD's tentative flag is no difference",
     { spec = "netd *reconcile.flag-change-is-a-replace" }, function(t)
     local i = assert(eth.index, "the first test found eth0")
-    settled(i)
+    eth_ready()
     local stable
     for a, e in pairs(v6_on(i)) do
         if a:match("^fd77:") and not e.tentative then stable = stable or a end
@@ -527,7 +538,7 @@ end)
 test("an interface the kernel already matches gets an empty plan: a full pass sends nothing",
     { spec = "netd *reconcile.converged-plan-is-empty" }, function(t)
     local i = assert(eth.index, "the first test found eth0")
-    settled(i)
+    eth_ready()
     pass()
     local applying = count_logged(function(l) return l:find("applying", 1, true) ~= nil end)
     local m = monitor_open()
@@ -549,6 +560,7 @@ end)
 test("phrasing: IPv4 carries local = address = itself, link scope for 169.254/16 and universe otherwise, and below /31 a broadcast (the lease's, else all-ones); IPv6 universe scope and no-prefix-route when off-link; gateway routes are universe scope in the main table with protocol 200",
     { spec = "netd *reconcile.apply" }, function(t)
     local i = assert(eth.index, "the first test found eth0")
+    eth_ready()
     local lease = raw_addresses(i)["10.77.0.50"]
     t:assert(lease, "the lease's address")
     t:assert_eq(lease["local"], "10.77.0.50", "IFA_LOCAL is the address")
@@ -600,6 +612,7 @@ end)
 test("IPv6 lifetimes are netd's: the kernel is told valid forever and preferred forever, or zero when deprecated",
     { spec = "netd *reconcile.ipv6-lifetimes-forever-or-deprecated" }, function(t)
     local i = assert(eth.index, "the first test found eth0")
+    eth_ready()
     local stable
     for a, e in pairs(v6_on(i)) do if a:match("^fd77:") and not e.deprecated then stable = stable or a end end
     t:assert(stable, "a preferred fd77 address")

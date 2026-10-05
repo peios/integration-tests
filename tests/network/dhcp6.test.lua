@@ -16,14 +16,14 @@
 -- client and clears the M/O latch (§6.1), so the next client starts only
 -- when an advertisement with O is sent again.
 --
--- The shipped dev baseline and DHCPv6 (PEI-1366). The
--- gateway's REPLY goes from its link-local address, port 547, unicast to
--- the machine's link-local address, port 546. On the shipped policy it
--- never reaches netd: netd keeps retransmitting the same exchange and
--- never logs `dhcpv6 answered`. The two tests that need an accepted
--- reply assert the TRM and are tagged known-bug, and log the firewall's
--- drop counter (NTFE's `verdict_drop`) across the window in which the
--- gateway answered, as the evidence. The policy is not changed here.
+-- The shipped dev baseline and DHCPv6. The gateway's REPLY goes from its
+-- link-local address, port 547, unicast to the machine's link-local
+-- address, port 546: conntrack sees a new inbound flow, which the
+-- baseline's Flow rule `dhcpv6-client` passes. Before kernel alpha9 the
+-- baseline had no such rule and the Flow backstop dropped every REPLY
+-- (PEI-1366). The two tests that need an accepted reply still log the
+-- firewall's drop counter (NTFE's `verdict_drop`) across the window in
+-- which the gateway answered. The policy is not changed here.
 
 local peinit = require("helpers.peinit")
 local gateway = require("helpers.gateway")
@@ -348,7 +348,7 @@ test("the O flag starts the client: an INFORMATION-REQUEST from the link-local a
 -- ---------------------------------------------------------------------------
 
 test("only a REPLY with the exchange's transaction id, the machine's DUID and a non-empty server id is accepted; option 23 gives up to 16 servers less unspecified, multicast and loopback, option 24 the domains; retransmission stops",
-    { spec = "netd *dhcp6.reply-acceptance", tags = { "known-bug" } }, function(t)
+    { spec = "netd *dhcp6.reply-acceptance" }, function(t)
         local ll = assert(link_local(), "the machine has a link-local address")
         local srv = { 2, "\0\3\0\1" .. gw.mac }
         local function names(list) return gateway.opt.names(list) end
@@ -402,10 +402,8 @@ test("only a REPLY with the exchange's transaction id, the machine's DUID and a 
                 return table.concat(x, " ")
             end)()))
         t:log("`dhcpv6 answered` logged " .. count_logged("dhcpv6 answered") .. " time(s)")
-        -- PEI-1366: on the shipped policy the gateway's
-        -- REPLY (fe80::gw:547 -> fe80::machine:546) never reaches netd;
-        -- the exchange retransmits with the same txid for as long as it
-        -- runs and `dhcpv6 answered` is never logged.
+        -- Before alpha9 the shipped policy dropped the gateway's REPLY
+        -- (fe80::gw:547 -> fe80::machine:546), so this never held (PEI-1366).
         t:assert(s, "the good REPLY was accepted (its server fd62::1 is in the status)")
         local i = iface()
         t:assert(has(i.dns, "fd62::2"), "both good servers are taken")
@@ -451,7 +449,7 @@ test("only a REPLY with the exchange's transaction id, the machine's DUID and a 
     end)
 
 test("after a reply the client waits for the refresh time, never less than 600 s",
-    { spec = "netd *dhcp6.refresh-time", tags = { "known-bug" } }, function(t)
+    { spec = "netd *dhcp6.refresh-time" }, function(t)
         -- Only the floor's lower edge is observable in a test of this
         -- length: a refresh time of 1 s must not bring a request within
         -- 30 s. 600 s itself, the one-day default, the new transaction
@@ -468,8 +466,8 @@ test("after a reply the client waits for the refresh time, never less than 600 s
         local d1 = drops()
         t:log(string.format("replies sent %d; requests %d; NTFE verdict_drop delta %s",
             sent, #requests(), (d0 and d1) and tostring(d1 - d0) or "?"))
-        -- PEI-1366: the REPLY never reaches netd (see the
-        -- header), so nothing is accepted and there is no refresh to time.
+        -- Before alpha9 the REPLY never reached netd (see the header,
+        -- PEI-1366), so nothing was accepted and there was no refresh to time.
         t:assert(s, "the REPLY with refresh time 1 was accepted")
         local n = #requests()
         local at = gw:now()

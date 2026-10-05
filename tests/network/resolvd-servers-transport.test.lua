@@ -142,8 +142,12 @@ test("one server: each of the three attempts goes to it, one at a time, each fai
         end
         local gaps = { q[2].at - q[1].at, q[3].at - q[2].at }
         t:log(string.format("gaps %.2f s, %.2f s; question took %.2f s", gaps[1], gaps[2], elapsed))
+        -- The gaps are the gateway's receive times: a pump that reads one
+        -- attempt late under a loaded host shortens the gap after it
+        -- (1.87 s was seen in a full run). The deadlines themselves are
+        -- pinned from resolvd's side by the question's total below.
         for i, g in ipairs(gaps) do
-            t:assert(g >= 1.9 and g <= 2.5, string.format("attempt %d was sent when attempt %d timed out, 2 s on (%.2f s)",
+            t:assert(g >= 1.7 and g <= 2.5, string.format("attempt %d was sent when attempt %d timed out, 2 s on (%.2f s)",
                 i + 1, i, g))
         end
         t:assert(elapsed >= 5.8 and elapsed <= 7.0, string.format("unavailable at the third deadline, ~6 s (%.2f s)", elapsed))
@@ -225,6 +229,10 @@ test("TCP: a connection that is refused, or closed before a whole reply, fails t
         -- Refused: close the gateway's listener, so a SYN to port 53 is reset.
         sys.close(gw.vm, gw.dns_listener)
         gw.dns_listener = nil
+        -- Drain what the first half left queued on the gateway's packet
+        -- socket (a late SYN of its last connection, under load) before
+        -- forgetting, or it is counted below as a fourth refused attempt.
+        gw:pump(300)
         gw:forget()
         outcome, elapsed = timed(t, "tcrst-6.tr.test")
         gw.dns_listener = assert(ntfe.tcp_listen(gw.vm, "::", 53))

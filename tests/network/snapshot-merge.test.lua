@@ -11,11 +11,10 @@
 -- on `Profiles\default`; each edit restarts netd's clients, so every
 -- check waits for the merged list it expects.
 --
--- The DHCPv6 source (step 4 of each list) cannot be shown on the shipped
--- policy: the gateway's REPLY (fe80::gw:547 → fe80::machine:546) never
--- reaches netd (PEI-1366, found by the dhcp6 testset). The
--- passing tests therefore run without a DHCPv6 server and check steps
--- 1–3; the last test asserts the TRM's step 4 and is tagged known-bug.
+-- The other tests run without a DHCPv6 server and check steps 1–3; the
+-- last test adds one and checks step 4. Before kernel alpha9 the shipped
+-- policy dropped the gateway's REPLY (fe80::gw:547 → fe80::machine:546),
+-- so step 4 could not be shown (PEI-1366, found by the dhcp6 testset).
 --
 -- Own VMs: the gateway setup (router, three sources) is specific to this
 -- file, and the default profile is edited throughout.
@@ -139,15 +138,14 @@ test("each list loses adjacent duplicates only: a server or domain repeated with
     end)
 
 test("with Dns.Offered the DHCPv6 reply's non-link-local servers and its domains come last",
-    { spec = "netd *snapshot.dns-merge", tags = { "known-bug" } }, function(t)
+    { spec = "netd *snapshot.dns-merge" }, function(t)
         lease_with({ dns = { "10.77.0.1" }, options = { OPT119 } })
         gw:dhcp6({ dns = { "fd77::54", "fe80::54" }, domains = { "v6.example" } })
         -- Restart the clients (and the O-flag DHCPv6 client with them) so
         -- the information request goes to a server that answers.
         profile({ ["Dns.Domains"] = "multi:prof.example" })
-        -- PEI-1366: on the shipped policy the gateway's
-        -- REPLY never reaches netd, so fd77::54 and v6.example never
-        -- appear; the list stops after the routers' entries.
+        -- Before alpha9 the shipped policy dropped the gateway's REPLY,
+        -- so fd77::54 and v6.example never appeared (PEI-1366).
         local ok, err = pcall(expect, t, { "10.77.0.1", "fd77::53", "fd77::54" },
             { "prof.example", "a.example", "b.example", "ra.example", "v6.example" },
             "with a DHCPv6 reply")

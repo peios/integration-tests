@@ -23,10 +23,10 @@
 --   = 0`, 7007 `Network.Trust.Equal = pt-lab`.
 --
 -- A connection is "pass" (handshake), "reject" (ECONNREFUSED: the RST)
--- or "drop" (nothing within 1.5 s). Over IPv6 link-local an inbound
--- REJECT is not answered (PEI-1383, the last test), so
--- link-local probes use the PASS ports, where the outcome is the
--- backstop's DROP or the fact's PASS and no refusal is involved.
+-- or "drop" (nothing within 1.5 s). Link-local probes use the PASS
+-- ports, where the outcome is the backstop's DROP or the fact's PASS and
+-- no refusal is involved; the last test covers a link-local REJECT, which
+-- before kernel alpha9 was never answered (PEI-1383).
 --
 -- The network id is computed with helpers.sha1 from netd's rule
 -- (`dhcp:10.77.0.1|10.77.0.0/24`, kind wired). When a rule or a record
@@ -378,18 +378,14 @@ test("pulling the cable makes the facts absent: Status Network goes, the kernel'
     end)
 
 test("an inbound REJECT on eth0 answers an IPv6 peer with a reset, at a link-local address as at a global one",
-    { spec = "PKM *ntfe-seat.inbound-refusal-routed-to-peer", tags = { "known-bug" } },
+    { spec = { "PKM *ntfe-seat.inbound-refusal-routed-to-peer",
+               "PKM *ntfe-seat.inbound-link-local-answer-routed-on-ingress" } },
     function(t)
-        -- PEI-1383: an inbound TCP SYN to eth0's
-        -- link-local address that a Flow rule REJECTs is judged REJECT
-        -- (verdict_reject +1 per SYN) but no reset is sent: the refusal
-        -- degrades to DROP (reject_degraded +1 per SYN) and the peer's
-        -- connect times out. refuse.c's ntfe_refuse_send_self() routes the
-        -- answer with ip6_route_me_harder(), which for a link-local
-        -- destination looks the route up strictly on the offending
-        -- packet's own route's device; that lookup failing is the likely
-        -- drop. The same rule over IPv4 is answered (the tests above).
-        -- PKM §6.2 lists no such case among the degradations.
+        -- Before kernel alpha9 an inbound TCP SYN to eth0's link-local
+        -- address that a Flow rule REJECTs was judged REJECT but no reset
+        -- was sent: ip6_route_me_harder() looked the answer's route up on
+        -- the loopback device, found none, and the refusal degraded to
+        -- DROP (reject_degraded +1 per SYN; PEI-1383).
         local spec = { lifetime = 0, prefixes = { { prefix = "fd77::", len = 64 } } }
         gw:router(spec)
         gw:send_ra(spec)
