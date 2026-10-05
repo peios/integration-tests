@@ -162,7 +162,12 @@ test("with no value in the registry, SYSTEM gets both rights",
     { spec = "peinit *svcsd.the-control-default-grants-system-and-administrators-both" },
     function(t)
         -- The image ships no ControlSecurity value, so this is the
-        -- built-in default and not a policy decision anybody made.
+        -- built-in default and not a policy decision anybody made. It is
+        -- deleted first all the same: the tests above share this machine,
+        -- and one that fails between writing a value and clearing it
+        -- leaves the value behind, which made this case fail on its
+        -- neighbour's account rather than its own.
+        clear_control()
         t:assert(vm:run("reg get '" .. CONTROL .. "' ControlSecurity").exit_code ~= 0,
             "no ControlSecurity value is present")
         t:assert_eq(reload_config(), "allowed",

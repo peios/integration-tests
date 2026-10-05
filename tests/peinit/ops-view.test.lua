@@ -452,7 +452,11 @@ test("a submitter and an administrator see the same job view on their different 
         -- `wait` is answered on the jobs socket and `job-status` on the
         -- control socket, and what comes back is the same record in the
         -- same shape — the same member names, and the same values for
-        -- the fields that do not move between the two reads.
+        -- the fields that do not move between the two reads — but for
+        -- one field the control socket adds: `granted`, the job rights
+        -- the caller holds on it (§10.2). The jobs socket's view has
+        -- none, because a submitter is answered there under its own
+        -- rules.
         local id = submit("/bin/sleep 2")
         local waited = vm:run("svctl --json job wait " .. id, { timeout = 90 })
         waited:assert_ok()
@@ -460,12 +464,16 @@ test("a submitter and an administrator see the same job view on their different 
         queried:assert_ok()
 
         local from_jobs, from_control = members(waited.stdout), members(queried.stdout)
+        t:assert(from_control.granted,
+            "the control socket's view carries granted: " .. queried.stdout)
+        t:assert(not from_jobs.granted,
+            "and the jobs socket's does not: " .. waited.stdout)
         for name in pairs(from_jobs) do
             t:assert(from_control[name],
                 name .. " is in both views: " .. waited.stdout .. " / " .. queried.stdout)
         end
         for name in pairs(from_control) do
-            t:assert(from_jobs[name],
+            t:assert(from_jobs[name] or name == "granted",
                 name .. " is in both views: " .. waited.stdout .. " / " .. queried.stdout)
         end
 

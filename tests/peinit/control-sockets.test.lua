@@ -53,27 +53,34 @@ end
 test("the control socket carries the descriptor the chapter states, and only that",
     { spec = "peinit *control.the-socket-descriptor" },
     function(t)
-        -- O:SYG:SYD:(A;;GA;;;SY)(A;;GA;;;BA). `sd show` renders a mask
-        -- it has no letter for in hex, and GenericAll is 0x10000000.
+        -- O:SYG:SYD:(A;;GA;;;SY)(A;;GA;;;BA)(A;;FW;;;AU). `sd show`
+        -- renders a mask it has no letter for in hex, and GenericAll is
+        -- 0x10000000.
         local sd = vm:run("sd show /run/services/peinit/control.sock")
         sd:assert_ok()
         local text = sd.stdout
         t:assert(text:find("Owner:%s+Local System"), "owned by SYSTEM: " .. text)
-        t:assert(text:find("DACL: %(2 ACEs%)"),
-            "exactly two ACEs, so nothing has been added: " .. text)
+        t:assert(text:find("DACL: %(3 ACEs%)"),
+            "exactly three ACEs, so nothing else has been added: " .. text)
         t:assert(text:find("allow Local System %(S%-1%-5%-18%)%s+0x10000000"),
             "SYSTEM has GenericAll")
         t:assert(text:find("allow BUILTIN\\Administrators %(S%-1%-5%-32%-544%)%s+0x10000000"),
             "Administrators have GenericAll")
 
-        -- The point of the two-ACE assertion above: nobody else may
-        -- reach it. Administering the system is not for everyone, and
-        -- the kernel enforces that at connect() rather than peinit.
+        -- Every authenticated principal may connect, and connecting is
+        -- all the third ACE grants: FW is what connect() on a pathname
+        -- socket needs. What a caller may then do is decided per command
+        -- by peinit, against the control descriptor or the target's own,
+        -- with the token captured at accept (§10.2). Admitting only
+        -- SYSTEM and Administrators would make every grant to anyone else
+        -- unreachable.
+        t:assert(text:find("allow Authenticated Users %(S%-1%-5%-11%)%s+w"),
+            "Authenticated Users may write, which is to say connect: " .. text)
+        -- And no wider than that: an anonymous caller is not admitted.
         t:assert(not text:find("S%-1%-1%-0"), "no Everyone ACE: " .. text)
-        t:assert(not text:find("S%-1%-5%-11"), "no Authenticated Users ACE: " .. text)
     end)
 
-test("the jobs socket adds one ACE to the control socket's, and it is the write right",
+test("the jobs socket grants every authenticated principal the write right",
     { spec = "peinit *jobs.the-socket-descriptor" },
     function(t)
         -- O:SYG:SYD:(A;;GA;;;SY)(A;;GA;;;BA)(A;;FW;;;AU). FW is what a
