@@ -780,6 +780,48 @@ test("the audit policy is read from the effective token, so impersonation carrie
         t:assert_eq(plain, 0, "and a principal whose policy is zero forces nothing")
     end)
 
+test("a SACL record from the AccessCheck syscall needs SeAuditPrivilege on the caller",
+    { spec = "PKM *check.auditing.syscall-sacl-needs-audit-privilege" }, function(t)
+        local AUDIT_PRIV = token.bit(token.PRIV.AUDIT)
+        local sd = access.simple({ grant(READ, E) }, { sacl = access.acl({
+            audit_ace(READ, E, SUCCESS_FLAG) }) })
+        --- Install a principal minted from `spec` on a worker, run the
+        --- check there with no token_fd, so that principal is both the
+        --- caller and the subject, and return the access records written.
+        local function records(spec)
+            local events = recording(function()
+                token.as_principal(t, vm, spec, function(w)
+                    local r = access.check(w, { sd = sd, desired = READ, mapping = OBJ })
+                    t:assert(r.ok, "the check is answered either way: " .. sys.errname(r.errno or 0))
+                end)
+            end)
+            return of(events, "kacs.audit.access.checked")
+        end
+        local without = records({})
+        local disabled = records({ privs_present = AUDIT_PRIV, privs_enabled = 0 })
+        local held = records({ privs_present = AUDIT_PRIV, privs_enabled = AUDIT_PRIV })
+        t:log(string.format("records: without=%d disabled=%d enabled=%d", #without, #disabled, #held))
+        t:assert_eq(#without, 0, "a caller without SeAuditPrivilege has its SACL record withheld")
+        t:assert_eq(#disabled, 0, "and holding it disabled is not enough")
+        t:assert_eq(#held, 1, "with it enabled, the SACL's record is written")
+        t:assert_eq(held[1].payload.trigger.kind, "sacl", "naming the SACL as its trigger")
+    end)
+
+test("a record the token's own audit policy forces is written without SeAuditPrivilege",
+    { spec = "PKM *check.auditing.syscall-policy-records-ungated" }, function(t)
+        local sd = access.simple({ grant(READ, E) }, { sacl = access.acl({
+            audit_ace(READ, E, SUCCESS_FLAG) }) })
+        local events = recording(function()
+            token.as_principal(t, vm, { audit_policy = POLICY.OBJECT_ACCESS_SUCCESS }, function(w)
+                local r = access.check(w, { sd = sd, desired = READ, mapping = OBJ })
+                t:assert(r.ok, "the check is answered: " .. sys.errname(r.errno or 0))
+            end)
+        end)
+        local ev = of(events, "kacs.audit.access.checked")
+        t:assert_eq(#ev, 1, "one record, not two: the SACL's is withheld")
+        t:assert_eq(ev[1].payload.trigger.kind, "policy", "and the one written is the policy's")
+    end)
+
 test("an event carries the subject, the object context, the access, the trigger and the process",
     { spec = "PKM *check.auditing.event-contents" }, function(t)
         local ace = audit_ace(READ, E, SUCCESS_FLAG)
@@ -847,8 +889,8 @@ test("an event carries the subject, the object context, the access, the trigger 
         t:assert_eq(p.process, nil, "and no longer a top-level process map")
     end)
 
-test("an event without an audit context or caller PIP names no object and asserts nothing",
-    { spec = "PKM *check.auditing.event-contents" }, function(t)
+test("an event without an audit context names no object, and is still the caller's claim",
+    { spec = "PKM *check.auditing.syscall-records-asserted" }, function(t)
         local sd = access.simple({ grant(READ, E) }, { sacl = access.acl({
             audit_ace(READ, E, SUCCESS_FLAG) }) })
         local events = recording(function() as_subject({}, sd, READ) end)
@@ -856,8 +898,9 @@ test("an event without an audit context or caller PIP names no object and assert
         t:assert_eq(#ev, 1, "one event from the SACL")
         local p = ev[1].payload
         t:assert_eq(p.object, nil, "the kernel does not know what was checked")
-        t:assert_eq(p.fields, nil, "and nothing in it is the caller's claim")
-        t:assert_eq(count(p), 5, "subject, emitter, access, outcome and trigger alone")
+        t:assert_eq(p.fields and p.fields.attestation and p.fields.attestation.userspace, true,
+            "and it is asserted all the same: the descriptor, and so trigger.ace, was the caller's")
+        t:assert_eq(count(p), 6, "subject, emitter, access, outcome, trigger and fields")
         -- A non-zero caller PIP is also the caller's claim.
         local pip_events = recording(function()
             with_subject({}, function(fd)
