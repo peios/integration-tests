@@ -217,12 +217,10 @@ test("with Address.Temporary each prefix also carries random temporary addresses
         local distinct = 0
         for _ in pairs(seen) do distinct = distinct + 1 end
         t:assert_eq(distinct, #order, "every temporary was a new address")
-        -- ndp::Engine::expire trims the list to four BEFORE it pushes the
-        -- regenerated temporary, so for a moment the engine holds five. It
-        -- never reaches the kernel because the next expire comes at once:
-        -- a deprecated temporary's past preferred deadline keeps the poll
-        -- timeout at zero (PEI-1367). If
-        -- that spin is fixed, this assertion is the one to watch.
+        -- The list is cut to four after the regenerated temporary is
+        -- added. It was once cut before, and five reached the interface;
+        -- only netd spinning on a past deadline (PEI-1367) hid that, by
+        -- cutting again at once.
         t:assert(max_live <= 4, "at most four temporaries at once (saw " .. max_live .. ")")
         t:assert(not rtnl.address(sut, INDEX, order[1]), "the oldest (" .. order[1] .. ") was dropped")
 

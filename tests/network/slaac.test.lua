@@ -261,8 +261,8 @@ test("0xffffffff is forever; an update takes the on-link flag and the preferred 
             "the prefix route went with the on-link flag")
     end)
 
-test("when the preferred lifetime runs out the address is deprecated and kept; when the valid lifetime does, removed",
-    { spec = "netd *slaac.deprecate-then-remove" }, function(t)
+test("when the preferred lifetime runs out the address is deprecated and kept, with netd idle meanwhile; when the valid lifetime does, removed",
+    { spec = "netd *slaac.deprecate-then-remove netd *loop.one-thread-one-poll" }, function(t)
         local addr = expected("fd58::")
         local quiet = netd_cpu_over(3)
         local t0 = gw:now()
@@ -276,12 +276,15 @@ test("when the preferred lifetime runs out the address is deprecated and kept; w
         t:assert(dep >= 4 and dep <= 7, "…5 s after the advertisement (+" .. dep .. "s)")
         t:assert(network.has_address(iface(), addr), "the deprecated address is still on the interface")
         t:assert_eq(present(addr).preferred, 0, "kept with a preferred lifetime of 0")
-        -- Evidence for PEI-1367 (not a §6.2 claim):
-        -- netd's CPU over 3 s with nothing deprecated, and over 3 s while
-        -- this address is.
+        -- The loop sleeps in poll until something is due (§2.2). The
+        -- passed preferred lifetime is not due again: offered as a
+        -- deadline it made the timeout zero, and netd spun a whole core
+        -- until the address went, about 370 ticks in these 3 s (PEI-1367).
         local busy = netd_cpu_over(3)
         t:log(string.format("netd CPU ticks over 3 s: %d with nothing deprecated, %d with a deprecated address",
             quiet, busy))
+        t:assert(busy <= quiet + 30, "netd stays idle while an address is deprecated (" .. busy
+            .. " ticks in 3 s, against " .. quiet .. " with none)")
         t:assert(pump_until(function() return not present(addr) end, 15),
             "removed when its valid lifetime ran out")
         local gone = gw:now() - t0
