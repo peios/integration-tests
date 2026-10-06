@@ -346,6 +346,26 @@ function M.of_type(events, event_type)
     return out
 end
 
+--- The kacs.audit.privilege.used records of one `operation.name`,
+--- `access-check` unless another is named.
+---
+--- The type also records privilege spent at a Linux capability gate
+--- (`linux-cap`, `volume-mount`), once per process and gate, and the
+--- boot SYSTEM token — so the agent — records its privilege use. A case
+--- counting the records an access check produced counts these, so that
+--- the agent's own first use of a capability inside its window is not
+--- mistaken for one.
+function M.privilege_uses(events, operation)
+    operation = operation or "access-check"
+    local out = {}
+    for _, e in ipairs(M.of_type(events, "kacs.audit.privilege.used")) do
+        local op = type(e.payload) == "table" and type(e.payload.operation) == "table"
+            and e.payload.operation.name
+        if op == operation then out[#out + 1] = e end
+    end
+    return out
+end
+
 --- Release a ring.
 function M.detach(ring)
     sys.munmap(ring.vm, ring.addr, ring.length)

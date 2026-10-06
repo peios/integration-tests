@@ -427,6 +427,30 @@ test("the generic rights map onto the mount-namespace rights as the table says",
 
 -- The rights ---------------------------------------------------------------------
 
+test("an audited mount-namespace check names its object as a mount namespace",
+    { spec = "PKM *check.auditing.mount-namespace-object-kind" }, function(t)
+        local kmes = require("helpers.kmes")
+        -- The creator's own audit policy forces a record of every check it
+        -- makes, the table's among them.
+        local events = kmes.recording(t, vm, function()
+            as(t, { principal(0, { audit_policy = token.AUDIT.OBJECT_ACCESS_SUCCESS }) },
+                function(w)
+                    ok(t, unshare(w), "unshare")
+                    bind_and_drop(t, w, "a bind in the principal's own table")
+                end)
+        end)
+        local found
+        for _, e in ipairs(kmes.of_type(events, "kacs.audit.access.checked")) do
+            local object = e.payload.object
+            if object and object.kind == "mount-namespace" then found = e end
+        end
+        t:assert(found, "the table's check is recorded against a mount-namespace object")
+        t:assert_eq(found.payload.access.requested, 0x1, "for KACS_MNTNS_MOUNT")
+        local fields = 0
+        for _ in pairs(found.payload.object) do fields = fields + 1 end
+        t:assert_eq(fields, 1, "and names it by its kind alone")
+    end)
+
 test("changing the table asks the descriptor for KACS_MNTNS_MOUNT, 0x1",
     { spec = "PKM *kacs-abi.mntns-access-rights" }, function(t)
         -- KACS_MNTNS_MOUNT is the one right a guest can watch being

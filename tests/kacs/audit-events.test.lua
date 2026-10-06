@@ -38,6 +38,9 @@ local function recorded(t, fn)
     local ring, errno = kmes.attach(vm, 0)
     t:assert(ring, "a KMES ring attaches: " .. sys.errname(errno or 0))
     local ok, err = pcall(fn, ring)
+    -- kacs.session.destroyed is written by a kernel work item after the
+    -- teardown, not by the call that ended the session: give it a moment.
+    sys.nanosleep(vm, 0, 50 * 1000 * 1000)
     local events = kmes.drain(ring)
     kmes.detach(ring)
     if not ok then error(err, 0) end
@@ -205,7 +208,7 @@ test("kacs.audit.privilege.used comes from privilege-use auditing on a check",
             t:assert(r.ok, "SeBackupPrivilege grants read against an empty DACL")
             sys.close(vm, fd)
         end)
-        local records = kmes.of_type(events, "kacs.audit.privilege.used")
+        local records = kmes.privilege_uses(events)
         t:assert_eq(#records, 1, "one kacs.audit.privilege.used record")
         local p = records[1].payload
         t:assert_eq(p.privilege.name, "SeBackupPrivilege",
@@ -302,6 +305,14 @@ test("kacs.descriptor.rejected comes from a descriptor xattr that fails validati
              "pkm_kunit_file_sd_cache_population_corrupt_emits_once" },
     function(t) end)
 
+test("kacs.descriptor.rejected names the file by inode and device, its length and its reader",
+    { spec = "PKM *audit-events.corrupt-sd-identifies-file",
+      covered_by = "kunit:pkm_kunit_file",
+      skip = "a guest cannot author the corrupt stored descriptor this " ..
+             "record reports (see the case above); the payload runs under " ..
+             "pkm_kunit_file_sd_cache_population_corrupt_emits_once" },
+    function(t) end)
+
 test("stratafs.file.copied-up comes from the copy-up lifecycle",
     { spec = "PKM *audit-events.stratafs-copy-up-record" }, function(t)
         stratafs.with(vm, "auditev-copy-up", {
@@ -382,7 +393,7 @@ test("only five privilege names are representable in a privilege-use record",
                     intent = c[4].intent, mapping = MAP })
                 sys.close(vm, fd)
             end)
-            local records = kmes.of_type(events, "kacs.audit.privilege.used")
+            local records = kmes.privilege_uses(events)
             t:assert_eq(#records, 1, c[1] .. " produces one record")
             t:assert_eq(records[1].payload.privilege.name, c[1],
                 "under its canonical name")
@@ -391,10 +402,8 @@ test("only five privilege names are representable in a privilege-use record",
 
 test("no other privilege ever appears in a privilege-use record",
     { spec = "PKM *audit-events.privilege-encoder-fails-closed" }, function(t)
-        -- The encoder has a name for five privileges and refuses
-        -- anything else rather than emitting an unnamed one, which is
-        -- consistent with those being the only five that can influence a
-        -- check at all: a token full of the others audits nothing.
+        -- Only five privileges can influence a check, so a token full of
+        -- the others produces no access-check privilege record at all.
         local POLICY = AUDIT.PRIVILEGE_USE_SUCCESS | AUDIT.PRIVILEGE_USE_FAILURE
         local FIVE = token.bit(token.PRIV.SECURITY)
             | token.bit(token.PRIV.TAKE_OWNERSHIP)
@@ -416,7 +425,7 @@ test("no other privilege ever appears in a privilege-use record",
                 "and a denied one")
             sys.close(vm, fd)
         end)
-        t:assert_eq(#kmes.of_type(events, "kacs.audit.privilege.used"), 0,
+        t:assert_eq(#kmes.privilege_uses(events), 0,
             "every other privilege enabled at once, and no record at all")
         -- And nothing that does emit carries a name outside the five.
         local NAMED = { SeSecurityPrivilege = true,
@@ -430,7 +439,7 @@ test("no other privilege ever appears in a privilege-use record",
                 desired = 0x1, intent = access.INTENT.BACKUP, mapping = MAP })
             sys.close(vm, fd)
         end)
-        local records = kmes.of_type(emitted, "kacs.audit.privilege.used")
+        local records = kmes.privilege_uses(emitted)
         t:assert(#records > 0, "a token holding one of the five does emit")
         for _, e in ipairs(records) do
             t:assert(NAMED[e.payload.privilege.name],
@@ -557,12 +566,18 @@ test("a kacs.session.destroyed with an invalid UTF-8 package drops silently",
 test("the two StrataFS records drop rather than failing the operation",
     { spec = "PKM *audit-events.best-effort-stratafs",
       covered_by = "kunit:pkm_kunit_misc",
-      skip = "the two drop conditions are an allocation failure and an " ..
-             "over-long operation string; the operation strings are " ..
-             "compile-time constants, and the stratafs test-hook points cannot " ..
-             "fail the emitter's allocation. Runs under " ..
-             "pkm_kunit_stratafs_audit_emission_is_best_effort for the over-long " ..
-             "operation and path; the allocation failure has no witness" },
+      skip = "the drop conditions are an over-long operation string or " ..
+             "path; the operation strings are compile-time constants and " ..
+             "no guest path reaches PATH_MAX here. Runs under " ..
+             "pkm_kunit_stratafs_audit_emission_is_best_effort" },
+    function(t) end)
+
+test("a StrataFS record whose allocation fails is written reduced, not lost",
+    { spec = "PKM *audit-events.stratafs-reduced-record",
+      covered_by = "kunit:pkm_kunit_misc",
+      skip = "a guest cannot fail the emitter's allocation on demand; " ..
+             "runs under pkm_kunit_stratafs_audit_reduced_record_on_alloc_failure, " ..
+             "which forces it through a KUnit hook" },
     function(t) end)
 
 test("a self-emitted payload that would overflow its buffer is dropped",
@@ -571,3 +586,99 @@ test("a self-emitted payload that would overflow its buffer is dropped",
              "so the only overflow is an allocation failure, which a " ..
              "guest cannot provoke and no KUnit case injects" },
     function(t) end)
+
+-- kacs.audit.descriptor.changed ---------------------------------------------------
+
+local DESCRIPTOR_CHANGED = "kacs.audit.descriptor.changed"
+
+--- An audited descriptor: owner and group SYSTEM, a DACL granting `mask`
+--- to Everyone, and `sacl` (an ACL) when given.
+local function owned_sd(mask, sacl)
+    return access.sd({ owner = token.SID.LOCAL_SYSTEM, group = token.SID.LOCAL_SYSTEM,
+        dacl = access.acl({ access.ace(A.ALLOWED, mask, kacs.SID.EVERYONE) }),
+        sacl = sacl })
+end
+
+local function audit_sacl()
+    return access.acl({ access.ace(A.AUDIT, kacs.ALL_RIGHTS, kacs.SID.EVERYONE,
+        access.ACE_FLAG.SUCCESSFUL_ACCESS | access.ACE_FLAG.FAILED_ACCESS) })
+end
+
+test("removing a file's SACL is recorded as kacs.audit.descriptor.changed",
+    { spec = "PKM *audit-events.descriptor-changed-sacl-always" }, function(t)
+        local p = B .. "/sacl-removed"
+        vm:write_file(p, "watched")
+        local ALL = kacs.SI.OWNER | kacs.SI.GROUP | kacs.SI.DACL | kacs.SI.SACL
+        t:assert_eq(kacs.set_sd(vm, p, owned_sd(kacs.ALL_RIGHTS, audit_sacl()), ALL).ret, 0,
+            "the file is audited")
+        local events = recorded(t, function()
+            t:assert_eq(kacs.set_sd(vm, p, owned_sd(kacs.ALL_RIGHTS, access.acl({})),
+                kacs.SI.SACL).ret, 0, "its SACL is emptied")
+        end)
+        local rec = kmes.of_type(events, DESCRIPTOR_CHANGED)
+        t:assert_eq(#rec, 1, "and that change is recorded, though the new SACL audits nothing")
+        local p1 = rec[1].payload
+        t:assert_eq(p1.object.kind, "file", "about a file")
+        t:assert_eq(p1.object.sd.components & kacs.SI.SACL, kacs.SI.SACL, "a SACL change")
+        t:assert(p1.object.sd["digest-previous"] and p1.object.sd.digest,
+            "with the replaced and the written descriptor's digests")
+        t:assert(p1.object.sd["digest-previous"] ~= p1.object.sd.digest, "which differ")
+        t:assert_eq(#p1.object.sd.digest, 32, "SHA-256")
+        t:assert_eq(p1.object.sd.owner, token.SID.LOCAL_SYSTEM, "naming the owner")
+        t:assert_eq(p1.access.requested & STD.ACCESS_SYSTEM_SECURITY,
+            STD.ACCESS_SYSTEM_SECURITY, "the change needed ACCESS_SYSTEM_SECURITY")
+        t:assert_eq(p1.outcome.success, true, "and was made")
+        t:assert_eq(p1.subject.token.sid, token.SID.LOCAL_SYSTEM, "by SYSTEM")
+    end)
+
+test("a DACL change through a path, with no handle alarm mask, is not recorded",
+    { spec = "PKM *audit-events.descriptor-changed-dacl-by-handle-mask" }, function(t)
+        local p = B .. "/dacl-only"
+        vm:write_file(p, "plain")
+        t:assert_eq(kacs.set_sd(vm, p, owned_sd(kacs.ALL_RIGHTS), kacs.SI.OWNER | kacs.SI.GROUP
+            | kacs.SI.DACL).ret, 0, "a descriptor")
+        local events = recorded(t, function()
+            t:assert_eq(kacs.set_sd(vm, p, owned_sd(kacs.ALL_RIGHTS & ~kacs.RIGHT.DELETE_CHILD),
+                kacs.SI.DACL).ret, 0, "its DACL changes")
+        end)
+        t:assert_eq(#kmes.of_type(events, DESCRIPTOR_CHANGED), 0,
+            "with no SACL in the change and no alarm mask on a handle, nothing is recorded")
+    end)
+
+test("a SACL change to a token, a process or an IPC object is recorded too",
+    { spec = "PKM *audit-events.descriptor-changed-object-kinds" }, function(t)
+        local netobj = require("helpers.netobj")
+        local psb = require("helpers.psb")
+        local SI = kacs.SI.OWNER | kacs.SI.GROUP | kacs.SI.DACL | kacs.SI.SACL
+        local tfd = mint({})
+        local sem = assert(netobj.semget(vm, 0x5d0001, 1))
+        local child = vm:spawn_worker()
+        local pidfd = assert(psb.pidfd(vm, psb.pid(child)))
+        local events = recorded(t, function()
+            t:assert_eq(token.set_sd(vm, tfd, owned_sd(kacs.ALL_RIGHTS, audit_sacl()), SI).ret, 0,
+                "a token's SACL is set")
+            t:assert_eq(psb.set_sd(vm, pidfd, owned_sd(kacs.ALL_RIGHTS, audit_sacl()), SI).ret, 0,
+                "a process's")
+            t:assert_eq(netobj.ipc_set_sd(vm, netobj.SD_AT.SEM, sem,
+                owned_sd(kacs.ALL_RIGHTS, audit_sacl()), SI).ret, 0, "and a semaphore set's")
+        end)
+        local kinds = {}
+        for _, e in ipairs(kmes.of_type(events, DESCRIPTOR_CHANGED)) do
+            kinds[e.payload.object.kind] = e.payload
+        end
+        t:assert(kinds.token, "the token's change is recorded")
+        t:assert_eq(kinds.token.object.token.id, assert(token.statistics(vm, tfd)).token_id,
+            "naming the token")
+        t:assert(kinds.process, "the process's")
+        t:assert_eq(#kinds.process.object.process.guid, 16, "naming the process by GUID")
+        t:assert(kinds.ipc, "and the semaphore set's")
+        t:assert_eq(kinds.ipc.object.ipc.type, "sem", "a semaphore set")
+        t:assert_eq(kinds.ipc.object.ipc.id, sem, "by its identifier")
+        for kind, p in pairs(kinds) do
+            t:assert_eq(p.access.granted, nil, kind .. ": made without a handle mask")
+            t:assert(p.object.sd.digest, kind .. ": with the written descriptor's digest")
+        end
+        sys.close(vm, tfd); sys.close(vm, pidfd)
+        child:kill(); child:join()
+        vm:syscall(netobj.NR.semctl, sem, 0, 0, 0)
+    end)

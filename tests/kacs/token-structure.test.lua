@@ -423,7 +423,13 @@ test("ALL_APPLICATION_PACKAGES participates only when present in the capabilitie
     end)
 
 --- KMES events of one type since the ring was last drained.
-local function events_of(ring, ty) return kmes.of_type(kmes.drain(ring), ty) end
+--- Events of type `ty` since the last drain. Privilege-use records are
+--- those of access checks only, not the agent's own capability uses.
+local function events_of(ring, ty)
+    local events = kmes.drain(ring)
+    if ty == "kacs.audit.privilege.used" then return kmes.privilege_uses(events) end
+    return kmes.of_type(events, ty)
+end
 
 test("audit_policy is fixed at creation — there is no adjustment for it",
     { spec = "PKM *token.audit-policy-fixed" }, function(t)

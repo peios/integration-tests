@@ -452,6 +452,31 @@ test("a non-null spec replaces an existing policy and a null one removes it",
         t:assert_eq(removed.granted, 0, "and once it is removed the recovery policy takes over")
     end)
 
+test("installing, replacing and removing a policy each write kacs.caap.policy.changed",
+    { spec = "PKM *check.cap.set-recorded" }, function(t)
+        local sid = policy_sid(9227)
+        local spec = access.caap_spec({ { effective_dacl = access.acl({ grant(READ, E) }) } })
+        local events = kmes.recording(t, vm, function()
+            t:assert_eq(access.set_caap(vm, sid, spec).ret, 0, "install")
+            t:assert_eq(access.set_caap(vm, sid, spec).ret, 0, "replace")
+            t:assert_eq(access.set_caap(vm, sid, nil).ret, 0, "remove")
+            t:assert(access.set_caap(vm, sid, "\2garbage").ret ~= 0, "a malformed spec fails")
+        end)
+        local rec = kmes.of_type(events, "kacs.caap.policy.changed")
+        t:assert_eq(#rec, 4, "every call past the privilege gate is recorded")
+        local ops = {}
+        for i, e in ipairs(rec) do
+            t:assert_eq(e.payload.caap.policy.sid, sid, "record " .. i .. " names the policy")
+            ops[i] = e.payload.operation.name
+        end
+        t:assert_eq(table.concat(ops, " "), "set set remove set", "set, set, remove, set")
+        t:assert_eq(rec[1].payload.outcome.success, true, "the install applied")
+        t:assert_eq(rec[4].payload.outcome.success, false, "the malformed one did not")
+        t:assert_eq(rec[4].payload.outcome.errno, -sys.E.INVAL, "with EINVAL")
+        t:assert_eq(rec[1].payload.subject.token.sid, token.SID.LOCAL_SYSTEM, "by SYSTEM")
+        drop(sid)
+    end)
+
 test("the policy SID length is bounded to 8-68 bytes before parsing begins",
     { spec = "PKM *check.cap.uninitialised-eacces" }, function(t)
         local spec = access.caap_spec({ { effective_dacl = access.acl({ grant(READ, E) }) } })

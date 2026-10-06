@@ -464,7 +464,7 @@ test("no second caller AccessCheck or privilege-use audit is emitted for the int
                 t:assert(stratafs.try_write(vm, s:join("f"), "rewritten"),
                     "the copy-up runs")
             end)
-            t:assert_eq(#kmes.of_type(events, "kacs.audit.privilege.used"), 0,
+            t:assert_eq(#kmes.privilege_uses(events), 0,
                 "the internal sub-operations recorded no privilege use")
             t:assert_eq(#kmes.of_type(events, "kacs.audit.access.checked"), 0,
                 "and no caller access audit, since the object carries no SACL")
@@ -492,7 +492,7 @@ test("the outer authorized handle operation remains subject to ordinary audit",
             local audits = kmes.of_type(events, "kacs.audit.access.checked")
             t:assert(#audits > 0, "the outer open produced an audit event")
             t:assert_eq(audits[1].payload.object.kind, "file", "about the file")
-            t:assert_eq(#kmes.of_type(events, "kacs.audit.privilege.used"), 0,
+            t:assert_eq(#kmes.privilege_uses(events), 0,
                 "and still nothing attributing the internal mechanics to the caller")
         end)
     end)

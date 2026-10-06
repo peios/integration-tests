@@ -386,13 +386,13 @@ test("a privilege-use event for SeSecurity or SeTakeOwnership means the privileg
             local r = access.check(vm, { token_fd = fd, sd = already, desired = WRITE_OWNER })
             t:assert(r.ok, "the DACL grants WRITE_OWNER on its own: " .. sys.errname(r.errno))
         end)
-        t:assert_eq(#kmes.of_type(quiet, "kacs.audit.privilege.used"), 0,
+        t:assert_eq(#kmes.privilege_uses(quiet), 0,
             "no privilege-use event where take-ownership contributed nothing")
         local loud = kmes.recording(t, vm, function()
             local r = access.check(vm, { token_fd = fd, sd = nothing, desired = WRITE_OWNER })
             t:assert(r.ok, "the privilege alone grants it: " .. sys.errname(r.errno))
         end)
-        local events = kmes.of_type(loud, "kacs.audit.privilege.used")
+        local events = kmes.privilege_uses(loud)
         t:assert_eq(#events, 1, "and that fires exactly one privilege-use event")
         t:assert_eq(events[1].payload.privilege.name, "SeTakeOwnershipPrivilege", "naming the privilege")
         local sacl = kmes.recording(t, vm, function()
@@ -400,7 +400,7 @@ test("a privilege-use event for SeSecurity or SeTakeOwnership means the privileg
             t:assert(r.ok, "SeSecurityPrivilege pre-decides ACCESS_SYSTEM_SECURITY: "
                 .. sys.errname(r.errno))
         end)
-        local sec = kmes.of_type(sacl, "kacs.audit.privilege.used")
+        local sec = kmes.privilege_uses(sacl)
         t:assert_eq(#sec, 1, "which is itself counterfactual and fires one event")
         t:assert_eq(sec[1].payload.privilege.name, "SeSecurityPrivilege", "naming SeSecurityPrivilege")
         sys.close(vm, fd)
@@ -422,7 +422,7 @@ test("backup and restore fire privilege-use events even where the DACL would hav
                 intent = access.INTENT.BACKUP })
             t:assert(r.ok, "the DACL grants FILE_READ_DATA to Everyone: " .. sys.errname(r.errno))
         end)
-        local uses = kmes.of_type(events, "kacs.audit.privilege.used")
+        local uses = kmes.privilege_uses(events)
         t:assert_eq(#uses, 1, "and the event fires anyway — backup seeds its bits unconditionally")
         t:assert_eq(uses[1].payload.privilege.name, "SeBackupPrivilege", "naming SeBackupPrivilege")
         t:assert_eq(uses[1].payload.privilege.contributed, 0x1,
@@ -433,8 +433,139 @@ test("backup and restore fire privilege-use events even where the DACL would hav
                 intent = access.INTENT.RESTORE })
             t:assert(r.ok, "and FILE_WRITE_DATA likewise: " .. sys.errname(r.errno))
         end)
-        local ruses = kmes.of_type(restore, "kacs.audit.privilege.used")
+        local ruses = kmes.privilege_uses(restore)
         t:assert_eq(#ruses, 1, "restore fires its event on an access the DACL already permitted")
         t:assert_eq(ruses[1].payload.privilege.name, "SeRestorePrivilege", "naming SeRestorePrivilege")
         sys.close(vm, fd)
+    end)
+
+-- Privilege use at a capability gate ------------------------------------------------
+
+local GATE_NR = { uname = 63, setdomainname = 171, seccomp = 317 }
+
+--- The worker's records of privilege spent at a capability gate, for the
+--- principal's own SID: not the agent's, which is SYSTEM.
+local function gate_uses(events)
+    local out = {}
+    for _, e in ipairs(kmes.privilege_uses(events, "linux-cap")) do
+        if e.payload.subject.token.sid == token.SID.TEST_USER then out[#out + 1] = e end
+    end
+    return out
+end
+
+--- setdomainname(2) to the name the system already has: CAP_SYS_ADMIN,
+--- audited, and observably nothing.
+local function touch_domainname(w)
+    local u = w:syscall(GATE_NR.uname, { args = { 0 }, bufs = { string.rep("\0", 390) },
+        ptrs = { 0 } })
+    local name = u.out_bufs[1]:sub(326, 390):match("^[^%z]*")
+    return w:syscall(GATE_NR.setdomainname, { args = { 0, #name }, bufs = { name },
+        ptrs = { 0 } })
+end
+
+test("a privilege spent at a capability gate is recorded once per process and token",
+    { spec = "PKM *priv.audit.gate-once-per-process-and-token" }, function(t)
+        local events = kmes.recording(t, vm, function()
+            as(t, { P.SHUTDOWN }, function(w)
+                for i = 1, 3 do
+                    t:assert_eq(w:syscall(NR.reboot, REBOOT_MAGIC1, REBOOT_MAGIC2, CAD_OFF, 0).ret,
+                        0, "CAP_SYS_BOOT, satisfied by SeShutdownPrivilege, use " .. i)
+                end
+            end, { audit_policy = token.AUDIT.PRIVILEGE_USE_SUCCESS })
+        end)
+        local uses = gate_uses(events)
+        t:assert_eq(#uses, 1, "three uses of one gate by one process under one token: one record")
+        local p = uses[1].payload
+        t:assert_eq(p.linux.cap, "sys-boot", "naming the capability asked")
+        t:assert_eq(p.privilege.name, "SeShutdownPrivilege", "and the privilege that answered")
+    end)
+
+test("a capability-gate record names the gate and the privilege, and nothing of a check",
+    { spec = "PKM *priv.audit.gate-record" }, function(t)
+        local events = kmes.recording(t, vm, function()
+            as(t, { P.SHUTDOWN }, function(w)
+                w:syscall(NR.reboot, REBOOT_MAGIC1, REBOOT_MAGIC2, CAD_OFF, 0)
+            end, { audit_policy = token.AUDIT.PRIVILEGE_USE_SUCCESS })
+        end)
+        local uses = gate_uses(events)
+        t:assert_eq(#uses, 1, "one record")
+        local p = uses[1].payload
+        t:assert_eq(p.operation.name, "linux-cap", "of a capability gate")
+        t:assert_eq(p.outcome.success, true, "a use, so a success")
+        t:assert_eq(p.access, nil, "with no access masks")
+        t:assert_eq(p.object, nil, "no object")
+        t:assert_eq(p.privilege.contributed, nil, "and no contribution")
+        -- Without the policy the same use records nothing.
+        local quiet = kmes.recording(t, vm, function()
+            as(t, { P.SHUTDOWN }, function(w)
+                w:syscall(NR.reboot, REBOOT_MAGIC1, REBOOT_MAGIC2, CAD_OFF, 0)
+            end)
+        end)
+        t:assert_eq(#gate_uses(quiet), 0, "a token without PRIVILEGE_USE_SUCCESS is not recorded")
+    end)
+
+test("a CAP_OPT_NOAUDIT check is a probe and records nothing",
+    { spec = "PKM *priv.audit.gate-only-own-audited-checks" }, function(t)
+        -- seccomp(SECCOMP_SET_MODE_FILTER) without no_new_privs asks for
+        -- CAP_SYS_ADMIN with ns_capable_noaudit(). An allow-everything
+        -- filter leaves the worker as it was.
+        local ALLOW_ALL = string.pack("<I2I1I1I4", 0x06, 0, 0, 0x7fff0000)
+        local events = kmes.recording(t, vm, function()
+            as(t, { P.TCB }, function(w)
+                local r = w:syscall(GATE_NR.seccomp, { args = { 1, 0, 0 },
+                    bufs = { string.pack("<I2I2I4I8", 1, 0, 0, 0), ALLOW_ALL },
+                    ptrs = { 2 }, nested = { { parent = 1, child = 2, offset = 8 } } })
+                t:assert_eq(r.ret, 0, "the filter installs on SeTcbPrivilege: "
+                    .. sys.errname(r.errno or 0))
+            end, { audit_policy = token.AUDIT.PRIVILEGE_USE_SUCCESS })
+        end)
+        t:assert_eq(#gate_uses(events), 0, "the noaudit check left no record")
+        -- And it did not claim the gate: the first audited use is recorded.
+        local audited = kmes.recording(t, vm, function()
+            as(t, { P.TCB }, function(w)
+                local r = w:syscall(GATE_NR.seccomp, { args = { 1, 0, 0 },
+                    bufs = { string.pack("<I2I2I4I8", 1, 0, 0, 0), ALLOW_ALL },
+                    ptrs = { 2 }, nested = { { parent = 1, child = 2, offset = 8 } } })
+                t:assert_eq(r.ret, 0, "the probe again")
+                t:assert_eq(touch_domainname(w).ret, 0, "then an audited CAP_SYS_ADMIN use")
+            end, { audit_policy = token.AUDIT.PRIVILEGE_USE_SUCCESS })
+        end)
+        local uses = gate_uses(audited)
+        t:assert_eq(#uses, 1, "only the audited use is recorded")
+        t:assert_eq(uses[1].payload.linux.cap, "sys-admin", "for CAP_SYS_ADMIN")
+        t:assert_eq(uses[1].payload.privilege.name, "SeTcbPrivilege", "satisfied by SeTcbPrivilege")
+    end)
+
+test("a capability-gate record is written as the process returns to user space",
+    { spec = "PKM *priv.audit.gate-record-deferred" }, function(t)
+        -- The record of a syscall's capability use is on the ring by the
+        -- time the syscall has returned.
+        local ring = assert(kmes.attach(vm, 0))
+        kmes.drain(ring)
+        as(t, { P.SHUTDOWN }, function(w)
+            t:assert_eq(w:syscall(NR.reboot, REBOOT_MAGIC1, REBOOT_MAGIC2, CAD_OFF, 0).ret, 0,
+                "the use")
+            local uses = gate_uses(kmes.drain(ring))
+            t:assert_eq(#uses, 1, "recorded before the next syscall begins")
+            t:assert(uses[1].payload.emitter.process.pid > 0, "by the process that spent it")
+        end, { audit_policy = token.AUDIT.PRIVILEGE_USE_SUCCESS })
+        kmes.detach(ring)
+    end)
+
+test("the boot SYSTEM token records its own privilege use",
+    { spec = "PKM *token.bootstrap.system-token-audits-privilege-use" }, function(t)
+        -- The agent runs on the boot SYSTEM token. A backup-intent read of
+        -- an object whose DACL grants nothing is SeBackupPrivilege at work.
+        local events = kmes.recording(t, vm, function()
+            local r = access.check(vm, { sd = access.simple({}), desired = 0x1,
+                intent = access.INTENT.BACKUP })
+            t:assert(r.ok, "SYSTEM's backup read is granted: " .. sys.errname(r.errno or 0))
+        end)
+        local uses = kmes.privilege_uses(events)
+        local mine = {}
+        for _, e in ipairs(uses) do
+            if e.payload.subject.token.sid == token.SID.LOCAL_SYSTEM then mine[#mine + 1] = e end
+        end
+        t:assert_eq(#mine, 1, "SYSTEM's own use is recorded, unasked")
+        t:assert_eq(mine[1].payload.privilege.name, "SeBackupPrivilege", "naming SeBackupPrivilege")
     end)
