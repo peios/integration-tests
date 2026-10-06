@@ -303,8 +303,8 @@ test("a lone event commits at once in its own transaction, without waiting out t
         local waited = pcall(eventd.wait_rows, vm, "EVENTS " .. event_type .. " SINCE 10m ago",
             function(rs) return #rs == 1 end, { timeout = 2, interval = 0.05 })
         t:assert(waited, "stored within 2 s although a batch may stay open for 5 s")
-        local seq = eventd.rows(vm, "EVENTS " .. event_type .. " SINCE 10m ago")[1].sequence
-        local cpu = eventd.rows(vm, "EVENTS " .. event_type .. " SINCE 10m ago")[1].cpu_id
+        local seq = eventd.rows(vm, "EVENTS " .. event_type .. " SINCE 10m ago")[1]["event.sequence"]
+        local cpu = eventd.rows(vm, "EVENTS " .. event_type .. " SINCE 10m ago")[1]["event.cpu"]
         local rows = {}
         for _, shard in ipairs(eventd.shards(vm)) do
             for _, x in ipairs(sql(shard, string.format(

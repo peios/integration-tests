@@ -244,10 +244,19 @@ test("the decision is the ordinary AccessCheck pipeline, and a port SACL reaches
             t:assert_eq(bind_as({ user_sid = USER2 }, 80).errno, sys.E.ACCES,
                 "and a refused one")
         end)
-        local audits = kmes.of_type(events, "access-audit")
+        local audits = kmes.of_type(events, "kacs.audit.access.checked")
         t:assert(#audits >= 2,
             "the port descriptor's SACL produced audit events like any other object's: "
             .. #audits)
+        local granted, refused = 0, 0
+        for _, e in ipairs(audits) do
+            t:assert_eq(e.payload.object.kind, "socket",
+                "a port claim is recorded as a socket check")
+            if e.payload.outcome.success then granted = granted + 1
+            else refused = refused + 1 end
+        end
+        t:assert(granted >= 1 and refused >= 1,
+            "one for the granted claim and one for the refused one")
     end)
 
 test("a denied claim is EACCES",

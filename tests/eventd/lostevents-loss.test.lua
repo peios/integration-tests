@@ -40,12 +40,12 @@ test("an overrun is seen as a sequence gap on the CPU that overran", {
     for i = 1, 120 do eventd.emit(vm, "pt.lap", { tag = overrun.tag, i = i, b = big }) end
     eventd.thaw(vm, pid)
     local rows = eventd.wait_rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 10m ago", function(r)
-        for _, g in ipairs(r) do if g.timestamp >= overrun.since then return true end end
+        for _, g in ipairs(r) do if g["event.time"] >= overrun.since then return true end end
         return false
     end)
-    for _, g in ipairs(rows) do if g.timestamp >= overrun.since then overrun.gap = g end end
+    for _, g in ipairs(rows) do if g["event.time"] >= overrun.since then overrun.gap = g end end
     t:assert(overrun.gap, "the overrun produced a gap record")
-    t:assert_eq(overrun.gap and overrun.gap.cpu_id, 0, "on CPU 0, the one that overran")
+    t:assert_eq(overrun.gap and overrun.gap["event.cpu"], 0, "on CPU 0, the one that overran")
     t:assert_eq(eventd.pid(vm), pid, "and the same eventd carried on: no restart was involved")
 end)
 
@@ -58,10 +58,10 @@ test("the gap record names the missing range", {
         "a first and last sequence: " .. json.encode(g))
     t:assert_eq(g.count, g.last_sequence - g.first_sequence + 1, "and the count they span")
     -- None of the range is stored: those sequences are gone.
-    local inside = eventd.rows(vm, "EVENTS WHERE cpu_id == 0 AND sequence >= " .. g.first_sequence
-        .. " AND sequence <= " .. g.last_sequence .. " SINCE 10m ago")
+    local inside = eventd.rows(vm, "EVENTS WHERE event.cpu == 0 AND event.sequence >= " .. g.first_sequence
+        .. " AND event.sequence <= " .. g.last_sequence .. " SINCE 10m ago")
     local real = 0
-    for _, r in ipairs(inside) do if r.event_type ~= eventd.T.gap then real = real + 1 end end
+    for _, r in ipairs(inside) do if r["event.type"] ~= eventd.T.gap then real = real + 1 end end
     t:assert_eq(real, 0, "no event in the named range was stored")
 end)
 
@@ -70,11 +70,11 @@ test("after an overrun draining resumes from the oldest survivor", {
 }, function(t)
     local g = overrun.gap
     t:assert(g, "the gap from the first test")
-    local kept = eventd.rows(vm, 'EVENTS pt.lap WHERE tag == "' .. overrun.tag .. '" SINCE 10m ago SELECT sequence, i')
+    local kept = eventd.rows(vm, 'EVENTS pt.lap WHERE tag == "' .. overrun.tag .. '" SINCE 10m ago SELECT event.sequence, i')
     t:assert(#kept > 0, "some of the burst survived")
     local lowest, highest_i = math.huge, 0
     for _, r in ipairs(kept) do
-        lowest = math.min(lowest, r.sequence)
+        lowest = math.min(lowest, r["event.sequence"])
         highest_i = math.max(highest_i, r.i)
     end
     t:assert_eq(lowest, g.last_sequence + 1, "the first stored after the gap is the next sequence")

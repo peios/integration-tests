@@ -129,9 +129,9 @@ test("a late response is validated exactly like an on-time one",
             src:release(id, st, body .. "\0")
             src:pump(100)
         end)
-        local vf = kmes.of_type(events, "LCS_SOURCE_VALIDATION_FAILURE")
+        local vf = kmes.of_type(events, "lcs.source.response.rejected")
         t:assert_eq(#vf, 1, "the late response was validated and failed")
-        t:assert_eq(vf[1].payload.validation_class, "malformed_response_payload",
+        t:assert_eq(vf[1].payload.outcome.reason, "malformed-response-payload",
             "with the same class an on-time response would have produced")
         local alive = lcs.query_value(src, w, fd, "V")
         t:assert(alive.ret == 0 or alive.errno == sys.E.NOENT,

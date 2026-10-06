@@ -353,7 +353,7 @@ test("a corrupt log store is quarantined and a fresh one created in its place", 
         local errs = eventd.rows(vm, "EVENTS " .. eventd.T.storage_error .. " SINCE 10m ago")
         local seen = false
         for _, e in ipairs(errs) do
-            if e.store == "log" and e.timestamp >= from then seen = true end
+            if e.store == "log" and e["event.time"] >= from then seen = true end
         end
         t:assert(seen, "and the replacement was recorded as a log storage error: " .. json.encode(errs))
     end)

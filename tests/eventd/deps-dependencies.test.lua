@@ -27,9 +27,9 @@ local vm = eventd.boot({
 local function startups(since)
     local out = {}
     for _, r in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1h ago")) do
-        if r.timestamp >= (since or 0) then out[#out + 1] = r end
+        if r["event.time"] >= (since or 0) then out[#out + 1] = r end
     end
-    table.sort(out, function(a, b) return a.timestamp < b.timestamp end)
+    table.sort(out, function(a, b) return a["event.time"] < b["event.time"] end)
     return out
 end
 
@@ -41,9 +41,9 @@ test("events come from KMES, with the header KMES stamps on them", {
     local rows = eventd.wait_rows(vm, 'EVENTS pt.kmes WHERE tag == "' .. tag .. '" SINCE 10m ago',
         function(r) return #r == 1 end)
     local r = rows[1]
-    t:assert(r and type(r.sequence) == "number" and type(r.cpu_id) == "number",
+    t:assert(r and type(r["event.sequence"]) == "number" and type(r["event.cpu"]) == "number",
         "stored with the ring's CPU and sequence: " .. json.encode(r))
-    t:assert(r and type(r.process_guid) == "string", "and the emitting process KMES recorded")
+    t:assert(r and type(r["emitter.process.guid"]) == "string", "and the emitting process KMES recorded")
 end)
 
 test("eventd takes its configuration from the registry and nowhere else", {
@@ -56,7 +56,7 @@ test("eventd takes its configuration from the registry and nowhere else", {
     eventd.set(vm, "EventRetentionDays", "dword:51"):assert_ok()
     local _, ok = eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago", function(rows)
         for _, r in ipairs(rows) do
-            if r.timestamp >= since and r.key == "EventRetentionDays" and r.new_value == "51" then return true end
+            if r["event.time"] >= since and r.key == "EventRetentionDays" and r.new_value == "51" then return true end
         end
         return false
     end)
@@ -118,9 +118,9 @@ test("events emitted before eventd started were read by its first drain", {
     t:assert(first and first.restart == false, "the boot's first start")
     -- KMES numbers each CPU's events from 1 in a boot; the first ones
     -- were emitted by the kernel and Phase 1 long before eventd existed.
-    local early = eventd.rows(vm, "EVENTS WHERE cpu_id == 0 AND sequence == 1 SINCE 1h ago")
+    local early = eventd.rows(vm, "EVENTS WHERE event.cpu == 0 AND event.sequence == 1 SINCE 1h ago")
     t:assert_eq(#early, 1, "CPU 0's sequence 1 is in the store")
-    t:assert(early[1] and early[1].timestamp < first.timestamp,
+    t:assert(early[1] and early[1]["event.time"] < first["event.time"],
         "and it was emitted before eventd's first start")
     -- And the same while eventd is stopped, on purpose.
     vm:run("svctl stop eventd"):assert_ok()
@@ -136,7 +136,7 @@ test("the boot ID is the kernel's, read from /proc/sys/kernel/random/boot_id", {
     spec = "eventd *deps.the-boot-id-is-read-from-proc-sys-kernel-random-boot-id",
 }, function(t)
     local real = eventd.boot_id(vm)
-    t:assert_eq(startups()[1].boot_id, "{" .. real .. "}", "the startup record's boot is the kernel's")
+    t:assert_eq(startups()[1]["event.boot.guid"], "{" .. real .. "}", "the startup record's boot is the kernel's")
     -- And it is that file, not a service-manager API: put another valid
     -- UUID over it and a new eventd reports that one.
     local fake = "0badc0de-1234-4321-8765-0123456789ab"
@@ -153,7 +153,7 @@ test("the boot ID is the kernel's, read from /proc/sys/kernel/random/boot_id", {
     vm:run("svctl restart eventd")
     eventd.ready(vm)
     t:assert(s, "eventd started over the substituted file")
-    t:assert_eq(s and s.boot_id, "{" .. fake .. "}", "and took its boot ID from it")
+    t:assert_eq(s and s["event.boot.guid"], "{" .. fake .. "}", "and took its boot ID from it")
 end)
 
 test("eventd cannot start without the registry", {

@@ -67,9 +67,9 @@ test("a type or origin missing from its catalogue is not found, though its recor
     -- ... but discovery, reading the catalogues, cannot find them.
     local ev = eventd.rows(vm, "EVENTS pt." .. m .. ".*")
     t:assert_eq(#ev, 1, "only the type still catalogued is found: " .. json.encode(ev))
-    t:assert_eq(ev[1] and ev[1].event_type, kept_type, "the kept one")
+    t:assert_eq(ev[1] and ev[1]["event.type"], kept_type, "the kept one")
     t:assert_eq(#eventd.rows(vm, "EVENTS " .. gone_type), 0, "naming the uncatalogued type finds nothing")
-    t:assert_eq(#eventd.rows(vm, 'EVENTS WHERE event_type == "' .. gone_type .. '"'), 0,
+    t:assert_eq(#eventd.rows(vm, 'EVENTS WHERE event.type == "' .. gone_type .. '"'), 0,
         "nor does a predicate on it: no scan of the events table finds it")
     t:assert_eq(#eventd.rows(vm, "LOGS FROM " .. gone_origin), 0, "the uncatalogued origin finds nothing")
     t:assert_eq(#eventd.rows(vm, "LOGS FROM " .. kept_origin), 1, "the catalogued one is read")

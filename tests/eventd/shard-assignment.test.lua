@@ -342,7 +342,7 @@ test("a stripe missing from the middle is re-ingested: receipts, not a high-wate
     for s = 1, max do
         t:assert(after[s] and not after[s]:find(","), "CPU 0 sequence " .. s .. " is stored exactly once")
     end
-    local gaps = eventd.rows(vm, string.format("EVENTS %s WHERE cpu_id == 0 SINCE 1h ago", eventd.T.gap))
+    local gaps = eventd.rows(vm, string.format("EVENTS %s WHERE event.cpu == 0 SINCE 1h ago", eventd.T.gap))
     t:assert_eq(#gaps, 0, "and no gap was recorded: every lost row was still in the ring")
 end)
 
@@ -397,9 +397,9 @@ test("a StorageShards change waits for a restart, then both CPUs share one shard
 
     -- CPU 1's events are now in two shards; a query by CPU reads both.
     local function by_cpu(event_type)
-        return #eventd.rows(vm, "EVENTS " .. event_type .. " WHERE cpu_id == 1 SINCE 1h ago TAKE 1000")
+        return #eventd.rows(vm, "EVENTS " .. event_type .. " WHERE event.cpu == 1 SINCE 1h ago TAKE 1000")
     end
-    t:assert_eq(by_cpu(old1), 5, "a query by cpu_id found CPU 1's events in the shard it used to own")
+    t:assert_eq(by_cpu(old1), 5, "a query by event.cpu found CPU 1's events in the shard it used to own")
     t:assert_eq(by_cpu(new1), 300, "and in the shard it writes now")
 
     -- Nothing about the routing was written down.

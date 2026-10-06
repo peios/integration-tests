@@ -182,11 +182,20 @@ test("KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN is 4096",
         local fd = fresh()
         local sd = access.simple({ access.ace(access.ACE.ALLOWED, 0x1,
             token.SID.TEST_USER) })
-        local ctx = string.rep("c", 4096)
+        -- The context must be a well-formed PGSS §6.7 map to be accepted
+        -- at all, so the 4096 bytes are {kind: "test", test: {pad: <str>}}
+        -- padded to size: 24 bytes of map, keys and str16 header, plus
+        -- 4072 of string. 4097 bytes is the same map one byte longer.
+        local function context(len)
+            local pad = len - 24
+            return "\x82\xa4kind\xa4test\xa4test\x81\xa3pad\xda" ..
+                string.pack(">I2", pad) .. string.rep("c", pad)
+        end
         local function with_len(n)
             return raw_check(vm, { token_fd = fd, desired = 0x1,
                 fields = { { 16, "<I4", #sd }, { 112, "<I4", n } },
-                children = { { bytes = sd, at = 8 }, { bytes = ctx, at = 104 } } })
+                children = { { bytes = sd, at = 8 },
+                             { bytes = context(n), at = 104 } } })
         end
         t:assert(with_len(4096).ret >= 0,
             "a 4096-byte audit context is accepted: " ..
@@ -976,7 +985,7 @@ test("the ACE flag byte carries inheritance and audit control",
         local function audits(flags, dacl)
             kmes.drain(ring)
             check(dacl, access.acl({ access.ace(A.AUDIT, 0x1, U, flags) }))
-            return #kmes.of_type(kmes.drain(ring), "access-audit")
+            return #kmes.of_type(kmes.drain(ring), "kacs.audit.access.checked")
         end
         local grants = access.acl({ access.ace(A.ALLOWED, 0x1, U) })
         local refuses = access.acl({})

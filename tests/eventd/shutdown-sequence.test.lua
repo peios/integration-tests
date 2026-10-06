@@ -116,7 +116,7 @@ test("a shutdown still running at the stop timeout is ended there", {
     eventd.start(vm)
     local after = eventd.rows(vm, "EVENTS " .. eventd.T.shutdown .. " SINCE 10m ago")
     for _, r in ipairs(after) do
-        t:assert(r.timestamp < held.asked * 1000000000,
+        t:assert(r["event.time"] < held.asked * 1000000000,
             "no shutdown record was written by the aborted shutdown")
     end
     eventd.unset(vm, "QueryTimeoutMs")
@@ -265,7 +265,7 @@ test("a clean stop records each CPU's covered sequence, checkpoints it, and clos
     t:assert_eq(wal:gsub("%s", ""), "", "no write-ahead log survives a clean stop: " .. wal)
     eventd.start(vm)
     local sd = eventd.rows(vm, "EVENTS " .. eventd.T.shutdown .. " SINCE 10m ago")
-    table.sort(sd, function(a, b) return a.timestamp < b.timestamp end)
+    table.sort(sd, function(a, b) return a["event.time"] < b["event.time"] end)
     local last = sd[#sd]
     t:assert(last and last.last_sequences and #last.last_sequences == 1,
         "the record carries one sequence per CPU: " .. json.encode(last))

@@ -109,7 +109,7 @@ test("the query path treats every shard as one store", {
     t:assert_eq(#shards_holding(etype), 2, "the events are split across both shard files")
     t:assert_eq(#rows, 3, "and one query returns all three")
     for i = 2, #rows do
-        t:assert(rows[i - 1].timestamp >= rows[i].timestamp, "in one order across shards (newest first)")
+        t:assert(rows[i - 1]["event.time"] >= rows[i]["event.time"], "in one order across shards (newest first)")
     end
 end)
 
@@ -143,11 +143,12 @@ test("synthetic events bypass KMES and carry no stamps and no sequence numbers",
     end
     local row = eventd.rows(vm, "EVENTS " .. CC .. ' WHERE key == "LogRetentionDays" SINCE 10m ago TAKE 1')[1]
     t:assert(row, "the config_change was stored nonetheless")
-    for _, f in ipairs({ "sequence", "cpu_id", "origin_class", "effective_token_guid", "true_token_guid",
-                         "process_guid" }) do
+    for _, f in ipairs({ "event.sequence", "event.cpu", "emitter.class", "emitter.token.guid",
+                         "emitter.true-token.guid", "emitter.process.guid" }) do
         t:assert(row[f] == nil, f .. " is null on a synthetic event: " .. json.encode(row))
     end
-    t:assert(row.event_type:sub(1, 10) == "synthetic.", "and its type is synthetic.-prefixed")
+    t:assert(row["event.type"]:sub(1, 10) == "synthetic.", "and its type is synthetic.-prefixed")
+    t:assert(row["event.time"] ~= nil, "while it has a time of its own: " .. json.encode(row))
 end)
 
 -- ---------------------------------------------------------------------------

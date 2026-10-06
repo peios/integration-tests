@@ -132,8 +132,8 @@ end
 
 local function ev(ty) return "EVENTS " .. ty .. " SINCE 1h ago TAKE 1000" end
 
-local HEADERS = { "timestamp", "cpu_id", "sequence", "origin_class", "event_type",
-    "effective_token_guid", "true_token_guid", "process_guid", "boot_id" }
+local HEADERS = { "event.time", "event.cpu", "event.sequence", "emitter.class", "event.type",
+    "emitter.token.guid", "emitter.true-token.guid", "emitter.process.guid", "event.boot.guid" }
 
 -- ---------------------------------------------------------------------------
 -- Granting some fields and not others
@@ -254,30 +254,36 @@ test("a field's GUID is UUID v5 of its name, so a name never seen before can be 
         return kept == 2
     end, "the host-computed GUID to hide " .. fresh)
     for _, r in ipairs(rs) do
-        t:assert_eq(r[fresh], nil, r.event_type .. ": " .. fresh .. " is denied by its derived GUID")
+        t:assert_eq(r[fresh], nil, r["event.type"] .. ": " .. fresh .. " is denied by its derived GUID")
         if r.n == 2 then
-            t:assert_eq(r[fresh .. "x"], "kept", r.event_type .. ": a different name is a different GUID")
+            t:assert_eq(r[fresh .. "x"], "kept", r["event.type"] .. ": a different name is a different GUID")
         end
     end
     local types = {}
-    for _, r in ipairs(rs) do if r.n == 2 then types[r.event_type] = true end end
+    for _, r in ipairs(rs) do if r.n == 2 then types[r["event.type"]] = true end end
     t:assert(types[a] and types[b], "both types' records without the field are shown")
 end)
 
-test("an event header field is named by its column name", {
-    spec = "eventd *fieldaccess.an-event-header-field-is-named-by-its-column-name",
+test("an event header field is named by its field path", {
+    spec = "eventd *fieldaccess.an-event-header-field-is-named-by-its-field-path",
 }, function(t)
     local ty = eventd.marker("pthdr")
     emit(ty, { n = 1 })
     settle(ev(ty), count(1))
-    eventd.put_descriptor(vm, "Events", ty, hiding({ "cpu_id", "process_guid", "sequence" }))
-    local r = settle(ev(ty), function(rs) return #rs == 1 and rs[1].cpu_id == nil end)[1]
-    for _, gone in ipairs({ "cpu_id", "process_guid", "sequence" }) do
+    eventd.put_descriptor(vm, "Events", ty, hiding({ "event.cpu", "emitter.process.guid", "event.sequence" }))
+    local r = settle(ev(ty), function(rs) return #rs == 1 and rs[1]["event.cpu"] == nil end)[1]
+    for _, gone in ipairs({ "event.cpu", "emitter.process.guid", "event.sequence" }) do
         t:assert_eq(r[gone], nil, gone .. " is hidden by GUID(\"" .. gone .. "\")")
     end
-    for _, kept in ipairs({ "timestamp", "event_type", "origin_class", "effective_token_guid",
-                            "true_token_guid", "boot_id", "n" }) do
+    for _, kept in ipairs({ "event.time", "event.type", "emitter.class", "emitter.token.guid",
+                            "emitter.true-token.guid", "event.boot.guid", "n" }) do
         t:assert(r[kept] ~= nil, kept .. " is untouched")
+    end
+    -- The column names are not field names: a deny on one hides nothing.
+    eventd.put_descriptor(vm, "Events", ty, hiding({ "cpu_id", "process_guid", "sequence" }))
+    r = settle(ev(ty), function(rs) return #rs == 1 and rs[1]["event.cpu"] ~= nil end)[1]
+    for _, h in ipairs(HEADERS) do
+        t:assert(r[h] ~= nil, h .. " is untouched by a deny naming a column")
     end
 end)
 
@@ -365,14 +371,18 @@ test("a suppressed payload path has no GUID: a grant naming it never exposes its
     spec = "eventd *fieldaccess.suppressed-payload-fields-get-no-guid",
 }, function(t)
     local ty = eventd.marker("ptsup")
-    -- cpu_id collides with a header; a.b is not a valid path segment.
-    emit(ty, { cpu_id = 99, ["a.b"] = 5 })
+    -- event.cpu is a header path; event.type is one too, so a map there is
+    -- suppressed whole; a.b is not a valid path segment. emitter.process.pid
+    -- sits beside a header path and is an ordinary payload field.
+    emit(ty, { event = { cpu = 99, type = { x = 1 } }, ["a.b"] = 5, emitter = { process = { pid = 7 } } })
     eventd.wait_rows(vm, ev(ty), function(rs) return #rs == 1 end)
-    eventd.put_descriptor(vm, "Events", ty, only({ "cpu_id", "a.b" }))
+    eventd.put_descriptor(vm, "Events", ty, only({ "event.cpu", "event.type.x", "a.b", "emitter.process.pid" }))
     local rs = settle(ev(ty), count(1), "the field-only grant to show the record")
-    t:assert_eq(keys(rs[1]), "cpu_id", "only the header cpu_id is granted")
-    t:assert(rs[1].cpu_id ~= 99, "and it is the header's value, never the payload's: "
-        .. tostring(rs[1].cpu_id))
+    t:assert_eq(keys(rs[1]), keyset({ "event.cpu", "emitter.process.pid" }),
+        "only the header event.cpu and the payload emitter.process.pid are granted")
+    t:assert(rs[1]["event.cpu"] ~= 99, "and event.cpu is the header's value, never the payload's: "
+        .. tostring(rs[1]["event.cpu"]))
+    t:assert_eq(rs[1]["emitter.process.pid"], 7, "while the field beside the header path is the payload's")
 end)
 
 test("a field ACE applies to the fields of the pattern whose descriptor holds it", {
@@ -399,9 +409,9 @@ test("granting three field GUIDs and no root yields records of exactly those thr
     local ty = eventd.marker("ptthree")
     emit(ty, { granted_access = 1, target_sid = "x" })
     eventd.wait_rows(vm, ev(ty), function(rs) return #rs == 1 end)
-    eventd.put_descriptor(vm, "Events", ty, only({ "timestamp", "event_type", "cpu_id" }))
+    eventd.put_descriptor(vm, "Events", ty, only({ "event.time", "event.type", "event.cpu" }))
     local rs = settle(ev(ty), count(1), "the monitoring grant to show the record")
-    t:assert_eq(keys(rs[1]), keyset({ "timestamp", "event_type", "cpu_id" }),
+    t:assert_eq(keys(rs[1]), keyset({ "event.time", "event.type", "event.cpu" }),
         "the record carries exactly the three granted keys")
 end)
 
@@ -481,8 +491,8 @@ test("aggregate outputs have no GUID, and show when their sources may be read", 
     local ty = eventd.marker("ptagg")
     for i = 1, 3 do emit(ty, { num = i }) end
     settle(ev(ty), count(3))
-    local by = "EVENTS " .. ty .. " SINCE 1h ago COUNT BY event_type"
-    local sum = "EVENTS " .. ty .. " SINCE 1h ago GROUP event_type SUM num"
+    local by = "EVENTS " .. ty .. " SINCE 1h ago COUNT BY event.type"
+    local sum = "EVENTS " .. ty .. " SINCE 1h ago GROUP event.type SUM num"
     -- Deny GUIDs with the aggregates' own names: if they were nodes of
     -- the list, these would remove them.
     eventd.put_descriptor(vm, "Events", ty, hiding({ "count", "sum", "avg", "min", "max" }))

@@ -568,7 +568,7 @@ test("in result-list mode a staged DACL granting less sets the mismatch flag thr
             r = as_subject_list({}, sd, READ, FLAT)
         end)
         drop(sid)
-        local diags = of(events, "caap-policy-diagnostic")
+        local diags = of(events, "kacs.caap.staging.diverged")
         t:log(string.format("ret=%d sm=%d nodes 0x%x/0x%x/0x%x diagnostics=%d",
             r.ret, r.staging_mismatch, r.nodes[1].granted, r.nodes[2].granted,
             r.nodes[3].granted, #diags))
@@ -577,9 +577,10 @@ test("in result-list mode a staged DACL granting less sets the mismatch flag thr
                 "node " .. i .. " is granted by the effective rule")
         end
         t:assert_eq(#diags, 1, "one staging diagnostic")
-        t:assert_eq(diags[1].payload.effective_granted_access, READ,
+        t:assert_eq(#of(events, "kacs.caap.sacl.skipped"), 0, "and no other")
+        t:assert_eq(diags[1].payload.access.granted, READ,
             "the effective scalar total holds the right")
-        t:assert_eq(diags[1].payload.staged_granted_access, 0,
+        t:assert_eq(diags[1].payload.access["granted-staged"], 0,
             "and the staged scalar total does not")
         t:assert_eq(r.staging_mismatch, 1, "so the flag is set")
     end)
@@ -600,7 +601,9 @@ test("a rule whose staged DACL errors preserves the same privilege-granted bits 
                 sd, STD.ACCESS_SYSTEM_SECURITY, FLAT)
         end)
         drop(sid)
-        local diags = of(events, "caap-policy-diagnostic")
+        -- Both CAAP diagnostic types, as the single old type covered both.
+        local diags = of(events, "kacs.caap.staging.diverged")
+        for _, e in ipairs(of(events, "kacs.caap.sacl.skipped")) do diags[#diags + 1] = e end
         t:log(string.format("ret=%d sm=%d nodes 0x%x/0x%x/0x%x diagnostics=%d",
             r.ret, r.staging_mismatch, r.nodes[1].granted, r.nodes[2].granted,
             r.nodes[3].granted, #diags))
@@ -625,22 +628,22 @@ test("privilege-use folds across nodes: success on any node, failure only on non
                     audit_policy = POLICY.PRIVILEGE_USE_SUCCESS | POLICY.PRIVILEGE_USE_FAILURE },
                     access.simple(dacl), READ, FLAT, { intent = access.INTENT.BACKUP })
             end)
-            return out, of(events, "privilege-use")
+            return out, of(events, "kacs.audit.privilege.used")
         end
         local some, ev_some = run({ access.ace(access.ACE.ALLOWED_OBJECT, READ, CONF, 0,
             { object_type = A }) })
         local none, ev_none = run({ grant(READ, E) })
         t:log(string.format("one node: 0x%x/0x%x/0x%x success=%s; no node: 0x%x/0x%x/0x%x success=%s",
             some.nodes[1].granted, some.nodes[2].granted, some.nodes[3].granted,
-            tostring(ev_some[1] and ev_some[1].payload.success),
+            tostring(ev_some[1] and ev_some[1].payload.outcome.success),
             none.nodes[1].granted, none.nodes[2].granted, none.nodes[3].granted,
-            tostring(ev_none[1] and ev_none[1].payload.success)))
+            tostring(ev_none[1] and ev_none[1].payload.outcome.success)))
         t:assert_eq(some.nodes[2].granted, READ, "the bits survive on one node")
         t:assert_eq(some.nodes[1].granted, 0, "and on no other")
         t:assert_eq(#ev_some, 1, "one privilege-use event")
-        t:assert_eq(ev_some[1].payload.success, true, "folded to success across the nodes")
+        t:assert_eq(ev_some[1].payload.outcome.success, true, "folded to success across the nodes")
         t:assert_eq(#ev_none, 1, "one event where they survive nowhere")
-        t:assert_eq(ev_none[1].payload.success, false, "folded to failure")
+        t:assert_eq(ev_none[1].payload.outcome.success, false, "folded to failure")
     end)
 
 test("step 14 walks the object's SACL and then each CAAP effective SACL",
@@ -655,7 +658,7 @@ test("step 14 walks the object's SACL and then each CAAP effective SACL",
         local r
         local events = recording(function() r = as_subject({}, sd, READ | WRITE) end)
         drop(sid)
-        local ev = of(events, "access-audit")
+        local ev = of(events, "kacs.audit.access.checked")
         t:log(string.format("ret=%d continuous=0x%x events=%d", r.ret, r.continuous_audit, #ev))
         t:assert(r.ok, "the request succeeds: " .. sys.errname(r.errno or 0))
         t:assert_eq(#ev, 2, "one event from each SACL")
@@ -680,7 +683,7 @@ test("the staged audit walk is driven by the staged granted total",
         local r
         local events = recording(function() r = as_subject({}, sd, READ | WRITE) end)
         drop(sid)
-        local ev = of(events, "access-audit")
+        local ev = of(events, "kacs.audit.access.checked")
         t:log(string.format("ret=%d granted=0x%x sm=%d access-audit=%d", r.ret, r.granted,
             r.staging_mismatch, #ev))
         t:assert(r.ok, "the effective result grants the whole request: "
@@ -793,12 +796,12 @@ test("S-1-5-10 is resolved per lookup, in the DACL walk, the SACL walk and condi
             other = as_subject({}, sd, STD.MAXIMUM_ALLOWED, { self_sid = G3 })
         end)
         t:log(string.format("self=USER granted=0x%x events=%d, self=G3 granted=0x%x events=%d",
-            matching.granted, #of(a, "access-audit"), other.granted, #of(b, "access-audit")))
+            matching.granted, #of(a, "kacs.audit.access.checked"), other.granted, #of(b, "kacs.audit.access.checked")))
         t:assert_eq(matching.granted & READ, READ, "the DACL walk resolves it against self_sid")
         t:assert_eq(matching.granted & WRITE, WRITE, "so does conditional membership")
-        t:assert_eq(#of(a, "access-audit"), 1, "and so does the SACL walk")
+        t:assert_eq(#of(a, "kacs.audit.access.checked"), 1, "and so does the SACL walk")
         t:assert_eq(other.granted, 0, "a self_sid the token does not match answers no everywhere")
-        t:assert_eq(#of(b, "access-audit"), 0, "including in the SACL walk")
+        t:assert_eq(#of(b, "kacs.audit.access.checked"), 0, "including in the SACL walk")
     end)
 
 test("EvaluateSACL checks SID, object-type scoping, condition and mask overlap in that order",
@@ -811,7 +814,7 @@ test("EvaluateSACL checks SID, object-type scoping, condition and mask overlap i
                 as_subject({}, access.simple(dacl, { sacl = access.acl({ sacl_ace }) }),
                     READ, { tree = tree })
             end)
-            n = #of(events, "access-audit")
+            n = #of(events, "kacs.audit.access.checked")
             return n
         end
         local passes = count(audit_ace(READ, E, SUCCESS_FLAG))
@@ -858,11 +861,11 @@ test("inherit-only ACEs are skipped throughout the SACL walk",
                 alarm_ace(WRITE, E, INHERIT_ONLY) }) }), READ)
         end)
         t:log(string.format("ordinary events=%d mask=0x%x, inherit-only events=%d mask=0x%x",
-            #of(a, "access-audit"), applied.continuous_audit,
-            #of(b, "access-audit"), skipped.continuous_audit))
-        t:assert_eq(#of(a, "access-audit"), 1, "the ordinary audit ACE emits")
+            #of(a, "kacs.audit.access.checked"), applied.continuous_audit,
+            #of(b, "kacs.audit.access.checked"), skipped.continuous_audit))
+        t:assert_eq(#of(a, "kacs.audit.access.checked"), 1, "the ordinary audit ACE emits")
         t:assert_eq(applied.continuous_audit, WRITE, "and the ordinary alarm ACE contributes")
-        t:assert_eq(#of(b, "access-audit"), 0, "the inherit-only audit ACE does not")
+        t:assert_eq(#of(b, "kacs.audit.access.checked"), 0, "the inherit-only audit ACE does not")
         t:assert_eq(skipped.continuous_audit, 0, "nor does the inherit-only alarm ACE")
     end)
 
@@ -895,7 +898,7 @@ local function provenance_event(t, spec, sd, desired, opts)
     for k, v in pairs(spec) do fresh[k] = v end
     local r
     local events = recording(function() r = as_subject(fresh, sd, desired, opts) end)
-    local ev = of(events, "privilege-use")
+    local ev = of(events, "kacs.audit.privilege.used")
     t:assert_eq(#ev, 1, "one privilege-use event")
     return r, ev[1].payload
 end
@@ -905,23 +908,27 @@ test("security_granted records the ACCESS_SYSTEM_SECURITY that SeSecurityPrivile
         local r, p = provenance_event(t, { privs_present = SECURITY, privs_enabled = SECURITY },
             access.simple({}), STD.ACCESS_SYSTEM_SECURITY)
         t:log(string.format("ret=%d privilege=%s requested=0x%x surviving=0x%x", r.ret,
-            p.privilege, p.requested_access, p.surviving_access))
+            p.privilege.name, p.privilege.contributed, p.privilege.surviving))
         t:assert(r.ok, "the privilege grants the right: " .. sys.errname(r.errno or 0))
-        t:assert_eq(p.privilege, "SeSecurityPrivilege", "the event names the privilege")
-        t:assert_eq(p.requested_access, STD.ACCESS_SYSTEM_SECURITY,
+        t:assert_eq(p.privilege.name, "SeSecurityPrivilege", "the event names the privilege")
+        t:assert_eq(p.privilege.contributed, STD.ACCESS_SYSTEM_SECURITY,
             "and the provenance mask meeting the request is ACCESS_SYSTEM_SECURITY")
-        t:assert_eq(p.success, true, "which survived into the result")
+        t:assert_eq(p.outcome.success, true, "which survived into the result")
+        t:assert_eq(p.privilege.surviving, STD.ACCESS_SYSTEM_SECURITY,
+            "all of it")
+        t:assert_eq(p.access.requested, STD.ACCESS_SYSTEM_SECURITY,
+            "beside the whole check's request")
     end)
 
 test("backup_granted records the read bits SeBackupPrivilege granted",
     { spec = "PKM *check.algorithm.provenance.backup" }, function(t)
         local r, p = provenance_event(t, { privs_present = BACKUP, privs_enabled = BACKUP },
             access.simple({}), OBJ.read, { intent = access.INTENT.BACKUP })
-        t:log(string.format("ret=%d privilege=%s requested=0x%x", r.ret, p.privilege,
-            p.requested_access))
+        t:log(string.format("ret=%d privilege=%s requested=0x%x", r.ret, p.privilege.name,
+            p.privilege.contributed))
         t:assert(r.ok, "the privilege grants the read right: " .. sys.errname(r.errno or 0))
-        t:assert_eq(p.privilege, "SeBackupPrivilege", "the event names the privilege")
-        t:assert_eq(p.requested_access, OBJ.read,
+        t:assert_eq(p.privilege.name, "SeBackupPrivilege", "the event names the privilege")
+        t:assert_eq(p.privilege.contributed, OBJ.read,
             "and the provenance mask is MapGenericBits(GENERIC_READ)")
     end)
 
@@ -930,11 +937,11 @@ test("restore_granted records the write and metadata bits SeRestorePrivilege gra
         local wanted = OBJ.write | STD.WRITE_DAC | STD.WRITE_OWNER | STD.DELETE
         local r, p = provenance_event(t, { privs_present = RESTORE, privs_enabled = RESTORE },
             access.simple({}), wanted, { intent = access.INTENT.RESTORE })
-        t:log(string.format("ret=%d privilege=%s requested=0x%x", r.ret, p.privilege,
-            p.requested_access))
+        t:log(string.format("ret=%d privilege=%s requested=0x%x", r.ret, p.privilege.name,
+            p.privilege.contributed))
         t:assert(r.ok, "the privilege grants them: " .. sys.errname(r.errno or 0))
-        t:assert_eq(p.privilege, "SeRestorePrivilege", "the event names the privilege")
-        t:assert_eq(p.requested_access, wanted,
+        t:assert_eq(p.privilege.name, "SeRestorePrivilege", "the event names the privilege")
+        t:assert_eq(p.privilege.contributed, wanted,
             "and the provenance covers the write bits together with WRITE_DAC, WRITE_OWNER and DELETE")
     end)
 
@@ -943,11 +950,11 @@ test("take_ownership_granted records the WRITE_OWNER step 9 supplied",
         local r, p = provenance_event(t,
             { privs_present = TAKE_OWNERSHIP, privs_enabled = TAKE_OWNERSHIP },
             access.simple({}), STD.WRITE_OWNER)
-        t:log(string.format("ret=%d privilege=%s requested=0x%x", r.ret, p.privilege,
-            p.requested_access))
+        t:log(string.format("ret=%d privilege=%s requested=0x%x", r.ret, p.privilege.name,
+            p.privilege.contributed))
         t:assert(r.ok, "the privilege grants WRITE_OWNER: " .. sys.errname(r.errno or 0))
-        t:assert_eq(p.privilege, "SeTakeOwnershipPrivilege", "the event names the privilege")
-        t:assert_eq(p.requested_access, STD.WRITE_OWNER, "and the provenance is that one bit")
+        t:assert_eq(p.privilege.name, "SeTakeOwnershipPrivilege", "the event names the privilege")
+        t:assert_eq(p.privilege.contributed, STD.WRITE_OWNER, "and the provenance is that one bit")
     end)
 
 test("relabel_granted records the WRITE_OWNER SeRelabelPrivilege added to the MIC allowed set",
@@ -961,11 +968,11 @@ test("relabel_granted records the WRITE_OWNER SeRelabelPrivilege added to the MI
         local r, p = provenance_event(t, { integrity_level = token.INTEGRITY.LOW,
             privs_present = RELABEL, privs_enabled = RELABEL }, sd, STD.WRITE_OWNER)
         t:log(string.format("without ret=%d %s, with ret=%d privilege=%s requested=0x%x",
-            without.ret, sys.errname(without.errno or 0), r.ret, p.privilege, p.requested_access))
+            without.ret, sys.errname(without.errno or 0), r.ret, p.privilege.name, p.privilege.contributed))
         t:assert(without.denied, "without the privilege MIC decides WRITE_OWNER: ret="
             .. without.ret .. " " .. sys.errname(without.errno or 0))
         t:assert(r.ok, "with it the DACL's grant takes effect: " .. sys.errname(r.errno or 0))
-        t:assert_eq(p.privilege, "SeRelabelPrivilege", "the event names the privilege")
-        t:assert_eq(p.requested_access, STD.WRITE_OWNER,
+        t:assert_eq(p.privilege.name, "SeRelabelPrivilege", "the event names the privilege")
+        t:assert_eq(p.privilege.contributed, STD.WRITE_OWNER,
             "and the provenance is the WRITE_OWNER it loosened")
     end)

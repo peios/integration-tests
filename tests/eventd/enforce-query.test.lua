@@ -95,7 +95,7 @@ local function two_types(stem)
     eventd.put_descriptor(vm, "Events", base .. ".a", hiding({ "secret", "num" }))
     settle(since("EVENTS " .. base .. ".*"), function(rs)
         for _, r in ipairs(rs) do
-            if r.event_type == base .. ".a" and r.secret ~= nil then return false end
+            if r["event.type"] == base .. ".a" and r.secret ~= nil then return false end
         end
         return true
     end, "the field deny on " .. base .. ".a")
@@ -113,10 +113,10 @@ test("access is decided before predicates: a predicate on a field the caller may
     -- match and then merely lose the field.
     local r = eventd.query(vm, since("EVENTS " .. base .. ".* WHERE secret STARTS_WITH \"s\""))
     t:assert(r.ok, "the query is answered, not rejected: " .. tostring(r.stderr))
-    t:assert_eq(values(r.rows, "event_type"), base .. ".b",
+    t:assert_eq(values(r.rows, "event.type"), base .. ".b",
         "only the type whose secret may be read contributes")
     r = eventd.query(vm, since("EVENTS " .. base .. ".* WHERE num > 0"))
-    t:assert_eq(values(r.rows, "event_type"), base .. ".b", "for any field the predicate names")
+    t:assert_eq(values(r.rows, "event.type"), base .. ".b", "for any field the predicate names")
 end)
 
 test("a broad selector is resolved into its concrete identifiers, each authorized on its own", {
@@ -144,9 +144,9 @@ test("a broad selector is resolved into its concrete identifiers, each authorize
     eventd.put_descriptor(vm, "Logs", base .. "no", DENY_ALL)
     eventd.put_descriptor(vm, "Metrics", base .. ".no", DENY_ALL)
     local ev = settle(since("EVENTS " .. base .. ".*"), count(1), "EVENTS " .. base .. ".*")
-    t:assert_eq(ev[1].event_type, base .. ".ok", "EVENTS <prefix>.* yields only the readable type")
+    t:assert_eq(ev[1]["event.type"], base .. ".ok", "EVENTS <prefix>.* yields only the readable type")
     ev = rows(since('EVENTS WHERE tag == "' .. tag .. '"'))
-    t:assert_eq(values(ev, "event_type"), base .. ".ok", "and so does EVENTS with no selector at all")
+    t:assert_eq(values(ev, "event.type"), base .. ".ok", "and so does EVENTS with no selector at all")
     local lg = settle(since('LOGS WHERE message == "' .. tag .. '"'), count(1), "LOGS without FROM")
     t:assert_eq(lg[1].origin, base .. "ok", "LOGS without FROM yields only the readable origin")
     local m = settle(mq, function(rs) return total(rs) == 1 end, "METRIC <prefix>.*")
@@ -180,16 +180,16 @@ test("a denied identifier's records are gone before aggregation, ordering and pa
 
     local page = rows(q .. " TAKE 1")
     t:assert_eq(#page, 1, "TAKE 1 is filled from the readable records")
-    t:assert_eq(page[1].event_type, base .. ".seen", "and with one")
+    t:assert_eq(page[1]["event.type"], base .. ".seen", "and with one")
     t:assert_eq(#rows(q .. " SKIP 2 TAKE 5"), 1, "SKIP counts only readable records")
-    local by = rows(q .. " COUNT BY event_type")
+    local by = rows(q .. " COUNT BY event.type")
     t:assert_eq(#by, 1, "COUNT BY sees one type")
     t:assert_eq(by[1].count, 3, "and counts three")
-    t:assert_eq(values(rows(q .. " TOP 5 BY event_type"), "event_type"), base .. ".seen",
+    t:assert_eq(values(rows(q .. " TOP 5 BY event.type"), "event.type"), base .. ".seen",
         "TOP N BY ranks only the readable type")
-    t:assert_eq(values(rows(q .. " DISTINCT event_type"), "event_type"), base .. ".seen",
+    t:assert_eq(values(rows(q .. " DISTINCT event.type"), "event.type"), base .. ".seen",
         "DISTINCT lists only the readable type")
-    t:assert_eq(rows(q .. " GROUP event_type COUNT")[1].count, 3, "GROUP … COUNT counts three")
+    t:assert_eq(rows(q .. " GROUP event.type COUNT")[1].count, 3, "GROUP … COUNT counts three")
     t:assert_eq(#rows(q .. " SORT i DESC"), 3, "SORT orders only the three")
 end)
 
@@ -220,22 +220,24 @@ test("each record is shaped by the verdicts for its own identifier", {
     eventd.put_descriptor(vm, "Events", base .. ".b", hiding({ "n" }))
     local rs = settle(since("EVENTS " .. base .. ".*"), function(r)
         local by = {}
-        for _, x in ipairs(r) do by[x.event_type] = x end
+        for _, x in ipairs(r) do by[x["event.type"]] = x end
         local a, b = by[base .. ".a"], by[base .. ".b"]
         return #r == 3 and a and a.secret == nil and b and b.n == nil
     end, "both descriptors to shape their records")
     local by = {}
-    for _, r in ipairs(rs) do by[r.event_type] = r end
+    for _, r in ipairs(rs) do by[r["event.type"]] = r end
     t:assert(by[base .. ".a"].secret == nil and by[base .. ".a"].n == 1, ".a lacks secret, keeps n")
     t:assert(by[base .. ".b"].n == nil and by[base .. ".b"].secret == "b", ".b lacks n, keeps secret")
     t:assert(by[base .. ".c"].n == 1 and by[base .. ".c"].secret == "c",
         "and .c, whose root alone is granted, keeps every field")
 end)
 
---- access-audit records whose object_context is `ctx`.
-local function audits(ctx)
-    return rows('EVENTS access-audit WHERE object_context == x"' .. eventd.hex(ctx)
-        .. '" SINCE 1h ago TAKE 100000 SELECT sequence, requested_access')
+--- kacs.audit.access.checked records of eventd's checks against the
+--- event-namespace pattern `pattern`, as eventd names it in the check's
+--- audit context.
+local function audits(pattern)
+    return rows('EVENTS kacs.audit.access.checked WHERE object.event-namespace.pattern == "' .. pattern
+        .. '" SINCE 1h ago TAKE 100000 SELECT event.sequence, object.kind, access.requested')
 end
 
 local AUDIT = access.acl({ access.ace(access.ACE.AUDIT, 0xf, EVERYONE,
@@ -250,12 +252,13 @@ test("each result identifier is re-checked for EVENTD_READ with an audit context
     settle(since("EVENTS " .. ty), count(1))
     eventd.put_descriptor(vm, "Events", base, access.simple({ allow(READ) }, { sacl = AUDIT }))
     settle(since("EVENTS " .. ty), count(1))
-    wait_until(function() return #audits("events:" .. base) >= 1 end,
+    wait_until(function() return #audits(base) >= 1 end,
         { timeout = 15, desc = "the result check's audit record" })
-    local by_pattern = audits("events:" .. base)
+    local by_pattern = audits(base)
     t:assert(#by_pattern >= 1, "the check is audited against the pattern " .. base)
-    t:assert_eq(#audits("events:" .. ty), 0, "and nothing against the identifier " .. ty)
-    t:assert_eq(by_pattern[1].requested_access, READ, "for EVENTD_READ")
+    t:assert_eq(#audits(ty), 0, "and nothing against the identifier " .. ty)
+    t:assert_eq(by_pattern[1]["object.kind"], "event-namespace", "as an event-namespace check")
+    t:assert_eq(by_pattern[1]["access.requested"], READ, "for EVENTD_READ")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -305,8 +308,8 @@ test("event and log aggregation arguments are read", {
     local base = two_types("ptaggarg")
     local q = since("EVENTS " .. base .. ".*")
     for _, fn in ipairs({ "SUM", "AVG", "MIN", "MAX" }) do
-        local r = rows(q .. " GROUP event_type " .. fn .. " num")
-        t:assert_eq(values(r, "event_type"), base .. ".b", fn .. " num groups only the readable type")
+        local r = rows(q .. " GROUP event.type " .. fn .. " num")
+        t:assert_eq(values(r, "event.type"), base .. ".b", fn .. " num groups only the readable type")
     end
     -- Logs: MAX timestamp over two origins, one whose timestamp is hidden.
     local lb = eventd.marker("ptlogagg")
@@ -480,24 +483,28 @@ test("every check is audited by KACS, against the data type and pattern, into th
     eventd.put_descriptor(vm, "Logs", origin, access.simple({ allow(READ) }, { sacl = AUDIT }))
     vm:run("sleep 1")
     rows(since("EVENTS " .. ty)); rows(since("LOGS FROM " .. origin))
-    local ev = settle('EVENTS access-audit WHERE object_context == x"' .. eventd.hex("events:" .. base)
+    local ev = settle('EVENTS kacs.audit.access.checked WHERE object.event-namespace.pattern == "' .. base
         .. '" SINCE 1h ago TAKE 1000', function(rs) return #rs >= 1 end, "the event check's audit")
-    local lg = settle('EVENTS access-audit WHERE object_context == x"' .. eventd.hex("logs:" .. origin)
+    local lg = settle('EVENTS kacs.audit.access.checked WHERE object.log-namespace.pattern == "' .. origin
         .. '" SINCE 1h ago TAKE 1000', function(rs) return #rs >= 1 end, "the log check's audit")
-    t:assert_eq(ev[1].requested_access, READ, "each audited check asked for EVENTD_READ")
-    t:assert_eq(lg[1]["process.executable_path"], "/usr/sbin/eventd", "and was eventd's own")
+    t:assert_eq(ev[1]["object.kind"], "event-namespace", "the event check names the event data type")
+    t:assert_eq(lg[1]["object.kind"], "log-namespace", "and the log check the log data type")
+    t:assert_eq(ev[1]["fields.attestation.userspace"], true, "each named by eventd, as an asserted value")
+    t:assert_eq(ev[1]["access.requested"], READ, "each audited check asked for EVENTD_READ")
+    t:assert_eq(lg[1]["emitter.process.executable"], "/usr/sbin/eventd", "and was eventd's own")
 
-    -- The audit records are events like any other: Events\access-audit
-    -- governs them.
+    -- The audit records are events like any other:
+    -- Events\kacs.audit.access.checked governs them.
     local stored = 0
     for _, shard in ipairs(eventd.shards(vm)) do
         stored = stored + eventd.sql(vm, shard,
-            "SELECT count(*) FROM events WHERE event_type = 'access-audit'")[1][1]
+            "SELECT count(*) FROM events WHERE event_type = 'kacs.audit.access.checked'")[1][1]
     end
     t:assert(stored >= 2, "the audit records are in the event store: " .. stored)
-    eventd.put_descriptor(vm, "Events", "access-audit", DENY_ALL)
-    settle("EVENTS access-audit SINCE 1h ago TAKE 1", count(0), "Events\\access-audit to govern them")
-    eventd.drop_descriptor(vm, "Events", "access-audit")
+    eventd.put_descriptor(vm, "Events", "kacs.audit.access.checked", DENY_ALL)
+    settle("EVENTS kacs.audit.access.checked SINCE 1h ago TAKE 1", count(0),
+        "Events\\kacs.audit.access.checked to govern them")
+    eventd.drop_descriptor(vm, "Events", "kacs.audit.access.checked")
 end)
 
 -- Route closed: as for §7.1 (access-model.test.lua), KACS captures an

@@ -5,12 +5,14 @@
 --
 -- Access checks are counted, not inferred. A descriptor carrying a SACL
 -- success/failure audit ACE for Everyone makes every AccessCheck eventd
--- runs against it emit one KACS `access-audit` event naming the check's
--- audit context ("events:<pattern>"), and eventd stores those events like
--- any other, so the number of checks a query cost is the number of new
--- such records. Registry reads are counted the same way, through LCS: a
--- SACL on a descriptor's own key makes each open of it emit
--- `LCS_KEY_OPEN_AUDIT` with the opener's user SID.
+-- runs against it emit one KACS `kacs.audit.access.checked` event naming
+-- the object eventd passed as the check's audit context (`object.kind`
+-- `event-namespace`, `object.event-namespace.pattern` the pattern), and
+-- eventd stores those events like any other, so the number of checks a
+-- query cost is the number of new such records. Registry reads are
+-- counted the same way, through LCS: a SACL on a descriptor's own key
+-- makes each open of it emit `lcs.audit.key.opened` with the opener's SID
+-- as `subject.token.sid`.
 --
 -- One file-scope eventd serves every test; each test has its own
 -- marker-named pattern, so no test's checks are counted in another's.
@@ -61,10 +63,15 @@ end
 -- Counting checks
 -- ---------------------------------------------------------------------------
 
---- access-audit records naming `ctx`.
+--- The `object.kind` of eventd's checks against each namespace's patterns.
+local KIND = { Events = "event-namespace", Logs = "log-namespace", Metrics = "metric-namespace" }
+
+--- kacs.audit.access.checked records of checks against `ctx`, a
+--- {kind, pattern} pair as `audit_pattern` returns it.
 local function audits(ctx)
-    return #rows('EVENTS access-audit WHERE object_context == x"' .. eventd.hex(ctx)
-        .. '" SINCE 1h ago TAKE 100000 SELECT sequence')
+    return #rows('EVENTS kacs.audit.access.checked WHERE object.kind == "' .. ctx.kind
+        .. '" WHERE object.' .. ctx.kind .. '.pattern == "' .. ctx.pattern
+        .. '" SINCE 1h ago TAKE 100000 SELECT event.sequence')
 end
 
 --- The audit count for `ctx` once it has stopped moving: KACS emits
@@ -75,7 +82,8 @@ local function settled(ctx)
         local n = audits(ctx)
         if n == last then steady = steady + 1 else steady, last = 0, n end
         return steady >= 3
-    end, { timeout = 30, interval = 0.5, desc = "the audit count for " .. ctx .. " to settle" })
+    end, { timeout = 30, interval = 0.5,
+           desc = "the audit count for " .. ctx.kind .. " " .. ctx.pattern .. " to settle" })
     return last
 end
 
@@ -90,7 +98,7 @@ end
 --- it (the query's own checks are then part of the baseline).
 local function audit_pattern(ns, pattern, aces, probe)
     eventd.put_descriptor(vm,ns, pattern, audited(aces))
-    local ctx = ns:lower() .. ":" .. pattern
+    local ctx = { kind = KIND[ns], pattern = pattern }
     wait_until(function()
         rows(probe)
         return audits(ctx) > 0
@@ -204,8 +212,8 @@ end
 
 --- Opens of a key with a SACL, by eventd, as LCS audited them.
 local function opens(sid)
-    return #rows('EVENTS LCS_KEY_OPEN_AUDIT WHERE caller.user_sid == x"' .. eventd.hex(sid)
-        .. '" SINCE 1h ago TAKE 100000 SELECT sequence')
+    return #rows('EVENTS lcs.audit.key.opened WHERE subject.token.sid == x"' .. eventd.hex(sid)
+        .. '" SINCE 1h ago TAKE 100000 SELECT event.sequence')
 end
 
 local function settled_opens(sid)
@@ -322,7 +330,7 @@ local function live_until(c, until_type)
         local done = false
         for _, r in ipairs(m.records) do
             out[#out + 1] = r
-            if r.event_type == until_type then done = true end
+            if r["event.type"] == until_type then done = true end
         end
         if done then return out end
     end
@@ -330,7 +338,7 @@ end
 
 local function types_of(recs)
     local seen = {}
-    for _, r in ipairs(recs) do seen[#seen + 1] = r.event_type end
+    for _, r in ipairs(recs) do seen[#seen + 1] = r["event.type"] end
     table.sort(seen)
     return table.concat(seen, ",")
 end

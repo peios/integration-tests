@@ -444,7 +444,7 @@ test("the creation default of audit_policy is 0: a denied check emits nothing",
         local fd = assert(mint({}))
         kmes.drain(ring)
         t:assert(check(fd, access.simple({})).denied, "denied")
-        t:assert_eq(#events_of(ring, "access-audit"), 0, "no access-audit event without a policy or a SACL")
+        t:assert_eq(#events_of(ring, "kacs.audit.access.checked"), 0, "no access-audit event without a policy or a SACL")
         sys.close(vm, fd); kmes.detach(ring)
     end)
 
@@ -454,17 +454,17 @@ test("the policy is additive: it forces events system policy would not generate"
         local fd = assert(mint({ audit_policy = token.AUDIT.OBJECT_ACCESS_FAILURE }))
         kmes.drain(ring)
         t:assert(check(fd, access.simple({})).denied, "denied")
-        local ev = events_of(ring, "access-audit")
+        local ev = events_of(ring, "kacs.audit.access.checked")
         t:assert_eq(#ev, 1, "OBJECT_ACCESS_FAILURE forces one access-audit event on the denial")
         t:assert(check(fd, access.simple({ grant(token.SID.TEST_USER) })).ok, "granted")
-        t:assert_eq(#events_of(ring, "access-audit"), 0, "and success is not audited by a failure-only policy")
+        t:assert_eq(#events_of(ring, "kacs.audit.access.checked"), 0, "and success is not audited by a failure-only policy")
         -- A SACL-driven audit cannot be suppressed by the token's policy.
         local sacl = access.sd({ owner = token.SID.LOCAL_SYSTEM, group = token.SID.LOCAL_SYSTEM,
             dacl = access.acl({ grant(token.SID.TEST_USER) }),
             sacl = access.acl({ access.ace(access.ACE.AUDIT, 0x1, token.SID.EVERYONE, access.ACE_FLAG.SUCCESSFUL_ACCESS) }) })
         local plain = assert(mint({}))
         t:assert(check(plain, sacl).ok, "granted")
-        t:assert_eq(#events_of(ring, "access-audit"), 1, "the SACL audits a token whose own policy is 0")
+        t:assert_eq(#events_of(ring, "kacs.audit.access.checked"), 1, "the SACL audits a token whose own policy is 0")
         sys.close(vm, plain); sys.close(vm, fd); kmes.detach(ring)
     end)
 
@@ -475,9 +475,9 @@ test("PRIVILEGE_USE_SUCCESS audits a privilege whose bits survive into the resul
         kmes.drain(ring)
         local r = access.check(vm, { token_fd = fd, sd = access.simple({}), desired = 0x1, intent = access.INTENT.BACKUP })
         t:assert(r.ok, "SeBackupPrivilege with backup intent grants read against an empty DACL")
-        local ev = events_of(ring, "privilege-use")
+        local ev = events_of(ring, "kacs.audit.privilege.used")
         t:assert_eq(#ev, 1, "one privilege-use event")
-        t:assert_eq(ev[1].payload and ev[1].payload.success, true, "reporting success")
+        t:assert_eq(ev[1].payload and ev[1].payload.outcome.success, true, "reporting success")
         sys.close(vm, fd); kmes.detach(ring)
     end)
 
@@ -491,9 +491,9 @@ test("PRIVILEGE_USE_FAILURE audits a privilege that contributed bits which did n
         kmes.drain(ring)
         local r = access.check(vm, { token_fd = fd, sd = access.simple({}), desired = 0x1, intent = access.INTENT.BACKUP })
         t:assert(r.denied, "confinement takes the privilege-granted bits away")
-        local ev = events_of(ring, "privilege-use")
+        local ev = events_of(ring, "kacs.audit.privilege.used")
         t:assert_eq(#ev, 1, "one privilege-use event")
-        t:assert_eq(ev[1].payload and ev[1].payload.success, false, "reporting failure")
+        t:assert_eq(ev[1].payload and ev[1].payload.outcome.success, false, "reporting failure")
         sys.close(vm, fd); kmes.detach(ring)
     end)
 
@@ -507,12 +507,16 @@ test("the audit policy follows impersonation",
                 impersonation_level = token.LEVEL.IMPERSONATION }))
             kmes.drain(ring)
             t:assert(access.check(worker, { sd = access.simple({}), desired = 0x1 }).denied or true, "as SYSTEM (owner) first")
-            local before = #events_of(ring, "access-audit")
+            local before = #events_of(ring, "kacs.audit.access.checked")
             t:assert_eq(token.impersonate(worker, imp).ret, 0, "impersonate the audited client")
             t:assert(access.check(worker, { sd = access.simple({}), desired = 0x1 }).denied, "denied as the client")
-            local ev = events_of(ring, "access-audit")
+            local ev = events_of(ring, "kacs.audit.access.checked")
             t:assert_eq(#ev, 1, "the client's policy produced the event during impersonation")
             t:assert_neq(ev[1].effective_token, ev[1].true_token, "stamped with the client as effective and the server as true identity")
+            t:assert_eq(ev[1].payload.subject.token.type, "impersonation",
+                "the subject token is recorded as an impersonation token")
+            t:assert_eq(ev[1].payload.subject.token.impersonation, token.LEVEL.IMPERSONATION,
+                "at the level it was duplicated to")
             token.revert(worker)
         end)
         worker:kill(); worker:join()

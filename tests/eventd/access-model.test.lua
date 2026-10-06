@@ -388,18 +388,20 @@ test("every verdict is KACS AccessCheck's: its audit walk, integrity and restric
     wait_seen(ty, 1, "the event")
 
     -- The SACL audit walk: a success-audit ACE makes AccessCheck itself
-    -- emit access-audit, from inside eventd's query thread.
+    -- emit kacs.audit.access.checked, from inside eventd's query thread.
     local sacl = access.acl({ access.ace(access.ACE.AUDIT, READ, EVERYONE,
         access.ACE_FLAG.SUCCESSFUL_ACCESS) })
     eventd.put_descriptor(vm, "Events", ty, descriptor({ allow(READ, SY), allow(READ, GROUP) }, { sacl = sacl }))
     wait_seen(ty, 1, "the audited descriptor")
-    local context = "events:" .. ty
     local audits = eventd.wait_rows(vm,
-        'EVENTS access-audit WHERE object_context == x"' .. eventd.hex(context) .. '" SINCE 1h ago TAKE 100',
-        function(rs) return #rs >= 1 end, { timeout = 15, desc = "an access-audit record" })
-    t:assert_eq(audits[1]["process.executable_path"], "/usr/sbin/eventd",
+        'EVENTS kacs.audit.access.checked WHERE object.event-namespace.pattern == "' .. ty
+            .. '" SINCE 1h ago TAKE 100',
+        function(rs) return #rs >= 1 end, { timeout = 15, desc = "a kacs.audit.access.checked record" })
+    t:assert_eq(audits[1]["emitter.process.executable"], "/usr/sbin/eventd",
         "the audit record was emitted by eventd's own AccessCheck call")
-    t:assert_eq(audits[1].requested_access, READ, "asking for EVENTD_READ")
+    t:assert_eq(audits[1]["object.kind"], "event-namespace", "against an event-namespace pattern")
+    t:assert_eq(audits[1]["fields.attestation.userspace"], true, "which eventd asserted, not KACS")
+    t:assert_eq(audits[1]["access.requested"], READ, "asking for EVENTD_READ")
 
     with_worker(function(w)
         -- Restricted SIDs: a second pass that only the restricting SIDs

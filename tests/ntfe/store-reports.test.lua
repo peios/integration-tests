@@ -1,15 +1,16 @@
 -- PKM §6.6 — the stores: reports. A REPORT whose level clears
 -- `CurrentReportingLevel` becomes one KMES event of origin class 4 and
--- type `network-report`, whose msgpack payload is a string-keyed map of
--- the attribution, the level, the seat and layer, the verdict, the
--- packet and the generation — only the keys the packet has. The payload
--- is built in a fixed 512-byte buffer under a map16 header; one that
--- would not fit is dropped rather than truncated, and `reports_emitted`
--- counts only what reached the ring.
+-- type `ntfe.verdict.reported`, whose msgpack payload is nested maps,
+-- one per path segment: `rule` (the attribution, the level, the layer
+-- and seat), `outcome` (the verdict), `network`, `source`, `destination`
+-- and `flow` (the packet) and `policy` (the generation) — only the keys
+-- the packet has. The payload is built in a fixed 512-byte buffer; a
+-- rule name too long for it is cut and said, never dropped, and
+-- `reports_emitted` counts only what reached the ring.
 --
 -- The events are read from every CPU's KMES ring (helpers/ntfe_store);
--- the payload is decoded with a reader that knows map16, which the
--- generic helpers/kmes reader does not.
+-- the payload is decoded with a reader that keeps every map's keys in
+-- wire order, so each level is held to its exact key list.
 --
 -- Own VM: the policy, and with it CurrentReportingLevel, is machine-wide
 -- state.
@@ -62,9 +63,18 @@ local function keyset(keys)
     return set
 end
 
+-- Hold one map of the payload to exactly `want`: every key present, and
+-- nothing else (the count catches a duplicate key too).
+local function exactly(t, map, want, what)
+    local keys = S.keys_of(map) or {}
+    local have = keyset(keys)
+    for _, k in ipairs(want) do t:assert(have[k], what .. " has `" .. k .. "`") end
+    t:assert_eq(#keys, #want, "and " .. what .. " has nothing else")
+end
+
 -- ---- one event ----------------------------------------------------------
 
-test("a REPORT at or past CurrentReportingLevel becomes one KMES event of origin class 4, type network-report",
+test("a REPORT at or past CurrentReportingLevel becomes one KMES event of origin class 4, type ntfe.verdict.reported",
     { spec = "PKM *ntfe-store.report-becomes-one-kmes-event" }, function(t)
         local s = E:replace(with({
             loud = { ["DstPort.Equal"] = 7501, Actions = { "REPORT(3)" } },
@@ -76,20 +86,20 @@ test("a REPORT at or past CurrentReportingLevel becomes one KMES event of origin
         local reports = reporting(function() send(7501) end)
         t:assert_eq(#reports, 1, "a level-3 REPORT under level 3 is one event")
         t:assert_eq(reports[1].origin, S.ORIGIN_NTFE, "of origin class KMES_ORIGIN_NTFE (4)")
-        t:assert_eq(reports[1].type, "network-report", "and type network-report")
+        t:assert_eq(reports[1].type, "ntfe.verdict.reported", "and type ntfe.verdict.reported")
         t:assert(reports[1].report, "carrying a payload that decodes: "
             .. tostring(reports[1].report == nil))
-        t:assert_eq(reports[1].report.rule, "loud", "from the reporting rule")
+        t:assert_eq((reports[1].report.rule or {}).name, "loud", "from the reporting rule")
         reports = reporting(function() send(7502) end)
         t:assert_eq(#reports, 0, "a level-2 REPORT under level 3 is no event")
         reports = reporting(function() send(7503) end)
         t:assert_eq(#reports, 1, "a rule reporting twice is still one event")
-        t:assert_eq(reports[1].report.level, 5, "at its higher level")
+        t:assert_eq((reports[1].report.rule or {})["report-level"], 5, "at its higher level")
     end)
 
 -- ---- the payload ----------------------------------------------------------
 
-test("the payload is a string-keyed map of the attribution, level, seat, verdict, packet, generation and time",
+test("the payload nests the attribution, level, seat, verdict, packet and generation; the time is the header's",
     { spec = "PKM *ntfe-store.report-payload-keys" }, function(t)
         local s = E:replace(with({
             guard = { ["Protocol.Equal"] = "tcp", children = {
@@ -103,41 +113,49 @@ test("the payload is a string-keyed map of the attribution, level, seat, verdict
         end)
         local after = vm:clock():get_ns()
         t:assert(#reports >= 1, "the refused SYN is reported")
-        local r, keys = reports[1].report, reports[1].keys
-        local want = { "rule", "rule_hash", "level", "layer", "seat", "verdict", "reject_kind",
-                       "direction", "interface", "ifindex", "ether_type", "family",
-                       "protocol", "src", "dst", "src_port", "dst_port", "flow_state",
-                       "length", "generation", "t_ns" }
-        local have = keyset(keys)
-        for _, k in ipairs(want) do t:assert(have[k], "the payload has `" .. k .. "`") end
-        t:assert_eq(#keys, #want, "and nothing else")
+        local r = reports[1].report
+        exactly(t, r, { "rule", "outcome", "network", "source", "destination", "flow", "policy" },
+            "the payload")
+        local rule, outcome, nw = r.rule or {}, r.outcome or {}, r.network or {}
+        local src, dst = r.source or {}, r.destination or {}
+        exactly(t, rule, { "name", "hash", "report-level", "layer", "seat" }, "rule")
+        exactly(t, outcome, { "verdict", "reason" }, "outcome")
+        exactly(t, nw, { "direction", "interface", "ether-type", "family", "protocol", "length" },
+            "network")
+        exactly(t, nw.interface, { "name", "index" }, "network.interface")
+        exactly(t, src, { "address", "port" }, "source")
+        exactly(t, dst, { "address", "port" }, "destination")
+        exactly(t, r.flow, { "state" }, "flow")
+        exactly(t, r.policy, { "generation" }, "policy")
         local ev = ntfe.matching(events, { layer = ntfe.LAYER.PACKET, dst_port = 7510 })[1]
         t:assert(ev, "the verdict event is there to compare with")
-        t:assert_eq(r.rule, "guard/ssh", "rule: the attribution path")
-        t:assert_eq(r.rule_hash, ntfe.name_hash("guard/ssh"), "rule_hash: its FNV-1a-64")
-        t:assert_eq(r.level, 4, "level")
-        t:assert_eq(r.layer, "Packet", "layer")
-        t:assert_eq(r.seat, "local-in", "seat")
-        t:assert_eq(r.verdict, "REJECT", "verdict")
-        t:assert_eq(r.reject_kind, "Prohibited", "reject_kind, since it was a reject")
-        t:assert_eq(r.direction, "in", "direction")
-        t:assert_eq(r.interface, net.name, "interface")
-        t:assert_eq(r.ifindex, net.ifindex, "ifindex")
-        t:assert_eq(r.ether_type, ntfe.ETH_P.IP, "ether_type")
-        t:assert_eq(r.family, 4, "family")
-        t:assert_eq(r.protocol, ntfe.IPPROTO.TCP, "protocol")
-        t:assert_eq(r.src, net.peer_addr, "src, as text")
-        t:assert_eq(r.dst, net.addr, "dst, as text")
-        t:assert_eq(r.src_port, ev.src_port, "src_port")
-        t:assert_eq(r.dst_port, 7510, "dst_port")
-        t:assert_eq(r.flow_state, "new", "flow_state")
-        t:assert_eq(r.length, ev.length, "length")
-        t:assert_eq(r.generation, s.generation, "generation")
-        t:assert(r.t_ns >= before and r.t_ns <= after, "t_ns, CLOCK_REALTIME nanoseconds")
+        t:assert_eq(rule.name, "guard/ssh", "rule.name: the attribution path")
+        t:assert_eq(rule.hash, ntfe.name_hash("guard/ssh"), "rule.hash: its FNV-1a-64")
+        t:assert_eq(rule["report-level"], 4, "rule.report-level")
+        t:assert_eq(rule.layer, "packet", "rule.layer")
+        t:assert_eq(rule.seat, "local-in", "rule.seat")
+        t:assert_eq(outcome.verdict, "reject", "outcome.verdict")
+        t:assert_eq(outcome.reason, "prohibited", "outcome.reason, since it was a reject")
+        t:assert_eq(nw.direction, "in", "network.direction")
+        t:assert_eq((nw.interface or {}).name, net.name, "network.interface.name")
+        t:assert_eq((nw.interface or {}).index, net.ifindex, "network.interface.index")
+        t:assert_eq(nw["ether-type"], ntfe.ETH_P.IP, "network.ether-type")
+        t:assert_eq(nw.family, 2, "network.family: AF_INET, the AF_* number")
+        t:assert_eq(nw.protocol, ntfe.IPPROTO.TCP, "network.protocol")
+        t:assert_eq(src.address, net.peer_addr, "source.address, as text")
+        t:assert_eq(dst.address, net.addr, "destination.address, as text")
+        t:assert_eq(src.port, ev.src_port, "source.port")
+        t:assert_eq(dst.port, 7510, "destination.port")
+        t:assert_eq((r.flow or {}).state, "new", "flow.state")
+        t:assert_eq(nw.length, ev.length, "network.length")
+        t:assert_eq((r.policy or {}).generation, s.generation, "policy.generation")
+        t:assert(reports[1].timestamp >= before and reports[1].timestamp <= after,
+            "the time is the KMES header's, CLOCK_REALTIME nanoseconds")
         E:replace(with({ udp = { ["DstPort.Equal"] = 7511, Actions = { "REPORT(3)" } } }))
         local plain = reporting(function() send(7511) end)
-        t:assert(plain[1] and plain[1].report.reject_kind == nil,
-            "a report of a PASS has no reject_kind")
+        t:assert(plain[1], "a PASS is reported")
+        exactly(t, plain[1] and plain[1].report.outcome, { "verdict" },
+            "a report of a PASS: outcome, with no reason,")
     end)
 
 test("only the keys the packet has are present",
@@ -154,7 +172,7 @@ test("only the keys the packet has are present",
         }))
         local function only(reports, rule)
             for _, r in ipairs(reports) do
-                if r.report and r.report.rule == rule then return r end
+                if r.report and (r.report.rule or {}).name == rule then return r end
             end
         end
         local arp = only(reporting(function()
@@ -162,12 +180,14 @@ test("only the keys the packet has are present",
                 .. ntfe.arp_request(MAC, "10.9.0.98", "10.9.0.97"))
         end), "arp")
         t:assert(arp, "an ARP frame is reported")
-        local have = keyset(arp.keys)
-        for _, k in ipairs({ "protocol", "src", "dst", "src_port", "dst_port", "flow_state" }) do
-            t:assert(not have[k], "an ARP report has no `" .. k .. "`")
-        end
-        t:assert_eq(arp.report.ether_type, ntfe.ETH_P.ARP, "but does say what it was")
-        t:assert_eq(arp.report.seat, "ingress", "and where: the fallback judgment at ingress")
+        -- No address family: no source, destination or protocol; and
+        -- judged at ingress, before conntrack, so no flow.
+        exactly(t, arp.report, { "rule", "outcome", "network", "policy" }, "an ARP report")
+        exactly(t, arp.report.network, { "direction", "interface", "ether-type", "family", "length" },
+            "an ARP report's network")
+        t:assert_eq(arp.report.network["ether-type"], ntfe.ETH_P.ARP, "but does say what it was")
+        t:assert_eq(arp.report.network.family, 0, "with family AF_UNSPEC")
+        t:assert_eq(arp.report.rule.seat, "ingress", "and where: the fallback judgment at ingress")
 
         local echo = ntfe.icmp(8, 0, 0x12340001, "ping")
         local ping = only(reporting(function()
@@ -175,29 +195,35 @@ test("only the keys the packet has are present",
                 .. ntfe.ipv4(net.peer_addr, net.addr, ntfe.IPPROTO.ICMP, #echo) .. echo)
         end), "ping")
         t:assert(ping, "an ICMP echo is reported")
-        have = keyset(ping.keys)
-        t:assert(have.src and have.dst and have.protocol, "with its addresses and protocol")
-        t:assert(not have.src_port and not have.dst_port, "but no ports, which ICMP lacks")
-        t:assert(not have.reject_kind, "and no reject_kind for a verdict that was no reject")
+        local have = keyset(ping.keys)
+        t:assert(have.source and have.destination and ping.report.network.protocol,
+            "with its addresses and protocol")
+        exactly(t, ping.report.source, { "address" }, "but source, with no port, which ICMP lacks,")
+        exactly(t, ping.report.destination, { "address" }, "and destination")
+        exactly(t, ping.report.outcome, { "verdict" },
+            "and outcome, with no reason for a verdict that was no reject,")
 
         local wire = only(reporting(function() send(7520) end), "wire")
         t:assert(wire, "a datagram at the ingress seat is reported by RawPacket")
+        exactly(t, wire.report.source, { "address", "port" }, "with source and its port")
+        exactly(t, wire.report.destination, { "address", "port" }, "and destination and its port")
         have = keyset(wire.keys)
-        t:assert(have.src_port and have.dst_port, "with its ports")
-        t:assert(not have.flow_state, "but no flow_state: conntrack has not run at ingress")
+        t:assert(not have.flow, "but no flow: conntrack has not run at ingress")
     end)
 
-test("the payload is one map16 whose count is patched to the keys written",
+test("the payload is one map whose every count is the keys written, filling it exactly",
     { spec = "PKM *ntfe-store.report-payload-built-on-stack" }, function(t)
         E:replace(with({ udp = { ["DstPort.Equal"] = 7530, Actions = { "REPORT(3)" } } }))
         local reports = reporting(function() send(7530) end)
         t:assert_eq(#reports, 1, "one report")
         local bytes = reports[1].payload_bytes
-        t:assert_eq(bytes:byte(1), 0xde, "a map16 header")
-        local count = string.unpack(">I2", bytes, 2)
+        local tag = bytes:byte(1)
+        t:assert(tag >= 0x80 and tag <= 0x8f, string.format("a fixmap header: 0x%02x", tag))
         local _, keys, used = S.decode_payload(bytes)
-        t:assert_eq(count, #keys, "whose count is the number of keys that follow")
-        t:assert_eq(used, #bytes, "which fill the payload exactly")
+        t:assert_eq(tag - 0x80, #keys, "whose count is the number of keys that follow")
+        -- A nested count that disagreed with its keys would misread
+        -- everything after it, so the decode would not land on the end.
+        t:assert_eq(used, #bytes, "and every map's keys fill the payload exactly")
         t:assert(#bytes <= 512, "inside the 512-byte buffer: " .. #bytes)
     end)
 
@@ -225,21 +251,23 @@ test("a rule path too long for the payload is cut to fit and said, and the event
         local control, d = reporting(function() ntfe.send_frame(peer, pfd, frame(7542)) end)
         t:assert_eq(#control, 1, "the frame reported by a short-named rule is one event")
         t:assert_eq(d.reports_emitted, 1, "emitted")
-        t:assert_eq(control[1].report.src, V6_SRC, "naming the long addresses")
-        t:assert(not control[1].report.rule_truncated, "a short path is not cut")
-        -- The long path as a str16 (3 + 272) where "short" took a fixstr
+        t:assert_eq((control[1].report.source or {}).address, V6_SRC, "naming the long addresses")
+        exactly(t, control[1].report.rule, { "name", "hash", "report-level", "layer", "seat" },
+            "a short path is not cut: rule")
+        -- The long name as a str16 (3 + 272) where "short" took a fixstr
         -- (1 + 5): the same report, 269 bytes longer.
         local would = #control[1].payload_bytes + (3 + #path) - (1 + #"short")
         t:assert(would > 512, "the whole long path would need " .. would .. " bytes")
         local cut, dd = reporting(function() ntfe.send_frame(peer, pfd, frame(7541)) end)
         t:assert_eq(#cut, 1, "the long-named rule's report reaches KMES")
         t:assert_eq(dd.reports_emitted, 1, "and is counted as emitted")
-        local r = cut[1] and cut[1].report or {}
+        local r = cut[1] and cut[1].report and cut[1].report.rule or {}
         t:assert(#cut[1].payload_bytes <= 512, "inside the 512-byte buffer: " .. #cut[1].payload_bytes)
-        t:assert_eq(r.rule_truncated, 1, "rule_truncated says the path was cut")
-        t:assert(#r.rule < #path and path:sub(1, #r.rule) == r.rule,
-            "rule is a prefix of the path: " .. #r.rule .. " of " .. #path .. " characters")
-        t:assert_eq(r.rule_hash, ntfe.name_hash(path), "and rule_hash names the whole path")
+        exactly(t, r, { "name", "hash", "report-level", "layer", "seat", "name-truncated" }, "rule")
+        t:assert_eq(r["name-truncated"], true, "rule.name-truncated, a bool, says the path was cut")
+        t:assert(#r.name < #path and path:sub(1, #r.name) == r.name,
+            "rule.name is a prefix of the path: " .. #r.name .. " of " .. #path .. " characters")
+        t:assert_eq(r.hash, ntfe.name_hash(path), "and rule.hash names the whole path")
     end)
 
 test("reports_emitted counts the events that reached the ring",

@@ -5,7 +5,7 @@
 -- Harness: the scripted gateway (helpers.gateway) and a whole Peios
 -- (helpers.network), with LCS's key-open auditing (PKM §5.4.4) as the
 -- instrument. A success-audit ACE for Everyone in a key's SACL makes LCS
--- emit LCS_KEY_OPEN_AUDIT, carrying the opener's user SID, for every
+-- emit lcs.audit.key.opened, carrying the opener's user SID, for every
 -- open of that key; the events are read from a KMES ring (helpers.kmes).
 -- The ACE goes on each key in turn (`reg sd --sacl --set`), and resolvd
 -- is made to read its configuration twice — a restart, then a registry
@@ -69,9 +69,10 @@ local function provoke(t)
         sut:run("sleep 2")
     end)
     local out = {}
-    for _, e in ipairs(kmes.of_type(events, "LCS_KEY_OPEN_AUDIT")) do
-        local caller = e.payload and e.payload.caller
-        out[#out + 1] = { sid = caller and caller.user_sid and token.sid_string(caller.user_sid) or "?" }
+    for _, e in ipairs(kmes.of_type(events, "lcs.audit.key.opened")) do
+        local subject = e.payload and e.payload.subject
+        local caller = subject and subject.token
+        out[#out + 1] = { sid = caller and caller.sid and token.sid_string(caller.sid) or "?" }
     end
     return out
 end

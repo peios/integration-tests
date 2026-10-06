@@ -51,8 +51,15 @@ local press = eventd.boot({ name = "ev-index-press", config = {
 local STORE = eventd.STORE.events
 local SHARD0 = STORE .. "/shard-0000.db"
 local SHARD1 = STORE .. "/shard-0001.db"
-local HEADERS = { "event_type", "origin_class", "cpu_id", "effective_token_guid", "true_token_guid",
-                  "process_guid", "boot_id" }
+-- The adaptively indexed header fields, by path, and the column each is
+-- stored in (and its index named for).
+local HEADERS = { "event.type", "emitter.class", "event.cpu", "emitter.token.guid", "emitter.true-token.guid",
+                  "emitter.process.guid", "event.boot.guid" }
+local COLUMN = {
+    ["event.type"] = "event_type", ["emitter.class"] = "origin_class", ["event.cpu"] = "cpu_id",
+    ["emitter.token.guid"] = "effective_token_guid", ["emitter.true-token.guid"] = "true_token_guid",
+    ["emitter.process.guid"] = "process_guid", ["event.boot.guid"] = "boot_id",
+}
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -124,7 +131,7 @@ local function payload_index_name(path)
     return "idx_events_payload_" .. h
 end
 
-local function header_index_name(col) return "idx_events_" .. col end
+local function header_index_name(path) return "idx_events_" .. COLUMN[path] end
 
 local function wait_for(desc, fn, timeout)
     wait_until(fn, { timeout = timeout or 30, interval = 0.25, desc = desc })
@@ -254,7 +261,7 @@ test("a payload index is named from the field GUID and keys rows on a determinis
     t:assert(not sql:find("random", 1, true), "and nothing else")
 end)
 
-test("every header column but timestamp is a candidate, indexed as idx_events_<column>; raw payload never is", {
+test("every header field but event.time is a candidate, indexed as idx_events_<column>; raw payload never is", {
     spec = "eventd *index.the-candidate-header-columns"
         .. " eventd *index.header-column-indexes-are-named-idx-events-column"
         .. " eventd *index.the-timestamp-column-is-not-adaptively-managed"
@@ -262,14 +269,14 @@ test("every header column but timestamp is a candidate, indexed as idx_events_<c
         .. " eventd *index.any-field-usable-in-a-where-predicate-is-a-candidate",
 }, function(t)
     local lit = {
-        event_type = '"pt.ix.q"', origin_class = "0", cpu_id = "0",
-        effective_token_guid = '"{00000000-0000-0000-0000-000000000000}"',
-        true_token_guid = '"{00000000-0000-0000-0000-000000000000}"',
-        process_guid = '"{00000000-0000-0000-0000-000000000000}"',
-        boot_id = '"{00000000-0000-0000-0000-000000000000}"',
+        ["event.type"] = '"pt.ix.q"', ["emitter.class"] = "0", ["event.cpu"] = "0",
+        ["emitter.token.guid"] = '"{00000000-0000-0000-0000-000000000000}"',
+        ["emitter.true-token.guid"] = '"{00000000-0000-0000-0000-000000000000}"',
+        ["emitter.process.guid"] = '"{00000000-0000-0000-0000-000000000000}"',
+        ["event.boot.guid"] = '"{00000000-0000-0000-0000-000000000000}"',
     }
     for _, c in ipairs(HEADERS) do query_n(vm, 10, c .. " == " .. lit[c]) end
-    query_n(vm, 10, "timestamp > 0")
+    query_n(vm, 10, "event.time > 0")
     query_n(vm, 10, 'payload == "x"')
     run_policy(vm)
     for _, s in ipairs({ SHARD0, SHARD1 }) do
@@ -280,7 +287,8 @@ test("every header column but timestamp is a candidate, indexed as idx_events_<c
         end)
         local ix = indexes(vm, s)
         for _, c in ipairs(HEADERS) do
-            t:assert(ix[header_index_name(c)]:find("ON events%(" .. c), s .. ": idx_events_" .. c .. " is on " .. c)
+            t:assert(ix[header_index_name(c)]:find("ON events%(" .. COLUMN[c]),
+                s .. ": " .. header_index_name(c) .. " is on " .. COLUMN[c] .. ", " .. c .. "'s column")
         end
         for name, sql in pairs(ix) do
             t:assert(name == "idx_events_timestamp" or not sql:find("ON events%(timestamp"),
@@ -289,7 +297,11 @@ test("every header column but timestamp is a candidate, indexed as idx_events_<c
         end
     end
     local c = counters(vm)
-    t:assert_eq(c.timestamp, nil, "timestamp is not counted")
+    t:assert_eq(c["event.time"], nil, "event.time is not counted")
+    for _, h in ipairs(HEADERS) do
+        t:assert(c[h], h .. " is counted by its path")
+        t:assert_eq(c[COLUMN[h]], nil, "not by its column, " .. COLUMN[h])
+    end
     t:assert_eq(c.payload, nil, "nor is the raw payload")
 end)
 
@@ -298,16 +310,23 @@ test("a flattened payload path gets an expression index; a path suppressed by fl
         .. " eventd *index.a-suppressed-payload-path-never-receives-an-index",
 }, function(t)
     local nested = eventd.marker("ixn") .. ".inner"
-    -- A top-level key colliding with a header field is suppressed (PSPU
-    -- §3.22), so process_guid.<x> is never a payload field.
-    local suppressed = "process_guid." .. eventd.marker("ixs")
+    -- A map at a header path is suppressed, subtree and all (PSPU §3.22),
+    -- so emitter.process.guid.<x> is never a payload field; a field beside
+    -- the header path, under emitter.process, is an ordinary one.
+    local suppressed = "emitter.process.guid." .. eventd.marker("ixs")
+    local beside = "emitter.process." .. eventd.marker("ixb")
     query_n(vm, 10, nested .. " == 1")
     query_n(vm, 10, suppressed .. " == 1")
+    query_n(vm, 10, beside .. " == 1")
     run_policy(vm)
     wait_for("the nested path's index", function()
         return indexes(vm, SHARD0)[payload_index_name(nested)] ~= nil
     end)
     t:assert(indexes(vm, SHARD1)[payload_index_name(nested)], "on both shards")
+    wait_for("the index of the path beside a header path", function()
+        return indexes(vm, SHARD0)[payload_index_name(beside)] ~= nil
+    end)
+    t:assert(indexes(vm, SHARD1)[payload_index_name(beside)], "on both shards: " .. beside .. " is a payload field")
     -- Give the suppressed one the same chance: both were admitted together.
     for _, s in ipairs({ SHARD0, SHARD1 }) do
         t:assert_eq(indexes(vm, s)[payload_index_name(suppressed)], nil, s .. ": no index for " .. suppressed)
@@ -449,7 +468,7 @@ local function press_fields()
     for _, c in ipairs(HEADERS) do PRESS_FIELDS[#PRESS_FIELDS + 1] = c end
     PRESS_FIELDS[#PRESS_FIELDS + 1] = eventd.marker("ixp")
     PRESS_FIELDS[#PRESS_FIELDS + 1] = eventd.marker("ixq")
-    local lit = { event_type = '"pt.x"', origin_class = "0", cpu_id = "0" }
+    local lit = { ["event.type"] = '"pt.x"', ["emitter.class"] = "0", ["event.cpu"] = "0" }
     for i, f in ipairs(PRESS_FIELDS) do
         query_n(press, 32 - 2 * i, f .. " == " .. (lit[f] or '"{00000000-0000-0000-0000-000000000000}"'))
     end

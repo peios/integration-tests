@@ -48,7 +48,7 @@ test("a continuous audit mask is stamped alongside the granted mask at open",
         -- The mask comes from the object's SACL and is consulted at
         -- every use-time enforcement point (§3.8.9): an operation on a
         -- handle whose stamped mask covers the right it needs emits a
-        -- `continuous-audit` event. A descriptor with no audit ACE is
+        -- `kacs.audit.handle.used` event. A descriptor with no audit ACE is
         -- the control — same operation, no event.
         local audited = B .. "/audited"
         local quiet = B .. "/quiet"
@@ -57,7 +57,7 @@ test("a continuous audit mask is stamped alongside the granted mask at open",
         local dacl = access.acl({ access.ace(access.ACE.ALLOWED, kacs.ALL_RIGHTS, token.SID.EVERYONE) })
         -- The continuous mask is the union of the SACL's alarm ACEs
         -- (§3.8.9); an ordinary audit ACE feeds the open-time
-        -- access-audit record instead.
+        -- kacs.audit.access.checked record instead.
         local sacl = access.acl({ access.ace(access.ACE.ALARM, R.READ_DATA, token.SID.EVERYONE) })
         t:assert_eq(kacs.set_sd(vm, audited, access.sd({ dacl = dacl, sacl = sacl }),
             kacs.SI.DACL | kacs.SI.SACL).ret, 0, "the audited object carries a SACL")
@@ -72,9 +72,11 @@ test("a continuous audit mask is stamped alongside the granted mask at open",
 
         local with = kmes.recording(t, vm, function() read_once(audited) end)
         local without = kmes.recording(t, vm, function() read_once(quiet) end)
-        local a = kmes.of_type(with, "continuous-audit")
-        local b = kmes.of_type(without, "continuous-audit")
-        t:assert(#a > 0, "a read through the audited handle emits continuous-audit")
+        local a = kmes.of_type(with, "kacs.audit.handle.used")
+        local b = kmes.of_type(without, "kacs.audit.handle.used")
+        t:assert(#a > 0, "a read through the audited handle emits kacs.audit.handle.used")
+        t:assert_eq(a[1].payload.access["audit-mask"], R.READ_DATA,
+            "carrying the mask stamped on the handle at open")
         t:assert_eq(#b, 0, "and the same read through an unaudited one emits none")
     end)
 
@@ -507,8 +509,9 @@ test("immediate provider re-entry does not repeat the caller authorization",
         end)
         sys.umount(vm, OVL .. "2-merged")
         local reads = {}
-        for _, e in ipairs(kmes.of_type(events, "continuous-audit")) do
-            if e.payload and e.payload.operation == "file.permission" then
+        for _, e in ipairs(kmes.of_type(events, "kacs.audit.handle.used")) do
+            if e.payload and e.payload.operation
+                and e.payload.operation.name == "file.permission" then
                 reads[#reads + 1] = e
             end
         end

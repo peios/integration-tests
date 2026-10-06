@@ -31,7 +31,7 @@ end
 
 local function startups()
     local rows = eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1d ago")
-    table.sort(rows, function(a, b) return a.timestamp < b.timestamp end)
+    table.sort(rows, function(a, b) return a["event.time"] < b["event.time"] end)
     return rows
 end
 
@@ -175,7 +175,7 @@ test("the boot's first eventd start covers from before sequence 1 and says resta
     local first = s[1]
     t:assert(first, "a startup record exists")
     t:assert_eq(first.restart, false, "the boot's first start carries restart false")
-    t:assert_eq(first.boot_id:lower(), "{" .. kernel_boot_id():lower() .. "}", "under the new boot ID")
+    t:assert_eq(first["event.boot.guid"]:lower(), "{" .. kernel_boot_id():lower() .. "}", "under the new boot ID")
     local boot = eventd.boot_pcds_hex(vm)
     local low = eventd.sql(vm, eventd.shards(vm)[1],
         "SELECT min(first_sequence) FROM receipt_ranges WHERE cpu_id = 0 AND hex(boot_id) = '" .. boot .. "'")
@@ -192,7 +192,7 @@ test("a restart in the same boot keeps the boot ID, merges coverage and says res
     local s = startups()
     local last = s[#s]
     t:assert_eq(last.restart, true, "restart true")
-    t:assert_eq(last.boot_id:lower(), "{" .. kernel_boot_id():lower() .. "}", "the same boot ID")
+    t:assert_eq(last["event.boot.guid"]:lower(), "{" .. kernel_boot_id():lower() .. "}", "the same boot ID")
     local resume = resume_of(last, 0)
     t:assert(resume and resume >= before,
         "it resumed from the merged coverage (" .. tostring(resume) .. " >= " .. before .. ")")
@@ -307,7 +307,7 @@ test("startup looks for the current boot in historical shards too", {
     vm:run("rm -f '" .. shard0 .. "' '" .. shard0 .. "-wal' '" .. shard0 .. "-shm'"):assert_ok()
     eventd.start(vm)
     local s = startups()
-    table.sort(s, function(a, b) return a.timestamp < b.timestamp end)
+    table.sort(s, function(a, b) return a["event.time"] < b["event.time"] end)
     t:assert_eq(s[#s].restart, true,
         "the evidence in the historical shard made it a restart")
 end)

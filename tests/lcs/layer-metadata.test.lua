@@ -463,7 +463,7 @@ test("an unparseable metadata descriptor keeps the previous entry and fails the 
         sys.close(w, mfd)
         t:assert_eq(s.errno, sys.E.IO,
             "the refresh was required to complete the operation, so the syscall fails")
-        t:assert(#kmes.of_type(events, "LCS_SOURCE_VALIDATION_FAILURE") >= 1,
+        t:assert(#kmes.of_type(events, "lcs.source.response.rejected") >= 1,
             "LCS emits an audit event for the malformed source data")
         t:assert(usable("keeper", fd),
             "and keeps the previous known-good entry rather than dropping the layer")

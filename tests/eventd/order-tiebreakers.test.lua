@@ -127,7 +127,7 @@ test("records tied on the SORT keys come newest first across shards, then by sha
     pinned_emit(high_cpu, "pt.order.evtie", { tag = second, k = 1 })
     local rows = eventd.wait_rows(vm, 'EVENTS pt.order.evtie WHERE tag STARTS_WITH "' .. tag .. '"',
         function(rs) return #rs == 2 end)
-    t:assert(rows[1].timestamp > rows[2].timestamp, "control: in the default order the newer leads")
+    t:assert(rows[1]["event.time"] > rows[2]["event.time"], "control: in the default order the newer leads")
     t:assert_eq(rows[1].tag, second, "control: and it is the second one")
     local tied = eventd.rows(vm, 'EVENTS pt.order.evtie WHERE tag STARTS_WITH "' .. tag .. '" SORT k')
     t:assert_eq(json.encode(field(tied, "tag")), json.encode({ second, first }),

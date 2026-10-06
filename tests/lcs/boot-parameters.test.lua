@@ -62,11 +62,11 @@ local PARAMS = {
 }
 
 --- A Machine source with `Machine\System\Registry` present, seeded by
---- `seed`, registered while a KMES ring records. Returns the
---- `LCS_SELF_CONFIG_INVALID` payloads keyed by parameter name, and the
---- list in emission order. The bootstrap refresh reads and validates
---- the whole key, so one registration is one full pass over the
---- nineteen.
+--- `seed`, registered while a KMES ring records. Returns the `config`
+--- maps of the `lcs.config.value.rejected` payloads keyed by parameter
+--- name, and the list of events in emission order. The bootstrap
+--- refresh reads and validates the whole key, so one registration is
+--- one full pass over the nineteen.
 local function refresh_audits(t, guest, root, seed)
     local src = lcs.source(guest, { hives = { { name = "Machine", root = root } } })
     src:key(lcs.PARAMS_PATH)
@@ -80,10 +80,10 @@ local function refresh_audits(t, guest, root, seed)
     end)
     src:close()
     if not ok then error(err, 0) end
-    local list = kmes.of_type(events, "LCS_SELF_CONFIG_INVALID")
+    local list = kmes.of_type(events, "lcs.config.value.rejected")
     local by_name = {}
     for _, e in ipairs(list) do
-        by_name[e.payload.configuration_name] = e.payload
+        by_name[e.payload.config.name] = e.payload.config
     end
     return by_name, list
 end
@@ -132,7 +132,7 @@ test("LCS reads exactly nineteen parameters, and they live under Machine\\System
             "a refresh over an empty key reports nineteen parameters")
         for _, p in ipairs(PARAMS) do
             t:assert(by_name[p[1]], p[1] .. " is one of the nineteen")
-            t:assert_eq(by_name[p[1]].configuration_parent_path,
+            t:assert_eq(by_name[p[1]].key.path,
                 "Machine\\System\\Registry",
                 p[1] .. " is read from Machine\\System\\Registry")
         end
@@ -142,7 +142,7 @@ test("all nineteen are REG_DWORD, and a value of another type is refused",
     { spec = "PKM *param.all-are-reg-dword" }, function(t)
         local by_name = refresh_audits(t, vm, DEFAULTS_ROOT)
         for _, p in ipairs(PARAMS) do
-            t:assert_eq(by_name[p[1]].expected_type, lcs.TYPE.DWORD,
+            t:assert_eq(by_name[p[1]].expected.type, lcs.TYPE.DWORD,
                 p[1] .. " is expected as REG_DWORD")
         end
         -- A REG_SZ written where a REG_DWORD belongs is the wrong type,
@@ -150,11 +150,13 @@ test("all nineteen are REG_DWORD, and a value of another type is refused",
         local wrong = refresh_audits(t, vm, DEFAULTS_ROOT, function(src)
             src:seed_param("MaxValueSize", lcs.sz("8192"), lcs.TYPE.SZ)
         end)
-        t:assert_eq(wrong["MaxValueSize"].received_kind, "wrong_type",
+        t:assert_eq(wrong["MaxValueSize"].received.kind, "wrong-type",
             "a REG_SZ MaxValueSize is reported as the wrong type")
-        t:assert_eq(wrong["MaxValueSize"].received_type, lcs.TYPE.SZ,
+        t:assert_eq(wrong["MaxValueSize"].received.type, lcs.TYPE.SZ,
             "naming the type that arrived")
-        t:assert_eq(wrong["MaxValueSize"].retained_value, 1048576,
+        t:assert_eq(wrong["MaxValueSize"].received.value, nil,
+            "and no received value, which only an out-of-range report carries")
+        t:assert_eq(wrong["MaxValueSize"].value, 1048576,
             "and the previously active value is retained")
     end)
 
@@ -165,11 +167,11 @@ for _, p in ipairs(PARAMS) do
             local by_name = refresh_audits(t, vm, DEFAULTS_ROOT)
             local a = by_name[name]
             t:assert(a, name .. " is read from Machine\\System\\Registry")
-            t:assert_eq(a.expected_type, lcs.TYPE.DWORD, name .. " is a REG_DWORD")
-            t:assert_eq(a.expected_min, min, name .. " has minimum " .. min)
-            t:assert_eq(a.expected_max, max, name .. " has maximum " .. max)
-            t:assert_eq(a.received_kind, "missing", name .. " is unset here")
-            t:assert_eq(a.retained_value, default,
+            t:assert_eq(a.expected.type, lcs.TYPE.DWORD, name .. " is a REG_DWORD")
+            t:assert_eq(a.expected.min, min, name .. " has minimum " .. min)
+            t:assert_eq(a.expected.max, max, name .. " has maximum " .. max)
+            t:assert_eq(a.received.kind, "missing", name .. " is unset here")
+            t:assert_eq(a.value, default,
                 name .. " runs on its compiled-in default of " .. default
                     .. " until the registry says otherwise")
         end)
@@ -189,7 +191,7 @@ test("unknown values under the key are ignored",
             "an unknown value is ignored, not reported")
         t:assert(not by_name["MaxValueSizeExtra"],
             "and a name that merely resembles one is still unknown")
-        t:assert_eq(by_name["MaxValueSize"].retained_value, 1048576,
+        t:assert_eq(by_name["MaxValueSize"].value, 1048576,
             "and the parameter it resembles is untouched")
     end)
 
@@ -222,13 +224,13 @@ test("an out-of-range value is ignored and the previously active one kept",
                     "the registry accepts the write: the source enforces no kernel semantics")
             end)
             local a
-            for _, e in ipairs(kmes.of_type(audits, "LCS_SELF_CONFIG_INVALID")) do
-                if e.payload.configuration_name == "MaxValueSize" then a = e.payload end
+            for _, e in ipairs(kmes.of_type(audits, "lcs.config.value.rejected")) do
+                if e.payload.config.name == "MaxValueSize" then a = e.payload.config end
             end
-            t:assert(a, "an LCS_SELF_CONFIG_INVALID event names the parameter")
-            t:assert_eq(a.received_kind, "dword_out_of_range", "saying what was wrong")
-            t:assert_eq(a.received_u32, 100, "and the value that arrived")
-            t:assert_eq(a.retained_value, 8192, "and the value being retained")
+            t:assert(a, "an lcs.config.value.rejected event names the parameter")
+            t:assert_eq(a.received.kind, "out-of-range", "saying what was wrong")
+            t:assert_eq(a.received.value, 100, "and the value that arrived")
+            t:assert_eq(a.value, 8192, "and the value being retained")
             local still = lcs.set_value(ctx.src, ctx.w, ctx.test, "Still",
                 lcs.TYPE.BINARY, string.rep("x", 6000))
             t:assert_eq(still.ret, 0,
@@ -361,7 +363,7 @@ test("configuration is published as one structure",
         t:assert(not by_name["MaxLayersPerValue"],
             "the nineteenth validated and was applied in the same pass")
         local again = refresh_audits(t, live, LIVE_ROOT)
-        t:assert_eq(again["MaxLayersPerValue"].retained_value, 64,
+        t:assert_eq(again["MaxLayersPerValue"].value, 64,
             "and the published structure carries it: a reader takes a complete copy")
         for _, p in ipairs(PARAMS) do
             t:assert(again[p[1]],

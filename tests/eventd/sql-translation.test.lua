@@ -100,13 +100,13 @@ test("no record or error a client receives carries SQL, and SQL syntax in a lite
     eventd.wait_rows(vm, 'EVENTS pt.sql.inj WHERE tag == "' .. tag .. '"', function(rs) return #rs == 2 end)
     local rows = eventd.rows(vm, 'EVENTS pt.sql.inj WHERE tag == "' .. tag .. '" WHERE s == "' .. hostile .. '"')
     t:assert_eq(#rows, 1, "the quote-laden literal matched as plain text")
-    local none = eventd.rows(vm, 'EVENTS pt.sql.inj WHERE event_type == "pt.sql.inj\' OR \'1\'=\'1"')
+    local none = eventd.rows(vm, 'EVENTS pt.sql.inj WHERE event.type == "pt.sql.inj\' OR \'1\'=\'1"')
     t:assert_eq(#none, 0, "and in a header comparison it selects nothing")
 
     local seen = {}
     local function keep(r) seen[#seen + 1] = r.stdout .. r.stderr end
     keep(eventd.query(vm, 'EVENTS pt.sql.inj WHERE tag == "' .. tag .. '"'))
-    keep(eventd.query(vm, "EVENTS pt.sql.inj WHERE cpu_id > \"x\""))
+    keep(eventd.query(vm, "EVENTS pt.sql.inj WHERE event.cpu > \"x\""))
     keep(eventd.query(vm, "METRIC pt.sql.none RATE SINCE 1h ago"))
     keep(eventd.query(vm, "EVENTS SINCE 30d ago WHERE LOG pt-none EXISTS"))
     vm:rename(eventd.DB.logs, eventd.DB.logs .. ".pt-aside")
@@ -134,21 +134,25 @@ test("header predicates answer exactly as the query language says", {
     local rows = eventd.wait_rows(vm, base, function(rs) return #rs == 1 end)
     local ev = rows[1]
     local function n(extra) return #eventd.rows(vm, base .. " WHERE " .. extra) end
-    t:assert_eq(n('event_type == "PT.SQL.HDR"'), 1, "event_type folds ASCII case")
-    t:assert_eq(n('event_type == "pt.sql.hdr2"'), 0, "and is not a prefix match")
-    t:assert_eq(n("cpu_id == " .. ev.cpu_id), 1, "cpu_id ==")
-    t:assert_eq(n("cpu_id != " .. ev.cpu_id), 0, "cpu_id !=")
-    t:assert_eq(n("cpu_id >= " .. ev.cpu_id), 1, "cpu_id >=")
-    t:assert_eq(n("cpu_id < " .. ev.cpu_id), 0, "cpu_id <")
-    t:assert_eq(n("origin_class == userspace"), 1, "origin_class by its alias")
-    t:assert_eq(n("origin_class == USERSPACE"), 1, "the alias folds case")
-    t:assert_eq(n("origin_class == 0"), 1, "origin_class by number")
-    t:assert_eq(n("origin_class > 0"), 0, "origin_class ordering")
-    local guid = ev.process_guid
-    t:assert_eq(n('process_guid == "' .. guid .. '"'), 1, "process_guid, applied after loading")
+    local cpu = ev["event.cpu"]
+    t:assert_eq(n('event.type == "PT.SQL.HDR"'), 1, "event.type folds ASCII case")
+    t:assert_eq(n('event.type == "pt.sql.hdr2"'), 0, "and is not a prefix match")
+    t:assert_eq(n("event.cpu == " .. cpu), 1, "event.cpu ==")
+    t:assert_eq(n("event.cpu != " .. cpu), 0, "event.cpu !=")
+    t:assert_eq(n("event.cpu >= " .. cpu), 1, "event.cpu >=")
+    t:assert_eq(n("event.cpu < " .. cpu), 0, "event.cpu <")
+    t:assert_eq(n("emitter.class == userspace"), 1, "emitter.class by its alias")
+    t:assert_eq(n("emitter.class == USERSPACE"), 1, "the alias folds case")
+    t:assert_eq(n("emitter.class == 0"), 1, "emitter.class by number")
+    t:assert_eq(n("emitter.class > 0"), 0, "emitter.class ordering")
+    local guid = ev["emitter.process.guid"]
+    t:assert_eq(n('emitter.process.guid == "' .. guid .. '"'), 1, "emitter.process.guid, applied after loading")
     local bare = guid:gsub("[{}]", ""):upper()
-    t:assert_eq(n('process_guid == "' .. bare .. '"'), 1, "in its brace-free upper-case form too")
-    t:assert_eq(n("cpu_id == 0.5"), 0, "a non-integer literal is compared, not truncated")
+    t:assert_eq(n('emitter.process.guid == "' .. bare .. '"'), 1, "in its brace-free upper-case form too")
+    t:assert_eq(n("event.cpu == 0.5"), 0, "a non-integer literal is compared, not truncated")
+    -- The column names are not fields: the record has no payload field
+    -- called cpu_id, so a predicate on it matches nothing.
+    t:assert_eq(n("cpu_id == " .. cpu), 0, "cpu_id is not the header field")
 end)
 
 -- "Log fields are all columns; log mode has no payload and its field set

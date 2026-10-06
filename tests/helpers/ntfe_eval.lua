@@ -1,7 +1,7 @@
 -- Shared shapes for the §6.4 (evaluation) tests: a policy with the rules
 -- under test in one layer and pass-everything everywhere else, one
--- loopback datagram as the probe, and the network-report payload, whose
--- map16 header helpers/kmes does not decode.
+-- loopback datagram as the probe, and the ntfe.verdict.reported payload,
+-- read with a small msgpack decoder of its own.
 --
 -- A loopback datagram is judged six times (Flow at LOCAL_OUT, Packet then
 -- RawPacket at EGRESS, RawPacket at INGRESS, Packet then Flow at
@@ -85,7 +85,7 @@ function M.cells(E, name)
     return out
 end
 
--- ---- the network-report payload ----
+-- ---- the ntfe.verdict.reported payload ----
 
 local function unpack_value(b, at)
     local tag = b:byte(at)
@@ -120,14 +120,17 @@ local function unpack_value(b, at)
     if tag == 0xce then return string.unpack(">I4", b, at + 1), at + 5 end
     if tag == 0xcf then return string.unpack(">I8", b, at + 1), at + 9 end
     if tag == 0xc0 then return nil, at + 1 end
+    if tag == 0xc2 then return false, at + 1 end
+    if tag == 0xc3 then return true, at + 1 end
     error(string.format("msgpack: unhandled tag 0x%02x at %d", tag, at))
 end
 
---- Run `fn` with the KMES ring attached and return the network-report
---- events it produced, each with `payload` decoded (map16 included).
+--- Run `fn` with the KMES ring attached and return the
+--- ntfe.verdict.reported events it produced, each with `payload` decoded
+--- (nested maps: `payload.rule.name`, `payload.outcome.verdict`).
 function M.reports(t, vm, fn)
     local out = {}
-    for _, e in ipairs(kmes.of_type(kmes.recording(t, vm, fn), "network-report")) do
+    for _, e in ipairs(kmes.of_type(kmes.recording(t, vm, fn), "ntfe.verdict.reported")) do
         e.payload = (unpack_value(e.raw:sub(e.header_size + 1), 1))
         out[#out + 1] = e
     end

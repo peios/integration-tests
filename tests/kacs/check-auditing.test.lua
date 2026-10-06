@@ -15,8 +15,17 @@ local token = require("helpers.token")
 local access = require("helpers.access")
 local kmes = require("helpers.kmes")
 local facs = require("helpers.facs")
+local msgpack = require("helpers.msgpack")
 
 local vm = provium:vm("v", "kernel-only"):boot()
+
+--- The number of keys a decoded msgpack map carries. A key the encoder
+--- left out is absent, so this is the map length on the wire.
+local function count(map)
+    local n = 0
+    for _ in pairs(map) do n = n + 1 end
+    return n
+end
 
 local STD = access.STD
 local E, USER = token.SID.EVERYONE, token.SID.TEST_USER
@@ -111,7 +120,7 @@ test("no audit rule changes the decision",
         end
     end)
 
-test("the pipeline emits access-audit for object access and privilege-use for privilege use",
+test("the pipeline emits kacs.audit.access.checked for object access and kacs.audit.privilege.used for privilege use",
     { spec = "PKM *check.auditing.event-families" }, function(t)
         local events = recording(function()
             with_subject({ privs_present = BACKUP, privs_enabled = BACKUP,
@@ -124,15 +133,15 @@ test("the pipeline emits access-audit for object access and privilege-use for pr
                     t:assert(r.ok, "SeBackupPrivilege grants read: " .. sys.errname(r.errno or 0))
                 end)
         end)
-        t:log(string.format("access-audit=%d privilege-use=%d", #of(events, "access-audit"),
-            #of(events, "privilege-use")))
-        t:assert(#of(events, "access-audit") >= 1,
+        t:log(string.format("access-audit=%d privilege-use=%d", #of(events, "kacs.audit.access.checked"),
+            #of(events, "kacs.audit.privilege.used")))
+        t:assert(#of(events, "kacs.audit.access.checked") >= 1,
             "the SACL walk and the token policy produce access-audit records")
-        t:assert_eq(#of(events, "privilege-use"), 1,
+        t:assert_eq(#of(events, "kacs.audit.privilege.used"), 1,
             "and the privilege-use step produces its own family")
     end)
 
-test("the CAAP conditions of §3.8.8 emit a third family, caap-policy-diagnostic",
+test("the CAAP conditions of §3.8.8 emit a third family, kacs.caap.*",
     { spec = "PKM *check.auditing.caap-diagnostic-family" }, function(t)
         local sid = token.sid(5, 21, 1000, 2000, 3000, 9301)
         local r0 = access.set_caap(vm, sid, access.caap_spec({
@@ -144,11 +153,16 @@ test("the CAAP conditions of §3.8.8 emit a third family, caap-policy-diagnostic
         local r
         local events = recording(function() r = as_subject({}, sd, READ | WRITE) end)
         access.set_caap(vm, sid, nil)
-        local diags = of(events, "caap-policy-diagnostic")
+        local diags = of(events, "kacs.caap.staging.diverged")
         t:log(string.format("ret=%d sm=%d diagnostics=%d", r.ret, r.staging_mismatch, #diags))
         t:assert_eq(r.staging_mismatch, 1, "the staged result differs")
-        t:assert_eq(#diags, 1, "and one caap-policy-diagnostic event is emitted for it")
-        t:assert_eq(diags[1].payload.kind, "staging-mismatch", "naming the condition")
+        t:assert_eq(#diags, 1, "and one kacs.caap.staging.diverged event is emitted for it")
+        t:assert_eq(#of(events, "kacs.caap.sacl.skipped"), 0,
+            "its type naming the condition: a divergence, not a skipped SACL")
+        t:assert_eq(diags[1].payload.access["granted"] & (READ | WRITE), READ | WRITE,
+            "carrying the effective grant")
+        t:assert_eq(diags[1].payload.access["granted-staged"] & (READ | WRITE), READ,
+            "beside the staged one")
     end)
 
 test("audit delivery happens before any writeback, so a bad output pointer cannot suppress it",
@@ -171,7 +185,7 @@ test("audit delivery happens before any writeback, so a bad output pointer canno
                 })
             end)
         end)
-        local ev = of(events, "access-audit")
+        local ev = of(events, "kacs.audit.access.checked")
         t:log(string.format("ret=%d %s, access-audit=%d", r.ret, sys.errname(r.errno or 0), #ev))
         t:assert_eq(r.errno, sys.E.FAULT, "the writeback fails: " .. sys.errname(r.errno or 0))
         t:assert_eq(#ev, 1, "and the event was already delivered before it was attempted")
@@ -188,7 +202,7 @@ test("an audit event needs a SID match, a mask overlap and a matching outcome fl
                 as_subject({}, access.simple(dacl, { sacl = access.acl({ sacl_ace }) }),
                     desired)
             end)
-            n = #of(events, "access-audit")
+            n = #of(events, "kacs.audit.access.checked")
             return n
         end
         local all_three = count(audit_ace(READ, E, SUCCESS_FLAG), READ)
@@ -215,11 +229,11 @@ test("the audit SID match uses deny polarity, so a deny-only group is still audi
             absent = as_subject({}, sd, READ)   -- no G2 on the token at all
         end)
         t:log(string.format("deny-only group events=%d, group absent events=%d",
-            #of(events, "access-audit"), #of(other, "access-audit")))
+            #of(events, "kacs.audit.access.checked"), #of(other, "kacs.audit.access.checked")))
         t:assert(held.ok and absent.ok, "both requests succeed")
-        t:assert_eq(#of(events, "access-audit"), 1,
+        t:assert_eq(#of(events, "kacs.audit.access.checked"), 1,
             "a deny-only group matches the audit ACE — the broadest identity view")
-        t:assert_eq(#of(other, "access-audit"), 0,
+        t:assert_eq(#of(other, "kacs.audit.access.checked"), 0,
             "while a group the token does not carry at all does not")
     end)
 
@@ -232,13 +246,13 @@ test("the mask overlap is tested against the requested mask, not the granted one
             { sacl = access.acl({ audit_ace(WRITE, E, FAILURE_FLAG) }) })
         local r
         local events = recording(function() r = as_subject({}, sd, READ | WRITE) end)
-        local ev = of(events, "access-audit")
+        local ev = of(events, "kacs.audit.access.checked")
         t:log(string.format("ret=%d granted=0x%x events=%d", r.ret, r.granted, #ev))
         t:assert(r.denied, "the request fails: ret=" .. r.ret .. " " .. sys.errname(r.errno or 0))
         t:assert_eq(r.granted, READ, "with only the read bit granted")
         t:assert_eq(#ev, 1, "and the write-only audit ACE still fires for the right asked for")
-        t:assert_eq(ev[1].payload.requested_access, READ | WRITE, "the record carries the request")
-        t:assert_eq(ev[1].payload.granted_access, READ, "beside what was actually granted")
+        t:assert_eq(ev[1].payload.access.requested, READ | WRITE, "the record carries the request")
+        t:assert_eq(ev[1].payload.access.granted, READ, "beside what was actually granted")
     end)
 
 test("a conditional audit ACE whose expression is UNKNOWN emits the event",
@@ -247,7 +261,7 @@ test("a conditional audit ACE whose expression is UNKNOWN emits the event",
             access.ace(AUDIT_CALLBACK, READ, E, SUCCESS_FLAG, { condition = UNKNOWN_EXPR }) }) })
         local r
         local events = recording(function() r = as_subject({}, sd, READ) end)
-        local ev = of(events, "access-audit")
+        local ev = of(events, "kacs.audit.access.checked")
         t:log(string.format("ret=%d events=%d", r.ret, #ev))
         t:assert(r.ok, "the request succeeds: " .. sys.errname(r.errno or 0))
         t:assert_eq(#ev, 1, "when in doubt, audit")
@@ -281,10 +295,10 @@ test("the alarm branch performs no overlap test against the requested mask",
         local r
         local events = recording(function() r = as_subject({}, sd, READ) end)
         t:log(string.format("continuous=0x%x access-audit=%d", r.continuous_audit,
-            #of(events, "access-audit")))
+            #of(events, "kacs.audit.access.checked")))
         t:assert_eq(r.continuous_audit, EXEC,
             "the alarm ACE contributes on a SID match alone, with no overlap with the request")
-        t:assert_eq(#of(events, "access-audit"), 0,
+        t:assert_eq(#of(events, "kacs.audit.access.checked"), 0,
             "while the audit ACE carrying the same mask is skipped for want of overlap")
     end)
 
@@ -301,7 +315,7 @@ local function armed_file(name, alarm_mask)
     return path
 end
 
-test("a later operation emits a continuous-audit event when its required mask overlaps the stored one",
+test("a later operation emits a kacs.audit.handle.used event when its required mask overlaps the stored one",
     { spec = "PKM *check.auditing.continuous-event-on-overlap" }, function(t)
         local watched = armed_file("watched", kacs.RIGHT.READ_DATA)
         local unwatched = armed_file("unwatched", kacs.RIGHT.WRITE_DATA)
@@ -314,14 +328,18 @@ test("a later operation emits a continuous-audit event when its required mask ov
             b = sys.read(vm, fd2, 5)
             sys.close(vm, fd2)
         end)
-        local ev = of(events, "continuous-audit")
+        local ev = of(events, "kacs.audit.handle.used")
         t:log(string.format("read=%s/%s continuous-audit=%d", tostring(a), tostring(b), #ev))
         t:assert_eq(a, "hello", "the watched file reads")
         t:assert_eq(b, "hello", "and so does the unwatched one")
         t:assert(#ev >= 1, "the read whose required access overlaps the armed mask is recorded")
         for _, e in ipairs(ev) do
-            t:assert_eq(e.payload.matched_access & kacs.RIGHT.READ_DATA, kacs.RIGHT.READ_DATA,
+            t:assert_eq(e.payload.access.matched & kacs.RIGHT.READ_DATA, kacs.RIGHT.READ_DATA,
                 "every event names the overlapping right")
+            t:assert_eq(e.payload.access["audit-mask"], kacs.RIGHT.READ_DATA,
+                "beside the whole mask the handle was armed with")
+            t:assert_eq(e.payload.object.file.path, watched,
+                "on the watched file, named by its path")
         end
     end)
 
@@ -338,21 +356,21 @@ test("the event records the subset of the required mask that overlapped",
             r = vm:syscall(sys.NR.write, { args = { fd, 0, 3 }, bufs = { "abc" }, ptrs = { 1 } })
             sys.close(vm, fd)
         end)
-        local ev = of(events, "continuous-audit")
+        local ev = of(events, "kacs.audit.handle.used")
         t:log(string.format("write ret=%d, continuous-audit=%d", r.ret, #ev))
         t:assert_eq(r.ret, 3, "the append succeeds: " .. sys.errname(r.errno or 0))
         t:assert(#ev >= 1, "and is audited")
         local last = ev[#ev]
-        t:log(string.format("required=0x%x matched=0x%x", last.payload.requested_access,
-            last.payload.matched_access))
-        t:assert_eq(last.payload.requested_access & (kacs.RIGHT.WRITE_DATA | kacs.RIGHT.APPEND_DATA),
+        t:log(string.format("required=0x%x matched=0x%x", last.payload.access.requested,
+            last.payload.access.matched))
+        t:assert_eq(last.payload.access.requested & (kacs.RIGHT.WRITE_DATA | kacs.RIGHT.APPEND_DATA),
             kacs.RIGHT.WRITE_DATA | kacs.RIGHT.APPEND_DATA,
             "the required mask holds the whole accepted set")
-        t:assert_eq(last.payload.matched_access, kacs.RIGHT.APPEND_DATA,
+        t:assert_eq(last.payload.access.matched, kacs.RIGHT.APPEND_DATA,
             "and the event records only the subset the armed mask overlapped")
     end)
 
-test("continuous-audit events are emitted for denied operations as well as successful ones",
+test("kacs.audit.handle.used events are emitted for denied operations as well as successful ones",
     { spec = "PKM *check.auditing.continuous-both-outcomes" }, function(t)
         local path = armed_file("outcomes",
             kacs.RIGHT.READ_DATA | kacs.RIGHT.READ_ATTRIBUTES)
@@ -366,10 +384,20 @@ test("continuous-audit events are emitted for denied operations as well as succe
             denied = facs.fcntl(vm, fd, F_GETPIPE_SZ, 0)
             sys.close(vm, fd)
         end)
-        local ev = of(events, "continuous-audit")
+        local ev = of(events, "kacs.audit.handle.used")
         local successes, failures = 0, 0
         for _, e in ipairs(ev) do
-            if e.payload.success then successes = successes + 1 else failures = failures + 1 end
+            if e.payload.outcome.success then
+                successes = successes + 1
+                t:assert_eq(e.payload.outcome.reason, nil,
+                    "a successful operation carries no reason")
+            else
+                failures = failures + 1
+                t:assert_eq(e.payload.outcome.reason, "grant-deny",
+                    "a denied one says why: the handle lacked the right")
+                t:assert_eq(e.payload.operation.name, "file.fcntl",
+                    "naming the refused operation")
+            end
         end
         t:log(string.format("read=%s fcntl ret=%d %s; events=%d success=%d failure=%d",
             tostring(ok_read), denied.ret, sys.errname(denied.errno or 0),
@@ -394,14 +422,14 @@ test("the subject recorded is the operation-time effective token, not the one th
             end)
         end)
         sys.close(vm, fd)
-        local ev = of(events, "continuous-audit")
+        local ev = of(events, "kacs.audit.handle.used")
         t:log(string.format("continuous-audit=%d", #ev))
         t:assert(#ev >= 1, "the read is audited")
-        t:assert_eq(ev[#ev].payload.subject.user_sid, USER,
+        t:assert_eq(ev[#ev].payload.subject.token.sid, USER,
             "and attributed to the token in force when the operation ran")
     end)
 
-test("an enforcement point that cannot construct a required continuous-audit event fails closed",
+test("an enforcement point that cannot construct a required kacs.audit.handle.used event fails closed",
     { spec = "PKM *check.auditing.continuous-fails-closed",
       covered_by = "kunit:pkm_kunit_file",
       skip = "the emit helper only refuses a malformed record — a zero " ..
@@ -433,13 +461,18 @@ test("privilege-use accounting runs after the whole pipeline, CAAP included",
                 sd, READ, { intent = access.INTENT.BACKUP })
         end)
         access.set_caap(vm, sid, nil)
-        local ev = of(events, "privilege-use")
+        local ev = of(events, "kacs.audit.privilege.used")
         t:log(string.format("ret=%d %s, privilege-use=%d", r.ret, sys.errname(r.errno or 0), #ev))
         t:assert(r.denied, "CAAP takes the privilege-granted bits away: ret=" .. r.ret
             .. " " .. sys.errname(r.errno or 0))
         t:assert_eq(#ev, 1, "one privilege-use event")
-        t:assert_eq(ev[1].payload.success, false,
+        t:assert_eq(ev[1].payload.outcome.success, false,
             "reporting failure, because it reflects the result after CAAP")
+        t:assert_eq(ev[1].payload.privilege.contributed, READ,
+            "the privilege contributed the read")
+        t:assert_eq(ev[1].payload.privilege.surviving, 0, "and none of it survived")
+        t:assert_eq(ev[1].payload.access.granted & READ, 0,
+            "since the whole check's final grant lacks it")
     end)
 
 test("a privilege whose bits survive is marked used and audited under PRIVILEGE_USE_SUCCESS",
@@ -454,15 +487,17 @@ test("a privilege whose bits survive is marked used and audited under PRIVILEGE_
                 after = token.privileges(vm, fd)
             end)
         end)
-        local ev = of(events, "privilege-use")
+        local ev = of(events, "kacs.audit.privilege.used")
         t:log(string.format("ret=%d used 0x%x -> 0x%x, events=%d", r.ret, before.used,
             after.used, #ev))
         t:assert(r.ok, "the privilege grants the right: " .. sys.errname(r.errno or 0))
         t:assert_eq(before.used & BACKUP, 0, "SeBackupPrivilege starts unused")
         t:assert_eq(after.used & BACKUP, BACKUP, "and is marked used")
         t:assert_eq(#ev, 1, "one privilege-use event")
-        t:assert_eq(ev[1].payload.success, true, "reporting success")
-        t:assert_eq(ev[1].payload.privilege, "SeBackupPrivilege", "and naming the privilege")
+        t:assert_eq(ev[1].payload.outcome.success, true, "reporting success")
+        t:assert_eq(ev[1].payload.privilege.name, "SeBackupPrivilege", "and naming the privilege")
+        t:assert_eq(ev[1].payload.privilege.contributed, READ, "the bits it contributed")
+        t:assert_eq(ev[1].payload.privilege.surviving, READ, "all of which survived")
     end)
 
 test("a privilege whose bits do not survive is not marked used and is audited under PRIVILEGE_USE_FAILURE",
@@ -478,14 +513,15 @@ test("a privilege whose bits do not survive is not marked used and is audited un
                     after = token.privileges(vm, fd)
                 end)
         end)
-        local ev = of(events, "privilege-use")
+        local ev = of(events, "kacs.audit.privilege.used")
         t:log(string.format("ret=%d %s, used=0x%x, events=%d", r.ret, sys.errname(r.errno or 0),
             after.used, #ev))
         t:assert(r.denied, "the confinement pass removes the bits: ret=" .. r.ret
             .. " " .. sys.errname(r.errno or 0))
         t:assert_eq(after.used & BACKUP, 0, "the privilege is not marked used")
         t:assert_eq(#ev, 1, "one privilege-use event")
-        t:assert_eq(ev[1].payload.success, false, "reporting failure")
+        t:assert_eq(ev[1].payload.outcome.success, false, "reporting failure")
+        t:assert_eq(ev[1].payload.privilege.surviving, 0, "with nothing surviving")
     end)
 
 test("a privilege that contributed nothing to the requested access produces no event either way",
@@ -498,7 +534,7 @@ test("a privilege that contributed nothing to the requested access produces no e
                 audit_policy = POLICY.PRIVILEGE_USE_SUCCESS | POLICY.PRIVILEGE_USE_FAILURE },
                 access.simple({ grant(WRITE, E) }), WRITE, { intent = access.INTENT.BACKUP })
         end)
-        local ev = of(events, "privilege-use")
+        local ev = of(events, "kacs.audit.privilege.used")
         t:log(string.format("ret=%d events=%d", r.ret, #ev))
         t:assert(r.ok, "the DACL grants the write bit: " .. sys.errname(r.errno or 0))
         t:assert_eq(#ev, 0, "and the privilege contributed no requested bit, so nothing is recorded")
@@ -524,24 +560,24 @@ test("with an object type list a privilege counts as used if its bits survive on
                             intent = access.INTENT.BACKUP })
                     end)
             end)
-            return out, of(events, "privilege-use")
+            return out, of(events, "kacs.audit.privilege.used")
         end
         local on_a, ev_a = run({ access.ace(access.ACE.ALLOWED_OBJECT, READ, CONF, 0,
             { object_type = A }) })
         local nowhere, ev_n = run({ grant(READ, E) })
         t:log(string.format("scoped to A: nodes 0x%x/0x%x/0x%x events=%d success=%s",
             on_a.nodes[1].granted, on_a.nodes[2].granted, on_a.nodes[3].granted, #ev_a,
-            tostring(ev_a[1] and ev_a[1].payload.success)))
+            tostring(ev_a[1] and ev_a[1].payload.outcome.success)))
         t:log(string.format("nowhere: nodes 0x%x/0x%x/0x%x events=%d success=%s",
             nowhere.nodes[1].granted, nowhere.nodes[2].granted, nowhere.nodes[3].granted, #ev_n,
-            tostring(ev_n[1] and ev_n[1].payload.success)))
+            tostring(ev_n[1] and ev_n[1].payload.outcome.success)))
         t:assert_eq(on_a.nodes[2].granted, READ, "the bit survives on the one scoped node")
         t:assert_eq(on_a.nodes[1].granted, 0, "and on neither the root")
         t:assert_eq(on_a.nodes[3].granted, 0, "nor the sibling")
         t:assert_eq(#ev_a, 1, "one privilege-use event")
-        t:assert_eq(ev_a[1].payload.success, true, "recording success on the strength of one node")
+        t:assert_eq(ev_a[1].payload.outcome.success, true, "recording success on the strength of one node")
         t:assert_eq(#ev_n, 1, "and where it survives on no node, one event too")
-        t:assert_eq(ev_n[1].payload.success, false, "recording failure")
+        t:assert_eq(ev_n[1].payload.outcome.success, false, "recording failure")
     end)
 
 test("a MAXIMUM_ALLOWED request marks nothing used and emits no privilege-use event",
@@ -558,10 +594,10 @@ test("a MAXIMUM_ALLOWED request marks nothing used and emits no privilege-use ev
                 end)
         end)
         t:log(string.format("granted=0x%x used=0x%x events=%d", r.granted, after.used,
-            #of(events, "privilege-use")))
+            #of(events, "kacs.audit.privilege.used")))
         t:assert_eq(r.granted, OBJ.read, "the privilege still contributed to the result")
         t:assert_eq(after.used & BACKUP, 0, "yet nothing is marked used")
-        t:assert_eq(#of(events, "privilege-use"), 0, "and the whole step emits nothing")
+        t:assert_eq(#of(events, "kacs.audit.privilege.used"), 0, "and the whole step emits nothing")
     end)
 
 test("backup and restore report use even where the DACL alone would have permitted the access",
@@ -589,7 +625,7 @@ test("backup and restore report use even where the DACL alone would have permitt
                 used2 = token.privileges(vm, fd).used
             end)
         end)
-        backup_ev, take_ev = of(a, "privilege-use"), of(b, "privilege-use")
+        backup_ev, take_ev = of(a, "kacs.audit.privilege.used"), of(b, "kacs.audit.privilege.used")
         t:log(string.format("backup: ret=%d used=0x%x events=%d; take-ownership: ret=%d used=0x%x events=%d",
             r1.ret, used1, #backup_ev, r2.ret, used2, #take_ev))
         t:assert(r1.ok and r2.ok, "both requests succeed on the DACL's own terms")
@@ -611,7 +647,7 @@ test("the token's audit policy forces success and failure events regardless of S
             local events = recording(function()
                 r = as_subject({ audit_policy = policy }, sd, desired)
             end)
-            n = #of(events, "access-audit")
+            n = #of(events, "kacs.audit.access.checked")
             return r, n
         end
         local _, none_ok = run(0, granting, READ)
@@ -637,40 +673,83 @@ test("forced success means every requested bit granted, or nothing requested at 
         local function run(desired)
             local r
             local events = recording(function() r = as_subject(spec, sd, desired) end)
-            local ev = of(events, "access-audit")
+            local ev = of(events, "kacs.audit.access.checked")
             return r, ev
         end
         local all_granted, e1 = run(READ)
         local partly, e2 = run(READ | WRITE)
         local nothing, e3 = run(0)
         t:log(string.format("READ ret=%d success=%s; READ|WRITE ret=%d success=%s; 0 ret=%d success=%s",
-            all_granted.ret, tostring(e1[1] and e1[1].payload.success),
-            partly.ret, tostring(e2[1] and e2[1].payload.success),
-            nothing.ret, tostring(e3[1] and e3[1].payload.success)))
+            all_granted.ret, tostring(e1[1] and e1[1].payload.outcome.success),
+            partly.ret, tostring(e2[1] and e2[1].payload.outcome.success),
+            nothing.ret, tostring(e3[1] and e3[1].payload.outcome.success)))
         t:assert_eq(#e1, 1, "one event for the fully granted request")
-        t:assert_eq(e1[1].payload.success, true, "classed a success")
+        t:assert_eq(e1[1].payload.outcome.success, true, "classed a success")
         t:assert_eq(#e2, 1, "one for the partly granted request")
-        t:assert_eq(e2[1].payload.success, false, "classed a failure — not every bit was granted")
+        t:assert_eq(e2[1].payload.outcome.success, false, "classed a failure — not every bit was granted")
         t:assert_eq(#e3, 1, "one for the request naming nothing")
-        t:assert_eq(e3[1].payload.success, true, "classed a success, because nothing was asked for")
+        t:assert_eq(e3[1].payload.outcome.success, true, "classed a success, because nothing was asked for")
     end)
 
 test("forced events are additive and carry the caller-supplied object audit context",
     { spec = "PKM *check.auditing.forced-additive" }, function(t)
         -- No SACL at all, so nothing could have matched.
         local sd = access.simple({ grant(READ, E) })
-        local context = "object:/some/path"
+        -- The PGSS §6.7 audit context: the kind of object and its
+        -- identifying fields under the kind's own name.
+        local context = msgpack.encode({ kind = "service",
+            service = { name = "jellyfin" } })
         local r
         local events = recording(function()
             r = as_subject({ audit_policy = POLICY.OBJECT_ACCESS_SUCCESS }, sd, READ,
                 { audit_context = context })
         end)
-        local ev = of(events, "access-audit")
+        local ev = of(events, "kacs.audit.access.checked")
         t:log(string.format("ret=%d events=%d", r.ret, #ev))
         t:assert_eq(#ev, 1, "the event fires with no SACL ACE to have matched it")
         t:assert_eq(ev[1].payload.trigger.kind, "policy", "recorded as policy-forced")
-        t:assert_eq(ev[1].payload.object_context, context,
-            "and carrying the object audit context the caller supplied")
+        t:assert_eq(count(ev[1].payload.trigger), 1, "naming no ACE")
+        local object = ev[1].payload.object
+        t:assert_eq(object.kind, "service",
+            "and carrying the object audit context the caller supplied: its kind")
+        t:assert_eq(object.service.name, "jellyfin", "and its identifying fields")
+        t:assert_eq(count(object), 2, "and nothing else under object")
+        t:assert_eq(ev[1].payload.object_context, nil, "no opaque context key")
+        t:assert_eq(ev[1].payload.fields.attestation.userspace, true,
+            "flagged as carrying values userspace asserted")
+    end)
+
+test("a malformed audit context fails the check with EINVAL",
+    { spec = "PKM *check.auditing.event-contents" }, function(t)
+        local sd = access.simple({ grant(READ, E) })
+        local bad = {
+            { "a free-form string", "events:*" },
+            { "a msgpack string rather than a map", msgpack.encode("admin") },
+            { "a map without kind", msgpack.encode({ service = { name = "x" } }) },
+            { "a kind that is not a string", msgpack.encode({ kind = 7 }) },
+            { "a kind outside the segment grammar",
+              msgpack.encode({ kind = "Service" }) },
+            { "a kind with an underscore", msgpack.encode({ kind = "my_service" }) },
+            { "a body under a key other than the kind",
+              msgpack.encode({ kind = "service", job = { name = "x" } }) },
+            { "an extra key beside the kind's body",
+              msgpack.encode({ kind = "service", service = { name = "x" },
+                  subject = { token = { sid = "forged" } } }) },
+            { "a body that is not a map",
+              msgpack.encode({ kind = "service", service = "jellyfin" }) },
+            { "truncated msgpack",
+              msgpack.encode({ kind = "service" }):sub(1, -2) },
+        }
+        for _, c in ipairs(bad) do
+            local r = as_subject({ audit_policy = POLICY.OBJECT_ACCESS_SUCCESS }, sd, READ,
+                { audit_context = c[2] })
+            t:assert_eq(r.errno, sys.E.INVAL, c[1] .. " is refused with EINVAL: ret="
+                .. r.ret .. " " .. sys.errname(r.errno or 0))
+        end
+        local ok = as_subject({ audit_policy = POLICY.OBJECT_ACCESS_SUCCESS }, sd, READ,
+            { audit_context = msgpack.encode({ kind = "service" }) })
+        t:assert(ok.ok, "while a context naming only its kind is accepted: "
+            .. sys.errname(ok.errno or 0))
     end)
 
 test("the audit policy is read from the effective token, so impersonation carries it",
@@ -694,7 +773,7 @@ test("the audit policy is read from the effective token, so impersonation carrie
                 access.check(w, { sd = sd, desired = READ, mapping = OBJ })
             end)
         end)
-        audited, plain = #of(a, "access-audit"), #of(b, "access-audit")
+        audited, plain = #of(a, "kacs.audit.access.checked"), #of(b, "kacs.audit.access.checked")
         t:log(string.format("policy on the effective token=%d, without it=%d", audited, plain))
         t:assert_eq(audited, 1,
             "a check with no token_fd reads the policy off whatever token is effective")
@@ -705,30 +784,92 @@ test("an event carries the subject, the object context, the access, the trigger 
     { spec = "PKM *check.auditing.event-contents" }, function(t)
         local ace = audit_ace(READ, E, SUCCESS_FLAG)
         local sd = access.simple({ grant(READ, E) }, { sacl = access.acl({ ace }) })
-        local r
+        local context = msgpack.encode({ kind = "service",
+            service = { name = "jellyfin" } })
+        local stats, groups
         local events = recording(function()
-            r = as_subject({ integrity_level = token.INTEGRITY.LOW }, sd, READ,
-                { audit_context = "ctx" })
+            with_subject({ integrity_level = token.INTEGRITY.LOW, projected_uid = 1101 },
+                function(fd)
+                    stats = token.statistics(vm, fd)
+                    groups = token.groups(vm, fd)
+                    access.check(vm, { token_fd = fd, sd = sd, desired = READ,
+                        mapping = OBJ, audit_context = context })
+                end)
         end)
-        local ev = of(events, "access-audit")
+        local ev = of(events, "kacs.audit.access.checked")
         t:assert_eq(#ev, 1, "one event from the SACL")
         local p = ev[1].payload
+        local tok = p.subject.token
         t:log(string.format("user=%s groups=%d il=%d pip=(%d,%d) req=0x%x granted=0x%x pid=%d name=%s",
-            token.sid_string(p.subject.user_sid), #p.subject.group_sids,
-            p.subject.integrity_level, p.subject.pip_type, p.subject.pip_trust,
-            p.requested_access, p.granted_access, p.process.pid, p.process.name))
-        t:assert_eq(p.subject.user_sid, USER, "the subject's user SID")
-        t:assert(#p.subject.group_sids >= 1, "its group SIDs")
-        t:assert_eq(p.subject.integrity_level, token.INTEGRITY.LOW, "its integrity level")
-        t:assert_eq(p.subject.pip_type, 0, "its PIP type")
-        t:assert_eq(p.subject.pip_trust, 0, "and PIP trust")
-        t:assert_eq(p.object_context, "ctx", "the object, as the caller-provided context")
-        t:assert_eq(p.requested_access, READ, "what was requested")
-        t:assert_eq(p.granted_access, READ, "what was granted")
-        t:assert_eq(p.success, true, "whether it succeeded")
+            token.sid_string(tok.sid), #tok.groups,
+            tok.integrity, p.subject.pip.type, p.subject.pip.trust,
+            p.access.requested, p.access.granted, p.emitter.process.pid,
+            p.emitter.process.name))
+        -- subject, emitter, object, access, outcome, trigger, fields.
+        t:assert_eq(count(p), 7, "seven top-level groups, an audit context supplied")
+        t:assert_eq(count(p.subject), 2, "the subject is a token and a PIP state")
+        t:assert_eq(count(tok), 9, "the subject token carries all nine fields")
+        t:assert_eq(tok.sid, USER, "the subject's user SID")
+        t:assert(#tok.groups >= 1, "its group SIDs")
+        t:assert_eq(#tok["group-attributes"], #tok.groups,
+            "with one attribute word per group, in parallel")
+        for i, g in ipairs(groups) do
+            t:assert_eq(tok.groups[i], g.sid, "group " .. i .. " in token order")
+            t:assert_eq(tok["group-attributes"][i], g.attributes,
+                "and described by its own attributes")
+        end
+        t:assert_eq(tok.integrity, token.INTEGRITY.LOW, "its integrity level")
+        t:assert_eq(tok.id, stats.token_id, "the token's own LUID")
+        t:assert_eq(tok["auth-id"], stats.auth_id, "its logon session")
+        t:assert_eq(tok.type, "primary", "its type")
+        t:assert_eq(tok.impersonation, 0, "a primary token reports level 0")
+        t:assert_eq(tok.uid, 1101, "and the Linux UID it projects")
+        t:assert_eq(count(p.subject.pip), 2, "the PIP state is two values")
+        t:assert_eq(p.subject.pip.type, 0, "its PIP type")
+        t:assert_eq(p.subject.pip.trust, 0, "and PIP trust")
+        t:assert_eq(p.object.kind, "service", "the object, as the caller-provided context")
+        t:assert_eq(p.object.service.name, "jellyfin", "with its identifying fields")
+        t:assert_eq(p.fields.attestation.userspace, true,
+            "marked as asserted by userspace")
+        t:assert_eq(count(p.access), 2, "the access is two masks")
+        t:assert_eq(p.access.requested, READ, "what was requested")
+        t:assert_eq(p.access.granted, READ, "what was granted")
+        t:assert_eq(count(p.outcome), 1, "the outcome is one value")
+        t:assert_eq(p.outcome.success, true, "whether it succeeded")
+        t:assert_eq(count(p.trigger), 2, "the trigger is a kind and an ACE")
         t:assert_eq(p.trigger.kind, "sacl", "the trigger's kind")
         t:assert_eq(p.trigger.ace, ace, "and the matched ACE's own bytes")
-        t:assert(p.process.pid > 0, "the process's pid")
-        t:assert(#p.process.name > 0, "its name")
-        t:assert(#p.process.executable_path > 0, "and its executable path")
+        t:assert_eq(count(p.emitter), 1, "the emitter is its process")
+        t:assert_eq(count(p.emitter.process), 3, "of three fields")
+        t:assert(p.emitter.process.pid > 0, "the process's pid")
+        t:assert(#p.emitter.process.name > 0, "its name")
+        t:assert(#p.emitter.process.executable > 0, "and its executable path")
+        t:assert_eq(p.process, nil, "and no longer a top-level process map")
+    end)
+
+test("an event without an audit context or caller PIP names no object and asserts nothing",
+    { spec = "PKM *check.auditing.event-contents" }, function(t)
+        local sd = access.simple({ grant(READ, E) }, { sacl = access.acl({
+            audit_ace(READ, E, SUCCESS_FLAG) }) })
+        local events = recording(function() as_subject({}, sd, READ) end)
+        local ev = of(events, "kacs.audit.access.checked")
+        t:assert_eq(#ev, 1, "one event from the SACL")
+        local p = ev[1].payload
+        t:assert_eq(p.object, nil, "the kernel does not know what was checked")
+        t:assert_eq(p.fields, nil, "and nothing in it is the caller's claim")
+        t:assert_eq(count(p), 5, "subject, emitter, access, outcome and trigger alone")
+        -- A non-zero caller PIP is also the caller's claim.
+        local pip_events = recording(function()
+            with_subject({}, function(fd)
+                access.check(vm, { token_fd = fd, sd = sd, desired = READ, mapping = OBJ,
+                    pip_type = 512, pip_trust = 1 })
+            end)
+        end)
+        local pv = of(pip_events, "kacs.audit.access.checked")
+        t:assert_eq(#pv, 1, "one event with a caller-supplied PIP")
+        t:assert_eq(pv[1].payload.subject.pip.type, 512, "carrying the PIP type supplied")
+        t:assert_eq(pv[1].payload.subject.pip.trust, 1, "and trust")
+        t:assert_eq(pv[1].payload.fields.attestation.userspace, true,
+            "flagged as asserted")
+        t:assert_eq(count(pv[1].payload), 6, "with no object")
     end)

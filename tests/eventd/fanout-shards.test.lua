@@ -99,10 +99,10 @@ test("events alternating between two shards come back in one newest-first sequen
         function(rs) return #rs == 6 end)
     t:assert_eq(json.encode(field(rows, "i")), "[6,5,4,3,2,1]", "newest first across both shards")
     local cpus = {}
-    for _, r in ipairs(rows) do cpus[r.cpu_id] = true end
+    for _, r in ipairs(rows) do cpus[r["event.cpu"]] = true end
     t:assert(cpus[0] and cpus[1], "and the rows did come from both CPUs' shards")
     for k = 2, #rows do
-        t:assert(rows[k - 1].timestamp >= rows[k].timestamp, "timestamps never rise down the result")
+        t:assert(rows[k - 1]["event.time"] >= rows[k]["event.time"], "timestamps never rise down the result")
     end
     local page = eventd.rows(vm, 'EVENTS pt.fan.merge WHERE tag == "' .. tag .. '" SKIP 2 TAKE 3')
     t:assert_eq(json.encode(field(page, "i")), "[4,3,2]", "and a page of the merge is a slice of it")
@@ -243,7 +243,7 @@ test("one stream receives events committed to either shard", {
         end
         rq.close(c)
         local cpus = {}
-        for _, r in ipairs(got) do cpus[r.cpu_id] = true end
+        for _, r in ipairs(got) do cpus[r["event.cpu"]] = true end
         t:assert_eq(#got, 3, "all three events streamed: " .. json.encode(got))
         t:assert(cpus[0] and cpus[1], "from both shards")
     end)
@@ -256,7 +256,7 @@ test("each active shard's writer keeps the one read-write descriptor it started 
     spec = "eventd *fanout.active-shard-writer-connections-stay-open-for-the-process-lifetime",
 }, function(t)
     for i = 1, 20 do eventd.rows(vm, "EVENTS pt.fan.merge TAKE " .. i .. " SELECT i") end
-    eventd.rows(vm, "EVENTS COUNT BY event_type")
+    eventd.rows(vm, "EVENTS COUNT BY event.type")
     pinned(0, "pt.fan.life", { { n = 1 } })
     pinned(1, "pt.fan.life", { { n = 2 } })
     eventd.wait_rows(vm, "EVENTS pt.fan.life", function(rs) return #rs >= 2 end)
@@ -285,8 +285,8 @@ end)())
 -- "Event queries execute against every database in the event store
 --  directory — active shards and historical ones alike." / "There is no
 --  shard a query can skip on the basis of its contents, and a predicate
---  on cpu_id scans all of them."
-test("after the shard count drops, the retired shard is still read, cpu_id predicates included", {
+--  on event.cpu scans all of them."
+test("after the shard count drops, the retired shard is still read, event.cpu predicates included", {
     spec = "eventd *fanout.an-event-query-runs-against-every-active-and-historical-shard"
         .. " eventd *fanout.no-shard-is-skipped-even-for-a-cpu-id-predicate",
 }, function(t)
@@ -308,9 +308,9 @@ test("after the shard count drops, the retired shard is still read, cpu_id predi
     t:assert_eq(eventd.sql(vm, SHARD0,
         "SELECT count(*) FROM events WHERE event_type = 'pt.fan.old'")[1][1], 1,
         "and the other in shard-0000")
-    local by_cpu = eventd.rows(vm, 'EVENTS pt.fan.old WHERE tag == "' .. HIST_TAG .. '" WHERE cpu_id == ' .. cpu1)
-    t:assert_eq(#by_cpu, 2, "a cpu_id predicate finds that CPU's events in both shards")
-    local hist = eventd.rows(vm, 'EVENTS pt.fan.hist WHERE tag == "' .. HIST_TAG .. '" COUNT BY event_type')
+    local by_cpu = eventd.rows(vm, 'EVENTS pt.fan.old WHERE tag == "' .. HIST_TAG .. '" WHERE event.cpu == ' .. cpu1)
+    t:assert_eq(#by_cpu, 2, "an event.cpu predicate finds that CPU's events in both shards")
+    local hist = eventd.rows(vm, 'EVENTS pt.fan.hist WHERE tag == "' .. HIST_TAG .. '" COUNT BY event.type')
     t:assert_eq(hist[1] and hist[1].count, 100, "the bulk set in the historical shard is read")
 end)
 
@@ -326,7 +326,7 @@ test("a held event query reads each database, active and historical, through one
         for i = 101, 200 do p[#p + 1] = { tag = HIST_TAG, i = i, pad = string.rep("h", 2000) } end
         return p
     end)())
-    eventd.wait_rows(vm, 'EVENTS pt.fan.hist WHERE tag == "' .. HIST_TAG .. '" COUNT BY event_type',
+    eventd.wait_rows(vm, 'EVENTS pt.fan.hist WHERE tag == "' .. HIST_TAG .. '" COUNT BY event.type',
         function(rs) return rs[1] and rs[1].count == 200 end)
     local w = vm:spawn_worker()
     local c = rq.open(w)

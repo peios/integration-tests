@@ -406,7 +406,7 @@ test("backup requires SeBackupPrivilege and performs no per-key AccessCheck",
         end)
     end)
 
-test("LCS_BACKUP_START is emitted before any subtree data is read, and LCS_BACKUP_COMPLETE reports the result afterwards",
+test("lcs.audit.backup.started is emitted before any subtree data is read, and lcs.audit.backup.ended reports the result afterwards",
     { spec = { "PKM *backup.start-event-precedes-any-data-or-eio", "PKM *backup.complete-event-cannot-change-the-result" } }, function(t)
         -- Holding the backup's first subtree read stops it before a
         -- single byte of key data has come back, so what is in the ring
@@ -442,23 +442,24 @@ test("LCS_BACKUP_START is emitted before any subtree data is read, and LCS_BACKU
         end
         t:assert_eq(answered, 1,
             "exactly the one held request, so no subtree data was ever returned")
-        local starts = kmes.of_type(held_events, "LCS_BACKUP_START")
-        t:assert_eq(#starts, 1, "LCS_BACKUP_START was already emitted")
-        t:assert_eq(starts[1].payload.key_guid, ROOT, "and it names the subtree root")
+        local starts = kmes.of_type(held_events, "lcs.audit.backup.started")
+        t:assert_eq(#starts, 1, "lcs.audit.backup.started was already emitted")
+        t:assert_eq(starts[1].payload.object.key.guid, ROOT, "and it names the subtree root")
         for _, id in ipairs(src:held_ids()) do src:release(id) end
         src:pump(100)
         sys.close(w2, out); sys.close(w2, key.ret)
         w2:kill(); w2:join()
 
-        -- LCS_BACKUP_COMPLETE reports a result that has already
+        -- lcs.audit.backup.ended reports a result that has already
         -- happened: it carries the errno rather than deciding it. (A
         -- failure to emit it is a KMES-side fault no guest can stage.)
         local ok_events = kmes.recording(t, vm, function()
             t:assert_eq(backup_root().ret, 0, "a successful backup")
         end)
-        local done = kmes.of_type(ok_events, "LCS_BACKUP_COMPLETE")
-        t:assert_eq(#done, 1, "emits one LCS_BACKUP_COMPLETE")
-        t:assert_eq(done[1].payload.result_errno, 0, "carrying the result it had")
+        local done = kmes.of_type(ok_events, "lcs.audit.backup.ended")
+        t:assert_eq(#done, 1, "emits one lcs.audit.backup.ended")
+        t:assert_eq(done[1].payload.outcome.success, true, "carrying the result it had")
+        t:assert_eq(done[1].payload.outcome.errno, nil, "with no errno, absent on success")
 
         -- A backup that fails *after* it started emits one too, and
         -- what it carries is the errno the operation already had.
@@ -472,10 +473,11 @@ test("LCS_BACKUP_START is emitted before any subtree data is read, and LCS_BACKU
             t:assert(r.ret < 0, "a backup whose subtree read fails")
             failed_errno = r.errno
         end)
-        local failed = kmes.of_type(fail_events, "LCS_BACKUP_COMPLETE")
+        local failed = kmes.of_type(fail_events, "lcs.audit.backup.ended")
         t:assert_eq(#failed, 1, "emits one too")
-        t:assert_eq(failed[1].payload.result_errno, failed_errno,
-            "carrying the errno the operation had already produced")
+        t:assert_eq(failed[1].payload.outcome.success, false, "recording the failure")
+        t:assert_eq(failed[1].payload.outcome.errno, -failed_errno,
+            "carrying the errno the operation had already produced, negated")
     end)
 
 -- Last: this case leans on MaxReadOnlyTransactionsPerSource being 1.

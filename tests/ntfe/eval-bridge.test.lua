@@ -90,8 +90,9 @@ test("effects reach their stores by name and by hash",
         t:assert_eq(#cells, 1, "the count lands in the stream of that name")
         t:assert_eq(cells[1] and cells[1].hash, ntfe.name_hash("named-stream"), "keyed by its hash")
         t:assert_eq(#reports, 1, "the report is emitted")
-        t:assert_eq(reports[1] and reports[1].payload.rule, "named", "naming its rule")
-        t:assert_eq(reports[1] and reports[1].payload.level, 5, "at its level")
+        local rule = reports[1] and reports[1].payload.rule or {}
+        t:assert_eq(rule.name, "named", "naming its rule")
+        t:assert_eq(rule["report-level"], 5, "at its level")
     end)
 
 -- ---- the bridge ----
@@ -213,14 +214,16 @@ test("effects are applied after the verdict is written",
         local reports = ev.reports(t, vm, function() ev.probe(E, 7661) end)
         t:assert_eq(#reports, 1, "the losing rule reports")
         local p = reports[1] and reports[1].payload or {}
-        t:assert_eq(p.rule, "reporter", "as itself")
-        t:assert_eq(p.verdict, "DROP", "naming the DROP that won, not its own PASS")
-        t:assert_eq(p.layer, "Packet", "in the layer that judged")
+        local rule, outcome = p.rule or {}, p.outcome or {}
+        t:assert_eq(rule.name, "reporter", "as itself")
+        t:assert_eq(outcome.verdict, "drop", "naming the DROP that won, not its own PASS")
+        t:assert_eq(rule.layer, "packet", "in the layer that judged")
 
         reports = ev.reports(t, vm, function() ev.probe(E, 7662) end)
         p = reports[1] and reports[1].payload or {}
-        t:assert_eq(p.verdict, "REJECT", "a REJECT that wins is named")
-        t:assert_eq(p.reject_kind, "Prohibited", "with its kind")
+        outcome = p.outcome or {}
+        t:assert_eq(outcome.verdict, "reject", "a REJECT that wins is named")
+        t:assert_eq(outcome.reason, "prohibited", "with its kind")
     end)
 
 test("a COUNT lands after this packet's own view reads, so a rule cannot trip its own threshold",

@@ -64,7 +64,7 @@ local function hold_age()
     eventd.set(vm, "LogRetentionDays", "dword:60"):assert_ok()
     eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change
         .. ' WHERE key == "LogRetentionDays" AND new_value == "60" SINCE 10m ago', function(rs)
-            for _, r in ipairs(rs) do if r.timestamp >= since then return true end end
+            for _, r in ipairs(rs) do if r["event.time"] >= since then return true end end
             return false
         end)
 end

@@ -110,7 +110,7 @@ end
 --- Gap records on one CPU, through evctl.
 local function gaps_on(cpu)
     return eventd.rows(vm, string.format(
-        "EVENTS %s WHERE cpu_id == %d SINCE 1h ago TAKE 10000", eventd.T.gap, cpu))
+        "EVENTS %s WHERE event.cpu == %d SINCE 1h ago TAKE 10000", eventd.T.gap, cpu))
 end
 
 --- Set the KMES ring capacity and wait until a fresh attach sees it.
@@ -192,7 +192,7 @@ test("the first attachment reads from the oldest surviving event, not the newest
             if r[1] then first = r[1][1] end
         end
         t:assert(first, "CPU " .. cpu .. "'s sequence 1 is stored")
-        t:assert(first < startup.timestamp,
+        t:assert(first < startup["event.time"],
             "and it was emitted before eventd started: the boot's earliest events were read")
     end
 end)
@@ -407,7 +407,7 @@ test("each CPU keeps its own last sequence: a loss on one CPU is a gap on that C
     for _, shard in ipairs(eventd.shards(vm)) do
         local r = eventd.sql(vm, shard, string.format(
             "SELECT count(*) FROM events WHERE event_type = 'synthetic.gap' AND cpu_id = 1 " ..
-            "AND timestamp = %d", g.timestamp))
+            "AND timestamp = %d", g["event.time"]))
         if r[1][1] > 0 then in_shard = shard end
     end
     local cpu1_shard = stored(marker)[1].shard

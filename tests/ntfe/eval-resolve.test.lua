@@ -105,8 +105,9 @@ test("REPORT folds to the highest level listed and emits once if that level clea
             t:assert_eq(r.packet().fx.reports, c[2], "the rule yields " .. c[2] .. " report " .. c[3])
             t:assert_eq(#reports, c[2], "and KMES receives " .. c[2] .. " " .. c[3])
             if c[2] == 1 then
-                t:assert_eq(reports[1].payload.level, 4, "at the highest level listed, " .. c[3])
-                t:assert_eq(reports[1].payload.rule, "reporter", "attributed to the rule")
+                local reported = reports[1].payload.rule or {}
+                t:assert_eq(reported["report-level"], 4, "at the highest level listed, " .. c[3])
+                t:assert_eq(reported.name, "reporter", "attributed to the rule")
             end
         end
     end)

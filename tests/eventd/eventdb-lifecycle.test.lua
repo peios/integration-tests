@@ -349,7 +349,7 @@ test("starting with fewer shards leaves the excess as historical shards, kept an
     eventd.restart(vm)
     t:assert(exists(vm, s1), "shard-0001.db is still there with one active shard")
     t:assert_eq(in_s1()[1], held[1], "with its rows")
-    t:assert_eq(#eventd.rows(vm, "EVENTS pt.db.fewer WHERE sequence == " .. held[2] .. " SINCE 1h ago"), 1,
+    t:assert_eq(#eventd.rows(vm, "EVENTS pt.db.fewer WHERE event.sequence == " .. held[2] .. " SINCE 1h ago"), 1,
         "and a query finds a row that only the historical shard holds")
 end)
 
@@ -613,7 +613,7 @@ test("SQLite-reported corruption in the active shard renames it aside, starts a 
     local errs = eventd.rows(bad, "EVENTS " .. eventd.T.storage_error .. " SINCE 10m ago")
     local hit = false
     for _, e in ipairs(errs) do
-        if e.store == "event" and e.shard_index == 0 and e.timestamp >= since then hit = true end
+        if e.store == "event" and e.shard_index == 0 and e["event.time"] >= since then hit = true end
     end
     t:assert(hit, "a storage_error for the event store's shard 0 was recorded: " .. json.encode(errs))
     local logs = eventd.rows(bad, "LOGS FROM eventd SINCE 10m ago")

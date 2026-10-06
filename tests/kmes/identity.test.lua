@@ -147,7 +147,7 @@ test("a kernel emitter's origin class is written as passed",
             end)
             t:assert_eq(kmes.of_type(events, "PIT_ORIGIN_USER")[1].origin,
                 kmes.ORIGIN.USERSPACE, "the syscall event is 0")
-            local audit = kmes.of_type(events, "STRATAFS_COPY_UP")
+            local audit = kmes.of_type(events, "stratafs.file.copied-up")
             t:assert_eq(#audit, 1, "the audit event arrives")
             t:assert_eq(audit[1].origin, kmes.ORIGIN.KACS,
                 "carrying KACS's origin class 2, exactly as passed")
@@ -198,7 +198,7 @@ test("kernel emission neither blocks nor fails when the ring is full",
             end
             t:assert(stratafs.try_write(vm, s:join("f"), "modified"),
                 "the copy-up runs against a full ring")
-            local audit = kmes.of_type(kmes.drain(ring), "STRATAFS_COPY_UP")
+            local audit = kmes.of_type(kmes.drain(ring), "stratafs.file.copied-up")
             kmes.detach(ring)
             t:assert_eq(#audit, 1,
                 "and its event is in the ring, over the oldest fill")

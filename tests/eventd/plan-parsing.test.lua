@@ -115,7 +115,7 @@ test("the first token selects events, logs or metric mode, and nothing else is a
 
     local ev = eventd.rows(vm, 'EVENTS pt.plan.mode WHERE tag == "' .. tag .. '"')
     t:assert_eq(#ev, 1, "EVENTS reads the event store")
-    t:assert_eq(ev[1].event_type, "pt.plan.mode", "and the record is an event")
+    t:assert_eq(ev[1]["event.type"], "pt.plan.mode", "and the record is an event")
     local lg = eventd.rows(vm, "LOGS FROM " .. tag)
     t:assert_eq(#lg, 1, "LOGS reads the log store")
     t:assert_eq(lg[1].message, "mode", "and the record is a log line")
@@ -146,7 +146,7 @@ test("the primary selector picks types by pattern, origins by FROM, series by na
     emit_wait("pt." .. m .. ".cat2")
     emit_wait("pt." .. m .. ".dog")
     local types = {}
-    for _, r in ipairs(eventd.rows(vm, "EVENTS pt." .. m .. ".cat*")) do types[r.event_type] = true end
+    for _, r in ipairs(eventd.rows(vm, "EVENTS pt." .. m .. ".cat*")) do types[r["event.type"]] = true end
     t:assert(types["pt." .. m .. ".cat1"] and types["pt." .. m .. ".cat2"], "the pattern selects both cats")
     t:assert(not types["pt." .. m .. ".dog"], "and not the dog: " .. json.encode(types))
 
@@ -207,7 +207,7 @@ test("a clause in the wrong mode is a parse error, whatever the stores hold", {
         { "LOGS RATE", "metric transform", nil },
         { "EVENTS pt.plan.mode RATE", "metric transform", nil },
         { "METRIC eventd.queries.active SELECT value", "not valid in METRIC mode",
-          "EVENTS pt.plan.mode SELECT event_type" },
+          "EVENTS pt.plan.mode SELECT event.type" },
         { "LOGS SELECT message COUNT BY origin", "SELECT cannot be combined", "LOGS SELECT message TAKE 1" },
         { "EVENTS pt.plan.mode ERROR ONLY", "ERROR ONLY is valid only in LOGS mode", "LOGS ERROR ONLY TAKE 1" },
         { "METRIC eventd.queries.active STREAM", "METRIC queries cannot stream", nil },

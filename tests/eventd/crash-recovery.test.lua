@@ -28,7 +28,7 @@ local vm = eventd.boot({
 local function latest(event_type, since)
     local out
     for _, r in ipairs(eventd.rows(vm, "EVENTS " .. event_type .. " SINCE 30m ago")) do
-        if r.timestamp >= since and (not out or r.timestamp > out.timestamp) then out = r end
+        if r["event.time"] >= since and (not out or r["event.time"] > out["event.time"]) then out = r end
     end
     return out
 end
@@ -36,7 +36,7 @@ end
 local function gaps_since(since)
     local out = {}
     for _, r in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 30m ago")) do
-        if r.timestamp >= since then out[#out + 1] = r end
+        if r["event.time"] >= since then out[#out + 1] = r end
     end
     return out
 end
@@ -98,18 +98,19 @@ test("a restart re-ingests uncovered survivors and records a gap only for what n
     for i = 1, 120 do eventd.emit(vm, "pt.over", { tag = otag, i = i, b = big }) end
     eventd.start(vm)
     local gaps = eventd.wait_rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 10m ago", function(r)
-        for _, g in ipairs(r) do if g.timestamp >= since then return true end end
+        for _, g in ipairs(r) do if g["event.time"] >= since then return true end end
         return false
     end)
     local gap
-    for _, g in ipairs(gaps) do if g.timestamp >= since then gap = g end end
+    for _, g in ipairs(gaps) do if g["event.time"] >= since then gap = g end end
     t:assert(gap, "the overwritten sequences were recorded as a gap")
-    local kept = eventd.rows(vm, 'EVENTS pt.over WHERE tag == "' .. otag .. '" SINCE 10m ago SELECT i, sequence')
+    local kept = eventd.rows(vm, 'EVENTS pt.over WHERE tag == "' .. otag .. '" SINCE 10m ago SELECT i, event.sequence')
     t:assert(#kept > 0 and #kept < 120, "some of the burst survived, not all: " .. #kept)
     local lowest = math.huge
     for _, r in ipairs(kept) do
-        t:assert(r.sequence > gap.last_sequence, "no stored survivor falls inside the gap")
-        lowest = math.min(lowest, r.sequence)
+        local seq = r["event.sequence"]
+        t:assert(seq > gap.last_sequence, "no stored survivor falls inside the gap")
+        lowest = math.min(lowest, seq)
     end
     t:assert_eq(lowest, gap.last_sequence + 1, "the gap ends where the oldest survivor begins")
 end)

@@ -71,18 +71,20 @@ end
 -- The two MaxTotalLayers cases that read self-configuration audits come
 -- first: they must see a boot whose configuration nothing has touched.
 
---- The parameter names an LCS_SELF_CONFIG_INVALID audit reported while
---- `fn` ran, mapped to the payload that reported them. Every refresh
---- audits each parameter it could not take, so an empty result means
---- the refresh did not run rather than that everything validated.
+--- The parameter names an lcs.config.value.rejected audit reported while
+--- `fn` ran, mapped to the `config` map of the payload that reported
+--- them. Every refresh audits each parameter it could not take, so an
+--- empty result means the refresh did not run rather than that
+--- everything validated.
 local function self_config_rejections(t, fn)
     local events = kmes.recording(t, vm, fn)
-    local records = kmes.of_type(events, "LCS_SELF_CONFIG_INVALID")
+    local records = kmes.of_type(events, "lcs.config.value.rejected")
     t:assert(#records >= 1, "the self-configuration refresh ran and audited what it read")
     local out = {}
     for _, e in ipairs(records) do
-        if e.payload and e.payload.configuration_name then
-            out[e.payload.configuration_name] = e.payload
+        local config = e.payload and e.payload.config
+        if config and config.name then
+            out[config.name] = config
         end
     end
     return out
@@ -100,9 +102,9 @@ test("MaxTotalLayers defaults to 1024",
         end)
         local record = rejected["MaxTotalLayers"]
         t:assert(record, "8 is below the configurable minimum and is refused")
-        t:assert_eq(record.retained_value, 1024,
+        t:assert_eq(record.value, 1024,
             "and the value LCS keeps bounding the in-memory layer table is the default")
-        t:assert_eq(record.expected_max, 65536, "which is configurable up to 65536")
+        t:assert_eq(record.expected.max, 65536, "which is configurable up to 65536")
         sys.close(w, pfd)
     end)
 

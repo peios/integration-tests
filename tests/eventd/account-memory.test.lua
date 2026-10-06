@@ -65,7 +65,7 @@ local function timed(text)
 end
 
 local function count_of(etype)
-    local r = eventd.query(vm, "EVENTS " .. etype .. " COUNT BY event_type")
+    local r = eventd.query(vm, "EVENTS " .. etype .. " COUNT BY event.type")
     if not r.ok or not r.rows[1] then return 0 end
     return r.rows[1].count
 end
@@ -175,11 +175,11 @@ test("aggregations over more than the budget in rows succeed when their groups a
     spec = "eventd *fanout.aggregating-queries-fold-rows-into-groups-as-they-are-read",
 }, function(t)
     with_config({ MaxQueryHeldBytes = BUDGET }, function()
-        local c = eventd.rows(vm, "EVENTS pt.mem.wide COUNT BY event_type")
+        local c = eventd.rows(vm, "EVENTS pt.mem.wide COUNT BY event.type")
         t:assert_eq(c[1] and c[1].count, 3000, "COUNT BY over every row")
-        local g = eventd.rows(vm, "EVENTS pt.mem.wide GROUP event_type MAX n")
+        local g = eventd.rows(vm, "EVENTS pt.mem.wide GROUP event.type MAX n")
         t:assert_eq(g[1] and g[1].max, 3000, "GROUP MAX over every row")
-        local s = eventd.rows(vm, "EVENTS pt.mem.wide GROUP event_type SUM n")
+        local s = eventd.rows(vm, "EVENTS pt.mem.wide GROUP event.type SUM n")
         t:assert_eq(s[1] and s[1].sum, 4501500, "GROUP SUM over every row")
     end)
 end)
@@ -190,7 +190,7 @@ test("the same rows aggregated into thousands of large groups pass the budget an
     spec = "eventd *fanout.aggregation-memory-is-bounded-by-group-cardinality",
 }, function(t)
     with_config({ MaxQueryHeldBytes = BUDGET }, function()
-        local few = eventd.query(vm, "EVENTS pt.mem.wide COUNT BY event_type")
+        local few = eventd.query(vm, "EVENTS pt.mem.wide COUNT BY event.type")
         t:assert(few.ok, "one group over 3000 rows fits: " .. few.stderr)
         local many = eventd.query(vm, "EVENTS pt.mem.wide DISTINCT pad")
         t:assert_eq(many.exit_code, 1, "3000 groups of 8 KB each do not")
@@ -398,9 +398,9 @@ test("a top-level timestamp bound skips the rows it excludes, and one inside OR 
     with_config({ QueryTimeoutMs = 1000 }, function()
         -- Every slow event is newer than SLOW0. Bounded above by it, the
         -- read covers none of them.
-        local code, err = timed("EVENTS pt.mem.slow WHERE timestamp < " .. SLOW0 .. " WHERE nomatch == 1")
+        local code, err = timed("EVENTS pt.mem.slow WHERE event.time < " .. SLOW0 .. " WHERE nomatch == 1")
         t:assert_eq(code, 0, "the narrowed read finishes inside the second: " .. err)
-        code, err = timed("EVENTS pt.mem.slow WHERE (timestamp < " .. SLOW0 .. " OR nomatch == 1)")
+        code, err = timed("EVENTS pt.mem.slow WHERE (event.time < " .. SLOW0 .. " OR nomatch == 1)")
         t:assert_eq(code, 1, "inside OR the bound narrows nothing, and the full read times out")
     end)
 end)
@@ -412,8 +412,8 @@ test("counting by a header column reads and folds every row rather than asking S
         -- A SQL GROUP BY over 900 000 rows of one column is a fraction of
         -- a second; reading and folding each row is several seconds, so
         -- with a one-second timeout the count does not finish.
-        local code = timed("EVENTS pt.mem.slow COUNT BY event_type")
-        t:assert_eq(code, 1, "COUNT BY event_type over 900 000 rows runs out of its second")
+        local code = timed("EVENTS pt.mem.slow COUNT BY event.type")
+        t:assert_eq(code, 1, "COUNT BY event.type over 900 000 rows runs out of its second")
     end)
     t:assert(count_of("pt.mem.slow") >= 890000, "with the default timeout the same count completes")
 end)

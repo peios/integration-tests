@@ -17,8 +17,8 @@
 --     stopped, so its coverage for this boot starts before sequence 1.
 --     This one is last: it empties the store.
 --
--- What a gap record holds is read two ways: through evctl (header columns
--- and the payload fields that do not collide with them) and straight out
+-- What a gap record holds is read two ways: through evctl (the header
+-- fields and the payload fields) and straight out
 -- of the shard with the host-side sqlite copy (the raw MessagePack payload
 -- and the null header columns). The agent also attaches its own KMES ring
 -- (it runs as SYSTEM, which holds SeSecurityPrivilege) to read the oldest
@@ -228,7 +228,7 @@ test("an overrun ring becomes one gap record naming exactly the lost sequences",
     local resume = select(2, oldest_survivor())
     eventd.thaw(vm)
 
-    local g = wait_gap(before.sequence + 1)
+    local g = wait_gap(before["event.sequence"] + 1)
     local p = g.payload
     t:assert_eq(g.cpu_id, 0, "the record names CPU 0, the only CPU")
     t:assert_eq(p.cpu_id, 0, "in the payload too")
@@ -239,7 +239,7 @@ test("an overrun ring becomes one gap record naming exactly the lost sequences",
     local revealing = around[p.last_sequence + 1]
     t:assert(last_seen, "the sequence before the gap was stored: it is the last one eventd saw")
     t:assert(revealing, "the sequence after the gap was stored: it is the event that revealed it")
-    t:assert(p.first_sequence >= before.sequence + 1,
+    t:assert(p.first_sequence >= before["event.sequence"] + 1,
         "the loss began after the marker eventd had already stored")
     t:assert_eq(p.count, p.last_sequence - p.first_sequence + 1,
         "count is the number of sequences in [first, last]: " .. json.encode(p))
@@ -275,15 +275,15 @@ test("a lapped drain thread resumes at the oldest survivor and the lap is an ord
     -- Read the ring as eventd will find it: everything up to the tail has
     -- been overwritten, and the tail is the oldest survivor.
     local oldest = oldest_survivor()
-    t:assert(oldest.sequence > before.sequence + 1,
+    t:assert(oldest.sequence > before["event.sequence"] + 1,
         "eventd has been lapped: the oldest survivor " .. oldest.sequence ..
-        " is past the next sequence it expects, " .. (before.sequence + 1))
+        " is past the next sequence it expects, " .. (before["event.sequence"] + 1))
 
     -- A second consumer, attached across the resume, sees whatever eventd
     -- puts into KMES from here on.
     local watch = assert(kmes.attach(vm, 0))
     eventd.thaw(vm)
-    local g = wait_gap(before.sequence + 1)
+    local g = wait_gap(before["event.sequence"] + 1)
     vm:run("sleep 1")
     local seen = kmes.drain(watch)
     kmes.detach(watch)
@@ -318,7 +318,7 @@ test("a gap is stored like any event: same shard, same transaction, its own rece
     eventd.freeze(vm)
     flood("pt.gap." .. eventd.marker("path"), 1500)
     eventd.thaw(vm)
-    local g = wait_gap(before.sequence + 1)
+    local g = wait_gap(before["event.sequence"] + 1)
     local p = g.payload
 
     -- Normal write path: the gap row went into the shard holding CPU 0's
@@ -350,12 +350,12 @@ test("a gap is stored like any event: same shard, same transaction, its own rece
     t:assert_eq(#rows, 1, "the gap is found by a query on its payload field")
     t:assert_eq(rows[1].last_sequence, p.last_sequence, "with its fields decoded")
     local by_cpu = eventd.rows(vm, string.format(
-        "EVENTS %s WHERE cpu_id == 0 SINCE 10m ago TAKE 1000", eventd.T.gap))
+        "EVENTS %s WHERE event.cpu == 0 SINCE 10m ago TAKE 1000", eventd.T.gap))
     local found = false
     for _, r in ipairs(by_cpu) do
         if r.first_sequence == p.first_sequence then found = true end
     end
-    t:assert(found, "and by cpu_id, like any event from that CPU")
+    t:assert(found, "and by event.cpu, like any event from that CPU")
 
     -- The receipt is why a restart does not rediscover the same loss.
     eventd.restart(vm)
@@ -417,7 +417,7 @@ test("events lost while eventd was stopped become a restart gap, survivors are s
     end
     eventd.start(vm)
 
-    t:assert(highest >= before.sequence, "the marker was receipted before the stop")
+    t:assert(highest >= before["event.sequence"], "the marker was receipted before the stop")
     local g = wait_gap(highest + 1)
     t:assert_eq(g.payload.first_sequence, highest + 1,
         "the gap begins right after the receipted sequences")

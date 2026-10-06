@@ -1,11 +1,12 @@
 -- The three stores of PKM §6.6, from the outside: flow tags in table
 -- order, counter cells with the hash the store files them under, and
--- the `network-report` events NTFE writes into KMES.
+-- the `ntfe.verdict.reported` events NTFE writes into KMES.
 --
 -- helpers/ntfe decodes the dumps for the common case; what is here is
 -- what only the store tests need: the tag slots in the order the table
 -- holds them, Linux's jhash (to say which of the 1024 buckets a cell is
--- in), a msgpack reader that knows map16 (the report payload's header),
+-- in), a msgpack reader that keeps every map's keys in wire order (the
+-- report payload is nested maps, whose exact key sets the tests check),
 -- a KMES reader over every CPU's ring, and senders that put many
 -- datagrams on the wire in one syscall.
 
@@ -129,7 +130,11 @@ function M.bucket_of(cell)
     return M.jhash(key, M.COUNTER_JHASH_INIT) & (M.COUNTER_BUCKETS - 1)
 end
 
--- ---- msgpack, with map16 ------------------------------------------------
+-- ---- msgpack, keeping each map's keys -----------------------------------
+
+-- Every decoded map's keys in wire order, duplicates kept, so a test can
+-- hold any level of the payload to an exact key list.
+local KEYS = setmetatable({}, { __mode = "k" })
 
 local function unpack_value(b, at)
     local tag = b:byte(at)
@@ -145,6 +150,7 @@ local function unpack_value(b, at)
             out[k] = v
             keys[#keys + 1] = k
         end
+        KEYS[out] = keys
         return out, from, keys
     end
     if tag >= 0x80 and tag <= 0x8f then return map(tag - 0x80, at + 1) end
@@ -162,6 +168,8 @@ local function unpack_value(b, at)
         return b:sub(at + 3, at + 2 + n), at + 3 + n
     end
     if tag == 0xc0 then return nil, at + 1 end
+    if tag == 0xc2 then return false, at + 1 end
+    if tag == 0xc3 then return true, at + 1 end
     if tag == 0xcc then return string.unpack(">I1", b, at + 1), at + 2 end
     if tag == 0xcd then return string.unpack(">I2", b, at + 1), at + 3 end
     if tag == 0xce then return string.unpack(">I4", b, at + 1), at + 5 end
@@ -176,10 +184,16 @@ function M.decode_payload(bytes)
     return map, keys, after - 1
 end
 
+--- The keys of a map `decode_payload` produced, at any depth, in wire
+--- order; nil for anything that is not a decoded map.
+function M.keys_of(map)
+    return KEYS[map]
+end
+
 -- ---- KMES, every CPU ---------------------------------------------------
 
 M.ORIGIN_NTFE = 4
-M.REPORT_TYPE = "network-report"
+M.REPORT_TYPE = "ntfe.verdict.reported"
 
 --- Attach to every CPU's ring. Returns a recorder: `rec:drain()` gives
 --- every event since the last drain across all rings, each with its

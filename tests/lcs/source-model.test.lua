@@ -134,7 +134,7 @@ test("nothing in LCS knows which source is loregd: any source that registers Mac
             assert(other:register())
             other:pump()
         end)
-        local invalid = kmes.of_type(events, "LCS_SELF_CONFIG_INVALID")
+        local invalid = kmes.of_type(events, "lcs.config.value.rejected")
         t:assert_eq(#invalid, 0,
             "a source backing no Machine hive gets no self-configuration bootstrap at all")
 

@@ -5,8 +5,12 @@
 -- record is the point of it being permitted.
 --
 -- A ring is attached before the source registers, because the nineteen
--- LCS_SELF_CONFIG_INVALID events of a first boot are emitted during
+-- lcs.config.value.rejected events of a first boot are emitted during
 -- registration and are gone by the time a test starts.
+--
+-- Payload field paths are nested maps (PGSS §6.4): `subject.token.sid` is
+-- read as `payload.subject.token.sid`, and a hyphenated segment needs
+-- brackets, as in `payload.trigger["sacl-match"]`.
 
 local sys = require("helpers.sys")
 local lcs = require("helpers.lcs")
@@ -24,23 +28,22 @@ local R = lcs.RIGHT
 local ALL = lcs.KEY_ALL_ACCESS
 
 local EVENT_TYPES = {
-    "LCS_KEY_OPEN_AUDIT", "LCS_BACKUP_START", "LCS_BACKUP_COMPLETE",
-    "LCS_RESTORE_START", "LCS_RESTORE_COMPLETE",
-    "LCS_SOURCE_VALIDATION_FAILURE", "LCS_SELF_CONFIG_INVALID",
+    "lcs.audit.key.opened", "lcs.audit.backup.started", "lcs.audit.backup.ended",
+    "lcs.audit.restore.started", "lcs.audit.restore.ended",
+    "lcs.source.response.rejected", "lcs.config.value.rejected",
 }
+-- The caller group: subject.token.{sid,integrity,id,auth-id,type,impersonation}.
 local CALLER_FIELDS = {
-    "effective_token_guid", "true_token_guid", "process_guid", "user_sid",
-    "authentication_id", "token_id", "token_type", "impersonation_level",
-    "integrity_level",
+    "sid", "integrity", "id", "auth-id", "type", "impersonation",
 }
 local VALIDATION_CLASSES = {
-    malformed_security_descriptor = true, malformed_layer_name = true,
-    unknown_rsi_status_code = true, future_sequence_number = true,
-    duplicate_winning_sequence_tie = true,
-    malformed_layer_metadata_security_descriptor = true,
-    malformed_key_name = true, malformed_value_name = true,
-    malformed_response_payload = true, malformed_key_metadata = true,
-    malformed_value_payload = true, malformed_delete_layer_orphan_list = true,
+    ["malformed-security-descriptor"] = true, ["malformed-layer-name"] = true,
+    ["unknown-rsi-status-code"] = true, ["future-sequence-number"] = true,
+    ["duplicate-winning-sequence-tie"] = true,
+    ["malformed-layer-metadata-security-descriptor"] = true,
+    ["malformed-key-name"] = true, ["malformed-value-name"] = true,
+    ["malformed-response-payload"] = true, ["malformed-key-metadata"] = true,
+    ["malformed-value-payload"] = true, ["malformed-delete-layer-orphan-list"] = true,
 }
 
 --- A descriptor with a DACL and one SACL audit ACE.
@@ -145,10 +148,10 @@ end
 --- twelve.
 local function validation_class(t, op, handler, fn)
     local events = with_intercept(t, op, handler, fn)
-    local e, n = one(events, "LCS_SOURCE_VALIDATION_FAILURE")
+    local e, n = one(events, "lcs.source.response.rejected")
     t:assert(e, "a source validation failure was audited")
     t:assert_eq(n, 1, "exactly one")
-    local class = e.payload.validation_class
+    local class = e.payload.outcome and e.payload.outcome.reason
     t:assert(VALIDATION_CLASSES[class],
         "\"" .. tostring(class) .. "\" is one of the twelve documented classes")
     return class, e
@@ -189,7 +192,7 @@ test("every audit payload is a single MessagePack map with string keys",
             local fd = must_open(t, "Machine\\Audit\\Success", R.QUERY_VALUE)
             sys.close(w, fd)
         end)
-        local e = one(events, "LCS_KEY_OPEN_AUDIT")
+        local e = one(events, "lcs.audit.key.opened")
         t:assert(e, "the event decoded")
         t:assert(not e.payload_error, "its payload is well-formed MessagePack")
         t:assert_eq(type(e.payload), "table", "and decodes to a map")
@@ -209,31 +212,39 @@ test("GUIDs are 16-byte binary values and SIDs are binary KACS encodings",
             local fd = must_open(t, "Machine\\Audit\\Success", R.QUERY_VALUE)
             sys.close(w, fd)
         end)
-        local e = one(events, "LCS_KEY_OPEN_AUDIT")
-        t:assert_eq(#e.payload.key_guid, 16, "the key GUID is sixteen bytes")
-        t:assert_eq(e.payload.key_guid, guid, "and is the GUID the source gave the key")
-        for _, field in ipairs({ "effective_token_guid", "true_token_guid", "process_guid" }) do
-            t:assert_eq(#e.payload.caller[field], 16, field .. " is sixteen bytes")
+        local e = one(events, "lcs.audit.key.opened")
+        t:assert_eq(#e.payload.object.key.guid, 16, "the key GUID is sixteen bytes")
+        t:assert_eq(e.payload.object.key.guid, guid, "and is the GUID the source gave the key")
+        -- The token and process GUIDs ride in the event header, not the payload.
+        for _, field in ipairs({ "effective_token", "true_token", "process_guid" }) do
+            t:assert_eq(#e[field], 16, "the header's " .. field .. " is sixteen bytes")
         end
-        t:assert_eq(token.sid_string(e.payload.caller.user_sid), "S-1-5-18",
+        for _, absent in ipairs({ "effective_token_guid", "true_token_guid", "process_guid",
+                                  "guid" }) do
+            t:assert(e.payload.subject.token[absent] == nil,
+                absent .. " is not repeated in the payload")
+        end
+        t:assert_eq(token.sid_string(e.payload.subject.token.sid), "S-1-5-18",
             "and the user SID is a binary KACS encoding, here SYSTEM's")
     end)
 
 -- The caller summary -------------------------------------------------------
 
-test("the caller submap has nine fields and no more",
+test("the caller's subject.token map has six fields and no more",
     { spec = "PKM *lcs-audit.caller-summary-nine-fields" }, function(t)
         local events = kmes.recording(t, vm, function()
             local fd = must_open(t, "Machine\\Audit\\Success", R.QUERY_VALUE)
             sys.close(w, fd)
         end)
-        local e = one(events, "LCS_KEY_OPEN_AUDIT")
-        local caller = e.payload.caller
-        t:assert(caller, "the event carries a caller submap")
+        local e = one(events, "lcs.audit.key.opened")
+        t:assert(e.payload.subject, "the event carries a subject map")
+        t:assert_eq(count_keys(e.payload.subject), 1, "holding only the token")
+        local caller = e.payload.subject.token
+        t:assert(caller, "the event carries subject.token")
         for _, name in ipairs(CALLER_FIELDS) do
-            t:assert(caller[name] ~= nil, "it carries " .. name)
+            t:assert(caller[name] ~= nil, "it carries subject.token." .. name)
         end
-        t:assert_eq(count_keys(caller), 9, "and exactly nine fields")
+        t:assert_eq(count_keys(caller), 6, "and exactly six fields")
         for _, absent in ipairs({ "groups", "privileges", "claims", "default_dacl" }) do
             t:assert(caller[absent] == nil,
                 absent .. " is unbounded and is never included")
@@ -249,21 +260,21 @@ test("a primary token reports an impersonation level of 0",
             local fd = must_open(t, "Machine\\Audit\\Success", R.QUERY_VALUE)
             sys.close(w, fd)
         end)
-        local e = one(events, "LCS_KEY_OPEN_AUDIT")
-        t:assert_eq(e.payload.caller.token_type, 1, "the caller holds a primary token")
-        t:assert_eq(e.payload.caller.impersonation_level, 0,
+        local e = one(events, "lcs.audit.key.opened")
+        t:assert_eq(e.payload.subject.token.type, "primary", "the caller holds a primary token")
+        t:assert_eq(e.payload.subject.token.impersonation, 0,
             "which reports an impersonation level of 0")
     end)
 
 -- Key opens -----------------------------------------------------------------
 
-test("LCS_KEY_OPEN_AUDIT is emitted when an open matches a SACL audit ACE, and not otherwise",
+test("lcs.audit.key.opened is emitted when an open matches a SACL audit ACE, and not otherwise",
     { spec = "PKM *lcs-audit.key-open.on-sacl-match" }, function(t)
         local matched = kmes.recording(t, vm, function()
             local fd = must_open(t, "Machine\\Audit\\Success", R.QUERY_VALUE)
             sys.close(w, fd)
         end)
-        local e, n = one(matched, "LCS_KEY_OPEN_AUDIT")
+        local e, n = one(matched, "lcs.audit.key.opened")
         t:assert(e, "a matching open audits")
         t:assert_eq(n, 1, "once")
 
@@ -271,27 +282,33 @@ test("LCS_KEY_OPEN_AUDIT is emitted when an open matches a SACL audit ACE, and n
             local fd = must_open(t, "Machine\\Plain", R.QUERY_VALUE)
             sys.close(w, fd)
         end)
-        t:assert_eq(#kmes.of_type(unmatched, "LCS_KEY_OPEN_AUDIT"), 0,
+        t:assert_eq(#kmes.of_type(unmatched, "lcs.audit.key.opened"), 0,
             "and a key with no SACL audits nothing")
     end)
 
-test("the key-open payload carries the caller, GUID, masks, decision and SACL match flags",
+test("the key-open payload carries the caller, kind, GUID, masks, outcome and SACL match",
     { spec = "PKM *lcs-audit.key-open.payload-fields" }, function(t)
         local events = kmes.recording(t, vm, function()
             local fd = must_open(t, "Machine\\Audit\\Success", R.QUERY_VALUE)
             sys.close(w, fd)
         end)
-        local e = one(events, "LCS_KEY_OPEN_AUDIT")
-        t:assert(e.payload.caller, "the caller summary")
-        t:assert(e.payload.key_guid, "the key GUID")
-        t:assert_eq(e.payload.requested_access, R.QUERY_VALUE, "the requested access mask")
-        t:assert_eq(e.payload.granted_access, R.QUERY_VALUE, "the granted access mask")
-        t:assert_eq(e.payload.decision, "allowed", "the decision")
-        t:assert_eq(e.payload.sacl_match_flags, 1, "and bit 0 for a success-audit match")
-        t:assert_eq(count_keys(e.payload), 6, "six fields, and no others")
+        local e = one(events, "lcs.audit.key.opened")
+        local p = e.payload
+        t:assert(p.subject and p.subject.token, "the caller summary")
+        t:assert_eq(p.object.kind, "key", "object.kind, naming the table the masks decode against")
+        t:assert(p.object.key.guid, "the key GUID")
+        t:assert_eq(count_keys(p.object), 2, "object holds the kind and the key, and no more")
+        t:assert_eq(p.access.requested, R.QUERY_VALUE, "the requested access mask")
+        t:assert_eq(p.access.granted, R.QUERY_VALUE, "the granted access mask")
+        t:assert_eq(count_keys(p.access), 2, "access holds the two masks, and no more")
+        t:assert_eq(p.outcome.success, true, "the outcome, as a real boolean")
+        t:assert_eq(count_keys(p.outcome), 1, "outcome holds success alone")
+        t:assert_eq(p.trigger["sacl-match"], 1, "and bit 0 for a success-audit match")
+        t:assert_eq(count_keys(p.trigger), 1, "trigger holds the SACL match alone")
+        t:assert_eq(count_keys(p), 5, "five groups, and no others")
     end)
 
-test("granted_access is forced to zero on a denial, and the decision says denied",
+test("access.granted is forced to zero on a denial, and outcome.success is false",
     { spec = "PKM *lcs-audit.key-open.denied-event-has-zero-granted" }, function(t)
         local events = kmes.recording(t, vm, function()
             token.as_principal(t, vm, { user_sid = token.SID.TEST_USER }, function(w2)
@@ -299,29 +316,29 @@ test("granted_access is forced to zero on a denial, and the decision says denied
                 t:assert_eq(r.errno, sys.E.ACCES, "the open is denied")
             end)
         end)
-        local e = one(events, "LCS_KEY_OPEN_AUDIT")
+        local e = one(events, "lcs.audit.key.opened")
         t:assert(e, "and audited")
-        t:assert_eq(e.payload.decision, "denied", "as a denial")
-        t:assert_eq(e.payload.granted_access, 0, "with a zero granted mask")
-        t:assert_eq(e.payload.sacl_match_flags, 2, "and bit 1 for a failure-audit match")
+        t:assert_eq(e.payload.outcome.success, false, "as a denial")
+        t:assert_eq(e.payload.access.granted, 0, "with a zero granted mask")
+        t:assert_eq(e.payload.trigger["sacl-match"], 2, "and bit 1 for a failure-audit match")
     end)
 
-test("requested_access is the mask after generic mapping, with MAXIMUM_ALLOWED re-added",
+test("access.requested is the mask after generic mapping, with MAXIMUM_ALLOWED re-added",
     { spec = "PKM *lcs-audit.key-open.requested-access-is-post-mapping" }, function(t)
         local mapped = kmes.recording(t, vm, function()
             local fd = must_open(t, "Machine\\Audit\\Success", R.GENERIC_READ)
             sys.close(w, fd)
         end)
-        local e = one(mapped, "LCS_KEY_OPEN_AUDIT")
-        t:assert_eq(e.payload.requested_access, R.KEY_READ,
+        local e = one(mapped, "lcs.audit.key.opened")
+        t:assert_eq(e.payload.access.requested, R.KEY_READ,
             "GENERIC_READ is recorded as the KEY_READ it maps to")
 
         local maxed = kmes.recording(t, vm, function()
             local fd = must_open(t, "Machine\\Audit\\Max", R.MAXIMUM_ALLOWED)
             sys.close(w, fd)
         end)
-        local m = one(maxed, "LCS_KEY_OPEN_AUDIT")
-        t:assert_eq(m.payload.requested_access & R.MAXIMUM_ALLOWED, R.MAXIMUM_ALLOWED,
+        local m = one(maxed, "lcs.audit.key.opened")
+        t:assert_eq(m.payload.access.requested & R.MAXIMUM_ALLOWED, R.MAXIMUM_ALLOWED,
             "and MAXIMUM_ALLOWED is re-added after mapping takes it to zero")
     end)
 
@@ -332,9 +349,9 @@ test("the SACL is evaluated alongside the DACL, in the same AccessCheck",
                 lcs.open_key(src, w2, -1, "Machine\\Audit\\Denied", R.QUERY_VALUE)
             end)
         end)
-        local e, n = one(events, "LCS_KEY_OPEN_AUDIT")
+        local e, n = one(events, "lcs.audit.key.opened")
         t:assert_eq(n, 1, "one open, one record")
-        t:assert(e.payload.decision and e.payload.sacl_match_flags,
+        t:assert(e.payload.outcome.success ~= nil and e.payload.trigger["sacl-match"],
             "carrying the DACL's decision and the SACL's match in the same event: " ..
             "one evaluation produced both")
     end)
@@ -366,11 +383,11 @@ test("MAXIMUM_ALLOWED alone matches each audit ACE against the granted mask, and
                 if r.ret >= 0 then sys.close(w2, r.ret) end
             end)
         end)
-        local e = one(events, "LCS_KEY_OPEN_AUDIT")
+        local e = one(events, "lcs.audit.key.opened")
         t:assert(e, "the open audited")
-        t:assert_eq(e.payload.granted_access, R.KEY_READ,
+        t:assert_eq(e.payload.access.granted, R.KEY_READ,
             "the granted set is what the descriptor allowed")
-        t:assert_eq(e.payload.sacl_match_flags & 1, 1,
+        t:assert_eq(e.payload.trigger["sacl-match"] & 1, 1,
             "and the audit ACE for KEY_QUERY_VALUE matched it, because they did get it")
     end)
 
@@ -382,9 +399,9 @@ test("a MAXIMUM_ALLOWED open always audits as a success: a failure ACE has nothi
                 if r.ret >= 0 then sys.close(w2, r.ret) end
             end)
         end)
-        local e = one(events, "LCS_KEY_OPEN_AUDIT")
-        t:assert_eq(e.payload.decision, "allowed", "MAXIMUM_ALLOWED never fails")
-        t:assert_eq(e.payload.sacl_match_flags, 1,
+        local e = one(events, "lcs.audit.key.opened")
+        t:assert_eq(e.payload.outcome.success, true, "MAXIMUM_ALLOWED never fails")
+        t:assert_eq(e.payload.trigger["sacl-match"], 1,
             "so the record is a success audit and never a failure one, " ..
             "though the ACE carries both flags")
     end)
@@ -395,20 +412,20 @@ test("an ACE naming a right the caller did not receive does not match",
             local fd = must_open(t, "Machine\\Audit\\Other", R.QUERY_VALUE)
             sys.close(w, fd)
         end)
-        t:assert_eq(#kmes.of_type(events, "LCS_KEY_OPEN_AUDIT"), 0,
+        t:assert_eq(#kmes.of_type(events, "lcs.audit.key.opened"), 0,
             "the audit ACE names KEY_SET_VALUE, which this open neither asked for nor got")
 
         local matched = kmes.recording(t, vm, function()
             local fd = must_open(t, "Machine\\Audit\\Other", R.SET_VALUE)
             sys.close(w, fd)
         end)
-        t:assert_eq(#kmes.of_type(matched, "LCS_KEY_OPEN_AUDIT"), 1,
+        t:assert_eq(#kmes.of_type(matched, "lcs.audit.key.opened"), 1,
             "and an open that does receive that right matches it")
     end)
 
 -- Backup and restore ---------------------------------------------------------
 
-test("LCS_BACKUP_START is emitted before any subtree data is read",
+test("lcs.audit.backup.started is emitted before any subtree data is read",
     { spec = "PKM *lcs-audit.backup-start.before-any-read" }, function(t)
         local ring = assert(kmes.attach(vm, 0))
         local fd = must_open(t, "Machine\\Tree")
@@ -432,12 +449,15 @@ test("LCS_BACKUP_START is emitted before any subtree data is read",
         sys.close(w, fd)
 
         t:assert(#held >= 1, "the backup is stopped on its first read of subtree data")
-        t:assert(one(mid, "LCS_BACKUP_START"), "and LCS_BACKUP_START is already emitted")
-        t:assert_eq(#kmes.of_type(mid, "LCS_BACKUP_COMPLETE"), 0, "with no completion yet")
+        local started = one(mid, "lcs.audit.backup.started")
+        t:assert(started, "and lcs.audit.backup.started is already emitted")
+        t:assert_eq(started.payload.operation.fd, out,
+            "naming the descriptor the stream is written to as operation.fd")
+        t:assert_eq(#kmes.of_type(mid, "lcs.audit.backup.ended"), 0, "with no completion yet")
         t:assert_eq(r.ret, 0, "the backup then runs to the end: " .. sys.errname(r.errno or 0))
     end)
 
-test("LCS_BACKUP_COMPLETE is emitted after a backup completes, and after one that fails",
+test("lcs.audit.backup.ended is emitted after a backup completes, and after one that fails",
     { spec = "PKM *lcs-audit.backup-complete.after-finish-or-failure" }, function(t)
         local fd = must_open(t, "Machine\\Tree")
         local ok = kmes.recording(t, vm, function()
@@ -445,9 +465,10 @@ test("LCS_BACKUP_COMPLETE is emitted after a backup completes, and after one tha
             t:assert_eq(lcs.backup(src, w, fd, out).ret, 0, "a backup succeeds")
             sys.close(w, out)
         end)
-        local done = one(ok, "LCS_BACKUP_COMPLETE")
+        local done = one(ok, "lcs.audit.backup.ended")
         t:assert(done, "and completes")
-        t:assert_eq(done.payload.result_errno, 0, "carrying a zero result")
+        t:assert_eq(done.payload.outcome.success, true, "carrying a success")
+        t:assert_eq(done.payload.outcome.errno, nil, "and no errno, which is absent on success")
 
         local failed = with_intercept(t, lcs.OP.QUERY_VALUES,
             function() return lcs.STATUS.STORAGE_ERROR, "" end, function()
@@ -456,14 +477,16 @@ test("LCS_BACKUP_COMPLETE is emitted after a backup completes, and after one tha
                 t:assert(r.ret < 0, "a backup that fails after starting")
                 sys.close(w, out)
             end)
-        t:assert(one(failed, "LCS_BACKUP_START"), "still started")
-        local bad = one(failed, "LCS_BACKUP_COMPLETE")
+        t:assert(one(failed, "lcs.audit.backup.started"), "still started")
+        local bad = one(failed, "lcs.audit.backup.ended")
         t:assert(bad, "and still completed")
-        t:assert(bad.payload.result_errno ~= 0, "carrying the failure")
+        t:assert_eq(bad.payload.outcome.success, false, "carrying the failure")
+        t:assert(bad.payload.outcome.errno ~= nil and bad.payload.outcome.errno < 0,
+            "with the error as a negative errno")
         sys.close(w, fd)
     end)
 
-test("LCS_RESTORE_START is emitted before REG_IOC_RESTORE modifies any source state",
+test("lcs.audit.restore.started is emitted before REG_IOC_RESTORE modifies any source state",
     { spec = "PKM *lcs-audit.restore-start.before-any-mutation" }, function(t)
         local fd = must_open(t, "Machine\\Tree")
         local garbage = scratch_file(t, "NOTASTREAM" .. string.rep("\0", 64))
@@ -472,8 +495,11 @@ test("LCS_RESTORE_START is emitted before REG_IOC_RESTORE modifies any source st
             local r = lcs.restore(src, w, fd, garbage)
             t:assert(r.ret < 0, "a stream LCS cannot read fails the restore")
         end)
-        t:assert(one(events, "LCS_RESTORE_START"),
-            "and LCS_RESTORE_START was emitted anyway, before anything was written")
+        local started = one(events, "lcs.audit.restore.started")
+        t:assert(started,
+            "and lcs.audit.restore.started was emitted anyway, before anything was written")
+        t:assert_eq(started.payload.operation.fd, garbage,
+            "naming the descriptor the stream is read from as operation.fd")
         for i = mark, #src.log do
             local op = src.log[i].op
             t:assert(op ~= lcs.OP.SET_VALUE and op ~= lcs.OP.CREATE_ENTRY and
@@ -484,7 +510,7 @@ test("LCS_RESTORE_START is emitted before REG_IOC_RESTORE modifies any source st
         sys.close(w, fd)
     end)
 
-test("LCS_RESTORE_COMPLETE is emitted after a restore completes, and after one that fails",
+test("lcs.audit.restore.ended is emitted after a restore completes, and after one that fails",
     { spec = "PKM *lcs-audit.restore-complete.after-finish-or-failure" }, function(t)
         local fd = must_open(t, "Machine\\Tree")
         local out = scratch_file(t)
@@ -493,18 +519,21 @@ test("LCS_RESTORE_COMPLETE is emitted after a restore completes, and after one t
         local ok = kmes.recording(t, vm, function()
             t:assert_eq(lcs.restore(src, w, fd, out).ret, 0, "a restore succeeds")
         end)
-        local done = one(ok, "LCS_RESTORE_COMPLETE")
+        local done = one(ok, "lcs.audit.restore.ended")
         t:assert(done, "and completes")
-        t:assert_eq(done.payload.result_errno, 0, "carrying a zero result")
+        t:assert_eq(done.payload.outcome.success, true, "carrying a success")
+        t:assert_eq(done.payload.outcome.errno, nil, "and no errno, which is absent on success")
         sys.close(w, out)
 
         local garbage = scratch_file(t, "NOTASTREAM" .. string.rep("\0", 64))
         local failed = kmes.recording(t, vm, function()
             t:assert(lcs.restore(src, w, fd, garbage).ret < 0, "a restore fails")
         end)
-        local bad = one(failed, "LCS_RESTORE_COMPLETE")
+        local bad = one(failed, "lcs.audit.restore.ended")
         t:assert(bad, "and still completes")
-        t:assert(bad.payload.result_errno ~= 0, "carrying the failure")
+        t:assert_eq(bad.payload.outcome.success, false, "carrying the failure")
+        t:assert(bad.payload.outcome.errno ~= nil and bad.payload.outcome.errno < 0,
+            "with the error as a negative errno")
         sys.close(w, garbage)
         sys.close(w, fd)
     end)
@@ -519,7 +548,7 @@ test("backup and restore are audited unconditionally, whatever the SACL on the t
             local again = must_open(t, "Machine\\Plain", lcs.RIGHT.QUERY_VALUE)
             sys.close(w, again)
         end)
-        t:assert_eq(#kmes.of_type(opened, "LCS_KEY_OPEN_AUDIT"), 0,
+        t:assert_eq(#kmes.of_type(opened, "lcs.audit.key.opened"), 0,
             "an ordinary open of this key audits nothing")
 
         local events = kmes.recording(t, vm, function()
@@ -529,8 +558,8 @@ test("backup and restore are audited unconditionally, whatever the SACL on the t
             t:assert_eq(lcs.restore(src, w, fd, out).ret, 0, "and a restore over it")
             sys.close(w, out)
         end)
-        for _, kind in ipairs({ "LCS_BACKUP_START", "LCS_BACKUP_COMPLETE",
-                                "LCS_RESTORE_START", "LCS_RESTORE_COMPLETE" }) do
+        for _, kind in ipairs({ "lcs.audit.backup.started", "lcs.audit.backup.ended",
+                                "lcs.audit.restore.started", "lcs.audit.restore.ended" }) do
             t:assert(one(events, kind), kind .. " is emitted regardless")
         end
         sys.close(w, fd)
@@ -538,16 +567,16 @@ test("backup and restore are audited unconditionally, whatever the SACL on the t
 
 -- Source validation failures ---------------------------------------------------
 
-test("LCS_SOURCE_VALIDATION_FAILURE is emitted when LCS rejects malformed source data",
+test("lcs.source.response.rejected is emitted when LCS rejects malformed source data",
     { spec = "PKM *lcs-audit.validation-failure.on-malformed-source-data" }, function(t)
         local events = kmes.recording(t, vm, function()
             local r = lcs.open_key(src, w, -1, "Machine\\Bad", R.KEY_READ)
             t:assert_eq(r.errno, sys.E.IO, "the operation fails closed with EIO")
         end)
-        local e, n = one(events, "LCS_SOURCE_VALIDATION_FAILURE")
+        local e, n = one(events, "lcs.source.response.rejected")
         t:assert(e, "and the rejection is audited")
         t:assert_eq(n, 1, "once")
-        t:assert_eq(e.payload.validation_class, "malformed_security_descriptor",
+        t:assert_eq(e.payload.outcome.reason, "malformed-security-descriptor",
             "naming what was wrong")
     end)
 
@@ -556,14 +585,19 @@ test("the payload carries the source slot, and the hive, request id, op code and
         local events = kmes.recording(t, vm, function()
             lcs.open_key(src, w, -1, "Machine\\Bad", R.KEY_READ)
         end)
-        local e = one(events, "LCS_SOURCE_VALIDATION_FAILURE")
-        t:assert(e.payload.source_slot ~= nil, "the source slot identifier")
-        t:assert(e.payload.request_id ~= nil, "the RSI request id")
-        t:assert_eq(e.payload.op_code, lcs.OP.LOOKUP, "the operation code")
-        t:assert_eq(#e.payload.key_guid, 16, "and a key GUID, sixteen bytes")
-        t:assert(src.store.keys[e.payload.key_guid] ~= nil,
+        local e = one(events, "lcs.source.response.rejected")
+        local p = e.payload
+        t:assert(p.source.rsi.slot ~= nil, "the source slot identifier")
+        t:assert_eq(p.source.rsi.hive, nil, "and no hive, which this path does not know: " ..
+            "absent rather than nil")
+        t:assert(p.request.id ~= nil, "the RSI request id")
+        t:assert_eq(p.request["op-code"], lcs.OP.LOOKUP, "the operation code")
+        t:assert_eq(#p.object.key.guid, 16, "and a key GUID, sixteen bytes")
+        t:assert(src.store.keys[p.object.key.guid] ~= nil,
             "naming a key this source holds — the parent the failing lookup was against")
-        t:assert(e.payload.validation_class, "with the validation class last")
+        t:assert(p.outcome.reason, "with the validation class as outcome.reason")
+        t:assert(p.subject == nil, "and no caller: this is the one LCS event without one")
+        t:assert_eq(count_keys(p), 4, "source, request, object and outcome, and no others")
     end)
 
 test("the twelve validation classes are the whole vocabulary",
@@ -577,7 +611,7 @@ test("the twelve validation classes are the whole vocabulary",
                 t:assert_eq(r.errno, sys.E.IO, "an unknown RSI status is EIO")
             end)
         seen[unknown] = true
-        t:assert_eq(unknown, "unknown_rsi_status_code", "an unknown status code names itself")
+        t:assert_eq(unknown, "unknown-rsi-status-code", "an unknown status code names itself")
 
         local sd = validation_class(t, lcs.OP.LOOKUP, nil, function()
             lcs.open_key(src, w, -1, "Machine\\Bad", R.KEY_READ)
@@ -614,8 +648,8 @@ test("the three name classes are field-specific: layer names, key names and valu
             t:assert_eq(lcs.query_value(src, w, fd, "One").errno, sys.E.IO, "EIO")
             sys.close(w, fd)
         end)
-        t:assert_eq(value_name, "malformed_value_name",
-            "a bad value-name field is malformed_value_name")
+        t:assert_eq(value_name, "malformed-value-name",
+            "a bad value-name field is malformed-value-name")
 
         local layer_name = validation_class(t, lcs.OP.QUERY_VALUES, function()
             return lcs.STATUS.OK, values_response({
@@ -626,8 +660,8 @@ test("the three name classes are field-specific: layer names, key names and valu
             t:assert_eq(lcs.query_value(src, w, fd, "One").errno, sys.E.IO, "EIO")
             sys.close(w, fd)
         end)
-        t:assert_eq(layer_name, "malformed_layer_name",
-            "a bad layer-name field is malformed_layer_name")
+        t:assert_eq(layer_name, "malformed-layer-name",
+            "a bad layer-name field is malformed-layer-name")
 
         local key_name = validation_class(t, lcs.OP.ENUM_CHILDREN, function()
             local g = lcs.guid()
@@ -641,8 +675,8 @@ test("the three name classes are field-specific: layer names, key names and valu
             t:assert_eq(lcs.enum_subkeys(src, w, fd, 0).errno, sys.E.IO, "EIO")
             sys.close(w, fd)
         end)
-        t:assert_eq(key_name, "malformed_key_name",
-            "and a bad key component or child name is malformed_key_name")
+        t:assert_eq(key_name, "malformed-key-name",
+            "and a bad key component or child name is malformed-key-name")
     end)
 
 test("the structural classes cover a response of the wrong shape, bad metadata and a bad payload",
@@ -654,7 +688,7 @@ test("the structural classes cover a response of the wrong shape, bad metadata a
             t:assert_eq(lcs.open_key(src, w, -1, "Machine\\Values", R.KEY_READ).errno,
                 sys.E.IO, "a response with trailing bytes is EIO")
         end)
-        t:assert_eq(shape, "malformed_response_payload",
+        t:assert_eq(shape, "malformed-response-payload",
             "an operation-specific payload of the wrong shape")
 
         -- An entry naming a GUID the metadata block never describes.
@@ -665,7 +699,7 @@ test("the structural classes cover a response of the wrong shape, bad metadata a
             t:assert_eq(lcs.open_key(src, w, -1, "Machine\\Values", R.KEY_READ).errno,
                 sys.E.IO, "an unreferenced metadata block is EIO")
         end)
-        t:assert_eq(metadata, "malformed_key_metadata",
+        t:assert_eq(metadata, "malformed-key-metadata",
             "and an enumeration whose metadata block is incomplete")
 
         local payload = validation_class(t, lcs.OP.QUERY_VALUES, function()
@@ -677,46 +711,51 @@ test("the structural classes cover a response of the wrong shape, bad metadata a
             t:assert_eq(lcs.query_value(src, w, fd, "One").errno, sys.E.IO, "EIO")
             sys.close(w, fd)
         end)
-        t:assert_eq(payload, "malformed_value_payload",
+        t:assert_eq(payload, "malformed-value-payload",
             "and a value payload with an invalid type")
     end)
 
 -- Configuration -----------------------------------------------------------------
 
-test("a first boot before seed restore emits one LCS_SELF_CONFIG_INVALID per parameter",
+test("a first boot before seed restore emits one lcs.config.value.rejected per parameter",
     { spec = "PKM *lcs-audit.self-config.missing-counts-as-invalid" }, function(t)
-        local boot = kmes.of_type(BOOT_EVENTS, "LCS_SELF_CONFIG_INVALID")
+        local boot = kmes.of_type(BOOT_EVENTS, "lcs.config.value.rejected")
         t:assert_eq(#boot, 19,
             "nineteen events against an empty Registry key, one per parameter")
         local names = {}
         for _, e in ipairs(boot) do
-            t:assert_eq(e.payload.received_kind, "missing", "each says the value was missing")
-            t:assert_eq(e.payload.configuration_parent_path, "Machine\\System\\Registry",
-                "under the configuration parent path")
-            names[e.payload.configuration_name] = true
+            local c = e.payload.config
+            t:assert_eq(c.received.kind, "missing", "each says the value was missing")
+            t:assert_eq(c.key.path, "Machine\\System\\Registry",
+                "under the configuration key")
+            names[c.name] = true
         end
         t:assert_eq(count_keys(names), 19, "nineteen distinct parameters")
     end)
 
 test("the payload names the parameter, the expected type and range, what arrived, and what was kept",
     { spec = "PKM *lcs-audit.self-config.payload-fields" }, function(t)
-        local boot = kmes.of_type(BOOT_EVENTS, "LCS_SELF_CONFIG_INVALID")
+        local boot = kmes.of_type(BOOT_EVENTS, "lcs.config.value.rejected")
         local timeout
         for _, e in ipairs(boot) do
-            if e.payload.configuration_name == "RequestTimeoutMs" then timeout = e end
+            if e.payload.config.name == "RequestTimeoutMs" then timeout = e end
         end
         t:assert(timeout, "the RequestTimeoutMs event is there")
-        local p = timeout.payload
-        t:assert_eq(p.configuration_parent_path, "Machine\\System\\Registry", "the parent path")
-        t:assert_eq(p.configuration_name, "RequestTimeoutMs", "the value name")
-        t:assert_eq(p.expected_type, lcs.TYPE.DWORD, "the expected type, REG_DWORD")
-        t:assert_eq(p.expected_min, 1000, "the expected minimum")
-        t:assert_eq(p.expected_max, 600000, "the expected maximum")
-        t:assert_eq(p.received_kind, "missing", "what was actually received")
-        t:assert_eq(p.retained_value, 30000, "and the value LCS retained instead")
+        t:assert_eq(count_keys(timeout.payload), 1, "every field lives under the one config map")
+        local c = timeout.payload.config
+        t:assert_eq(c.key.path, "Machine\\System\\Registry", "the key path")
+        t:assert_eq(c.name, "RequestTimeoutMs", "the value name")
+        t:assert_eq(c.expected.type, lcs.TYPE.DWORD, "the expected type, REG_DWORD")
+        t:assert_eq(c.expected.min, 1000, "the expected minimum")
+        t:assert_eq(c.expected.max, 600000, "the expected maximum")
+        t:assert_eq(c.received.kind, "missing", "what was actually received")
+        t:assert_eq(count_keys(c.received), 1,
+            "a missing value has no received type or value: absent, not nil")
+        t:assert_eq(c.value, 30000, "and the value LCS retained instead")
+        t:assert_eq(count_keys(c), 5, "key, name, expected, received and value, and no others")
     end)
 
-test("LCS_SELF_CONFIG_INVALID is emitted when LCS rejects an invalid self-configuration value",
+test("lcs.config.value.rejected is emitted when LCS rejects an invalid self-configuration value",
     { spec = "PKM *lcs-audit.self-config-invalid.on-invalid-value" }, function(t)
         local params = must_open(t, lcs.PARAMS_PATH)
         local events = kmes.recording(t, vm, function()
@@ -725,15 +764,17 @@ test("LCS_SELF_CONFIG_INVALID is emitted when LCS rejects an invalid self-config
             src:pump()
             src:pump()
         end)
-        local got = kmes.of_type(events, "LCS_SELF_CONFIG_INVALID")
+        local got = kmes.of_type(events, "lcs.config.value.rejected")
         local mine
         for _, e in ipairs(got) do
-            if e.payload.configuration_name == "RequestTimeoutMs" then mine = e end
+            if e.payload.config.name == "RequestTimeoutMs" then mine = e end
         end
         t:assert(mine, "the refresh audits it")
-        t:assert_eq(mine.payload.received_kind, "dword_out_of_range", "as out of range")
-        t:assert_eq(mine.payload.received_u32, 5, "naming the value received")
-        t:assert_eq(mine.payload.retained_value, 30000, "and the value retained instead")
+        t:assert_eq(mine.payload.config.received.kind, "out-of-range", "as out of range")
+        t:assert_eq(mine.payload.config.received.value, 5, "naming the value received")
+        t:assert_eq(mine.payload.config.received.type, nil,
+            "with no received type, which only a wrong-type value carries")
+        t:assert_eq(mine.payload.config.value, 30000, "and the value retained instead")
         sys.close(w, params)
     end)
 
@@ -765,7 +806,7 @@ test("if KMES cannot retain a key-open event the decision and the fd are unaffec
         end)
     end)
 
-test("LCS_BACKUP_START and LCS_RESTORE_START failing to emit returns EIO and does not start",
+test("the backup and restore start events failing to emit returns EIO and does not start",
     { spec = "PKM *lcs-audit.emit-failure.start-events-block-the-operation",
       covered_by = "kunit:pkm_lcs_kunit_key",
       skip = "a guest cannot make KMES refuse an event: with no consumer attached the " ..
@@ -776,7 +817,7 @@ test("LCS_BACKUP_START and LCS_RESTORE_START failing to emit returns EIO and doe
 
 test("a completion event that cannot be emitted does not change a result already determined",
     { spec = "PKM *lcs-audit.emit-failure.complete-events-are-best-effort" }, function(t)
-        -- No consumer: LCS_BACKUP_COMPLETE reaches nobody, and the backup
+        -- No consumer: lcs.audit.backup.ended reaches nobody, and the backup
         -- still succeeded.
         local fd = must_open(t, "Machine\\Tree")
         local out = scratch_file(t)
@@ -815,11 +856,11 @@ test("a self-config event that cannot be emitted leaves the retained configurati
             src:pump()
         end)
         local mine
-        for _, e in ipairs(kmes.of_type(events, "LCS_SELF_CONFIG_INVALID")) do
-            if e.payload.configuration_name == "SymlinkDepthLimit" then mine = e end
+        for _, e in ipairs(kmes.of_type(events, "lcs.config.value.rejected")) do
+            if e.payload.config.name == "SymlinkDepthLimit" then mine = e end
         end
         t:assert(mine, "the second rejection is audited")
-        t:assert_eq(mine.payload.retained_value, 16,
+        t:assert_eq(mine.payload.config.value, 16,
             "and LCS is still running on the compiled-in default it retained the first time")
         sys.close(w, params)
     end)

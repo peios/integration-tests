@@ -34,7 +34,7 @@ local vm = eventd.boot({ name = "ev-meta" })
 
 local function startups()
     local rows = eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1d ago")
-    table.sort(rows, function(a, b) return a.timestamp < b.timestamp end)
+    table.sort(rows, function(a, b) return a["event.time"] < b["event.time"] end)
     return rows
 end
 
@@ -192,9 +192,10 @@ test("query counts stay in memory until the policy thread flushes them", {
     t:assert(c and c[2] >= before - 2 * 10 ^ 9 and c[2] <= eventd.guest_ns(vm),
         "window_start is nanoseconds since the epoch, at the first query: " .. tostring(c and c[2]))
     -- A payload path and a header field are recorded by their names.
-    query_on("cpu_id", 1)
+    query_on("event.cpu", 1)
     nudge_policy()
-    t:assert(counter("cpu_id"), "a header field is recorded as its column name")
+    t:assert(counter("event.cpu"), "a header field is recorded by its field path")
+    t:assert_eq(counter("cpu_id"), nil, "not by its column name")
 end)
 
 test("the metadata database is written at an applied configuration change, ahead of the policy interval", {
@@ -225,7 +226,7 @@ test("the desired set ranks the most queried field first and marks payload expre
     vm:clock():sleep("2s")
     local a, b = eventd.marker("pa"), eventd.marker("pb")
     query_on(a, 14)
-    query_on("origin_class", 13)
+    query_on("emitter.class", 13)
     query_on(b, 12)
     nudge_policy()
     local rows = eventd.sql(vm, eventd.DB.meta,
@@ -233,13 +234,14 @@ test("the desired set ranks the most queried field first and marks payload expre
     eventd.unset(vm, "AdaptiveIndexCreateThreshold")
     local got = {}
     for _, r in ipairs(rows) do got[r[1]] = { prio = r[2], expr = r[3] } end
-    t:assert(got[a] and got.origin_class and got[b],
+    local class = got["emitter.class"]
+    t:assert(got[a] and class and got[b],
         "all three fields crossed the threshold into the desired set: " .. json.encode(rows))
-    if not (got[a] and got.origin_class and got[b]) then return end
-    t:assert(got[a].prio < got.origin_class.prio and got.origin_class.prio < got[b].prio,
+    if not (got[a] and class and got[b]) then return end
+    t:assert(got[a].prio < class.prio and class.prio < got[b].prio,
         "the most queried field has the lowest priority value: " .. json.encode(rows))
     t:assert_eq(got[a].expr, 1, "a payload path is an expression index")
-    t:assert_eq(got.origin_class.expr, 0, "a header column is a column index")
+    t:assert_eq(class.expr, 0, "a header field is a column index")
 end)
 
 test("graceful shutdown writes each CPU's last committed sequence to sequence_checkpoints", {
@@ -267,7 +269,7 @@ test("graceful shutdown writes each CPU's last committed sequence to sequence_ch
     t:assert(row[4] >= before and row[4] <= after,
         "updated_at is when it was written, within the restart: " .. row[4])
     local shutdowns = eventd.rows(vm, "EVENTS " .. eventd.T.shutdown .. " SINCE 1h ago")
-    table.sort(shutdowns, function(x, y) return x.timestamp < y.timestamp end)
+    table.sort(shutdowns, function(x, y) return x["event.time"] < y["event.time"] end)
     local last = shutdowns[#shutdowns]
     t:assert(last, "the stop recorded a shutdown event")
     local seq
@@ -316,9 +318,9 @@ test("startup loads the persisted counters and desired set and converges the sha
     eventd.stop(vm)
     eventd.edit_store(vm, eventd.DB.meta, string.format([[
 INSERT OR REPLACE INTO index_counters VALUES ('%s', 777, %d);
-INSERT OR REPLACE INTO index_counters VALUES ('process_guid', 5000, %d);
+INSERT OR REPLACE INTO index_counters VALUES ('emitter.process.guid', 5000, %d);
 DELETE FROM desired_indexes;
-INSERT INTO desired_indexes VALUES ('process_guid', 0, 0);
+INSERT INTO desired_indexes VALUES ('emitter.process.guid', 0, 0);
 ]], seed, now, now))
     eventd.start(vm)
     local shard = eventd.shards(vm)[1]

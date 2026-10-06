@@ -29,9 +29,9 @@ local vm = eventd.boot({ name = "ev-runtime" })
 local function changes(key, since)
     local out = {}
     for _, r in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 30m ago")) do
-        if r.key == key and r.timestamp >= since then out[#out + 1] = r end
+        if r.key == key and r["event.time"] >= since then out[#out + 1] = r end
     end
-    table.sort(out, function(a, b) return a.timestamp < b.timestamp end)
+    table.sort(out, function(a, b) return a["event.time"] < b["event.time"] end)
     return out
 end
 
@@ -222,10 +222,10 @@ test("changes arriving while eventd starts are applied after it is ready", {
     eventd.ready(vm)
     local start, stop
     for _, r in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 10m ago")) do
-        if r.timestamp >= since then start = r end
+        if r["event.time"] >= since then start = r end
     end
     for _, r in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.shutdown .. " SINCE 10m ago")) do
-        if r.timestamp >= since then stop = r end
+        if r["event.time"] >= since then stop = r end
     end
     t:assert(start and stop, "the old process's shutdown record and the new one's startup record")
     local last = wait_change("MetricRetentionDays", since, function(r) return r.new_value == "140" end)
@@ -235,11 +235,11 @@ test("changes arriving while eventd starts are applied after it is ready", {
     -- process applies must all follow its startup record: nothing falls
     -- between the two.
     for _, r in ipairs(changes("MetricRetentionDays", since)) do
-        t:assert(r.timestamp < stop.timestamp or r.timestamp > start.timestamp,
+        t:assert(r["event.time"] < stop["event.time"] or r["event.time"] > start["event.time"],
             "no change was applied by the new process before its startup record ("
             .. r.new_value .. ")")
     end
-    t:assert(last.timestamp > start.timestamp, "and the last one came after readiness")
+    t:assert(last["event.time"] > start["event.time"], "and the last one came after readiness")
     eventd.unset(vm, "MetricRetentionDays")
 end)
 

@@ -61,16 +61,16 @@ local function lookup_name(req) return (string.unpack("<s4", req.payload, 17)) e
 
 --- Answer `op` with `responder` for the duration of `call`, recording
 --- the audit events it produced. Returns the call's result and the
---- validation classes named by the LCS_SOURCE_VALIDATION_FAILURE
---- events, in order.
+--- validation classes (`outcome.reason`) named by the
+--- lcs.source.response.rejected events, in order.
 local function under(t, op, responder, call)
     src:intercept(op, responder)
     local result
     local events = kmes.recording(t, vm, function() result = call() end)
     src:intercept(op, nil)
     local classes = {}
-    for _, e in ipairs(kmes.of_type(events, "LCS_SOURCE_VALIDATION_FAILURE")) do
-        classes[#classes + 1] = e.payload and e.payload.validation_class
+    for _, e in ipairs(kmes.of_type(events, "lcs.source.response.rejected")) do
+        classes[#classes + 1] = e.payload and e.payload.outcome and e.payload.outcome.reason
     end
     return result, classes, events
 end
@@ -103,12 +103,12 @@ test("a Security Descriptor that will not parse is malformed data: EIO, an audit
                 return lookup_body({ { guid = TEST_KEY } }, { { guid = TEST_KEY, sd = "\1\2\3\4" } })
             end), open_test)
         t:assert_eq(r.errno, sys.E.IO, "the request returns EIO to its caller")
-        t:assert_eq(classes[1], "malformed_security_descriptor",
+        t:assert_eq(classes[1], "malformed-security-descriptor",
             "and the audit event names the validation class")
-        local ev = kmes.of_type(events, "LCS_SOURCE_VALIDATION_FAILURE")[1]
-        t:assert(ev, "an LCS_SOURCE_VALIDATION_FAILURE was emitted")
-        t:assert(ev.payload.source_slot ~= nil, "naming the source slot")
-        t:assert_eq(ev.payload.op_code, lcs.OP.LOOKUP, "and the operation code")
+        local ev = kmes.of_type(events, "lcs.source.response.rejected")[1]
+        t:assert(ev, "an lcs.source.response.rejected was emitted")
+        t:assert(ev.payload.source.rsi.slot ~= nil, "naming the source slot")
+        t:assert_eq(ev.payload.request["op-code"], lcs.OP.LOOKUP, "and the operation code")
         still_serving(t)
     end)
 
@@ -119,7 +119,7 @@ test("names must be valid for their kind, and the class says which kind",
                 return lookup_body({ { guid = TEST_KEY, layer = "bad\\layer" } },
                     { { guid = TEST_KEY } })
             end), open_test)
-        t:assert_eq(layer_classes[1], "malformed_layer_name", "a layer name field")
+        t:assert_eq(layer_classes[1], "malformed-layer-name", "a layer name field")
 
         local _, child_classes = under(t, lcs.OP.ENUM_CHILDREN, function()
             local body = { string.pack("<I4", 1) }
@@ -129,13 +129,13 @@ test("names must be valid for their kind, and the class says which kind",
                 string.pack("<I1I1I8", 0, 0, 0)
             return lcs.STATUS.OK, table.concat(body)
         end, function() return lcs.enum_subkeys(src, w, FD, 0) end)
-        t:assert_eq(child_classes[1], "malformed_key_name", "a child-name field")
+        t:assert_eq(child_classes[1], "malformed-key-name", "a child-name field")
 
         local r, value_classes = under(t, lcs.OP.QUERY_VALUES, function()
             return lcs.STATUS.OK,
                 values_body({ { name = "bad\0name", type = lcs.TYPE.DWORD, data = lcs.dword(1) } })
         end, function() return lcs.query_value(src, w, FD, "V") end)
-        t:assert_eq(value_classes[1], "malformed_value_name", "a value-name field")
+        t:assert_eq(value_classes[1], "malformed-value-name", "a value-name field")
         t:assert_eq(r.errno, sys.E.IO, "each of them EIO")
         still_serving(t)
     end)
@@ -148,7 +148,7 @@ test("a sequence number at or above the next one LCS would allocate cannot be re
                     { { guid = TEST_KEY } })
             end), open_test)
         t:assert_eq(r.errno, sys.E.IO, "EIO")
-        t:assert_eq(classes[1], "future_sequence_number",
+        t:assert_eq(classes[1], "future-sequence-number",
             "a sequence LCS has not allocated yet is rejected")
         still_serving(t)
     end)
@@ -161,7 +161,7 @@ test("a response payload of the wrong shape, or with trailing bytes, is malforme
             return st, body .. "\0\0"
         end, open_test)
         t:assert_eq(r.errno, sys.E.IO, "trailing bytes after a complete lookup payload: EIO")
-        t:assert_eq(classes[1], "malformed_response_payload", "malformed_response_payload")
+        t:assert_eq(classes[1], "malformed-response-payload", "malformed-response-payload")
 
         -- The rule holds for a status-only payload too: RSI_SET_VALUE
         -- defines none at all, so one byte is one byte too many.
@@ -169,7 +169,7 @@ test("a response payload of the wrong shape, or with trailing bytes, is malforme
             function() return lcs.STATUS.OK, "\0" end,
             function() return lcs.set_value(src, w, FD, "W", lcs.TYPE.DWORD, lcs.dword(2)) end)
         t:assert_eq(r2.errno, sys.E.IO, "a status-only response with a payload: EIO")
-        t:assert_eq(classes2[1], "malformed_response_payload", "malformed_response_payload")
+        t:assert_eq(classes2[1], "malformed-response-payload", "malformed-response-payload")
         still_serving(t)
     end)
 
@@ -188,8 +188,8 @@ test("a per-GUID metadata block must cover exactly the GUIDs the entries name",
                     return lookup_body({ { guid = TEST_KEY } }, case[2])
                 end), open_test)
             t:assert_eq(r.errno, sys.E.IO, "a " .. case[1] .. " metadata entry: EIO")
-            t:assert_eq(classes[1], "malformed_key_metadata",
-                "a " .. case[1] .. " metadata entry: malformed_key_metadata")
+            t:assert_eq(classes[1], "malformed-key-metadata",
+                "a " .. case[1] .. " metadata entry: malformed-key-metadata")
         end
         still_serving(t)
     end)
@@ -201,7 +201,7 @@ test("a HIDDEN entry must carry an all-zero GUID",
                 return lookup_body({ { guid = TEST_KEY, hidden = true } }, { { guid = TEST_KEY } })
             end), open_test)
         t:assert_eq(r.errno, sys.E.IO, "a HIDDEN entry naming a key is refused: EIO")
-        t:assert_eq(classes[1], "malformed_response_payload", "malformed_response_payload")
+        t:assert_eq(classes[1], "malformed-response-payload", "malformed-response-payload")
         still_serving(t)
     end)
 
@@ -212,13 +212,13 @@ test("value payloads are checked for type, tombstone shape and size",
                 values_body({ { name = "V", type = lcs.TYPE.TOMBSTONE, data = "data" } })
         end, function() return lcs.query_value(src, w, FD, "V") end)
         t:assert_eq(r.errno, sys.E.IO, "a tombstone carrying data: EIO")
-        t:assert_eq(classes[1], "malformed_value_payload", "malformed_value_payload")
+        t:assert_eq(classes[1], "malformed-value-payload", "malformed-value-payload")
 
         local r2, classes2 = under(t, lcs.OP.QUERY_VALUES, function()
             return lcs.STATUS.OK, values_body({ { name = "V", type = 12, data = "" } })
         end, function() return lcs.query_value(src, w, FD, "V") end)
         t:assert_eq(r2.errno, sys.E.IO, "a value type that does not exist: EIO")
-        t:assert_eq(classes2[1], "malformed_value_payload", "malformed_value_payload")
+        t:assert_eq(classes2[1], "malformed-value-payload", "malformed-value-payload")
         still_serving(t)
     end)
 
@@ -234,8 +234,8 @@ test("an RSI_DELETE_LAYER orphan list may not carry a nil or duplicated GUID",
             return d
         end)
         t:assert_eq(r.errno, sys.E.IO, "EIO")
-        t:assert_eq(classes[1], "malformed_delete_layer_orphan_list",
-            "malformed_delete_layer_orphan_list")
+        t:assert_eq(classes[1], "malformed-delete-layer-orphan-list",
+            "malformed-delete-layer-orphan-list")
         still_serving(t)
     end)
 
@@ -246,7 +246,7 @@ test("a status code outside the defined vocabulary is malformed data",
             return 99, ""
         end, open_test)
         t:assert_eq(r.errno, sys.E.IO, "status 99 is not in the vocabulary: EIO")
-        t:assert_eq(classes[1], "unknown_rsi_status_code", "unknown_rsi_status_code")
+        t:assert_eq(classes[1], "unknown-rsi-status-code", "unknown-rsi-status-code")
         still_serving(t)
     end)
 
@@ -282,7 +282,7 @@ test("a request may carry trailing fields a source does not recognise; a respons
             function() return lcs.STATUS.OK, "\0" end,
             function() return lcs.set_value(src, w, FD, "Trailing", lcs.TYPE.DWORD, lcs.dword(4)) end)
         t:assert_eq(r2.errno, sys.E.IO, "a response may not be extended that way: EIO")
-        t:assert_eq(classes2[1], "malformed_response_payload", "malformed_response_payload")
+        t:assert_eq(classes2[1], "malformed-response-payload", "malformed-response-payload")
     end)
 
 -- Malformed protocol ----------------------------------------------------
@@ -301,7 +301,7 @@ test("a response shorter than the response header is malformed protocol, and is 
             local r = lcs.open_key(bad, w2, -1, "Truncated\\K", lcs.RIGHT.KEY_READ)
             t:assert_eq(r.errno, sys.E.IO, "the waiter is completed EIO by the teardown")
         end)
-        t:assert_eq(#kmes.of_type(events, "LCS_SOURCE_VALIDATION_FAILURE"), 0,
+        t:assert_eq(#kmes.of_type(events, "lcs.source.response.rejected"), 0,
             "this is not a data validation failure and emits no such event")
         local after = lcs.open_key(bad, w2, -1, "Truncated\\K", lcs.RIGHT.KEY_READ)
         t:assert_eq(after.errno, sys.E.IO,

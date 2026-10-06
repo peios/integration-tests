@@ -36,8 +36,8 @@ test("a kernel emitter writes to the CPU the caller executes on",
                 sys.close(worker, fd)
             end)
             worker:kill(); worker:join()
-            local on0 = kmes.of_type(kmes.drain(r0), "STRATAFS_COPY_UP")
-            local on1 = kmes.of_type(kmes.drain(r1), "STRATAFS_COPY_UP")
+            local on0 = kmes.of_type(kmes.drain(r0), "stratafs.file.copied-up")
+            local on1 = kmes.of_type(kmes.drain(r1), "stratafs.file.copied-up")
             kmes.detach(r0); kmes.detach(r1)
             if not ok then error(err, 0) end
             t:assert_eq(#on1, 1, "the audit event is on cpu 1's ring")

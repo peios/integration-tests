@@ -1,6 +1,6 @@
 -- PKM §2.6 — self-configuration, driven live against a Lua-served
--- Machine hive (helpers/registry): the empty-key bootstrap, the
--- nine-key invalid reports, rejection-not-clamping, name folding, the
+-- Machine hive (helpers/registry): the empty-key bootstrap, the shape
+-- of kmes.config.value.rejected, rejection-not-clamping, name folding, the
 -- watch's scope, and the fallback watch on a hive that grows its KMES
 -- key later.
 --
@@ -39,18 +39,18 @@ end
 
 test("a present-but-empty key reports all four and retains defaults",
     { spec = "PKM *config.empty-key-emits-four" }, function(t)
-        local invalid = kmes.of_type(boot_events, "KMES_SELF_CONFIG_INVALID")
+        local invalid = kmes.of_type(boot_events, "kmes.config.value.rejected")
         t:assert_eq(#invalid, 4, "exactly four reports, one per key")
         local names = {}
         for _, e in ipairs(invalid) do
-            names[e.payload.configuration_name] = e.payload
+            names[e.payload.config.name] = e.payload.config
         end
         for _, want in ipairs({ "BufferCapacity", "MaxEventSize",
                                 "MaxNestingDepth", "MaxEmitRatePerProcess" }) do
             t:assert(names[want], want .. " is reported")
-            t:assert_eq(names[want].received_kind, "missing", "as missing")
+            t:assert_eq(names[want].received.kind, "missing", "as missing")
         end
-        t:assert_eq(names.BufferCapacity.retained_value,
+        t:assert_eq(names.BufferCapacity.value,
             kmes.DEFAULT.BUFFER_CAPACITY, "with the default retained")
         local ring = kmes.attach(vm, 0)
         t:assert_eq(ring.capacity, kmes.DEFAULT.BUFFER_CAPACITY,
@@ -58,29 +58,40 @@ test("a present-but-empty key reports all four and retains defaults",
         kmes.detach(ring)
     end)
 
-test("an invalid-value report is a map of exactly nine keys",
+-- The sorted keys of one decoded map, comma-joined: an exact key set
+-- in a single comparable string.
+local function key_set(map)
+    local keys = {}
+    for k in pairs(map) do keys[#keys + 1] = k end
+    table.sort(keys)
+    return table.concat(keys, ",")
+end
+
+test("an invalid-value report has exactly its fields, nested by path",
     { spec = "PKM *config.invalid-event-nine-keys" }, function(t)
-        local e = kmes.of_type(boot_events, "KMES_SELF_CONFIG_INVALID")[1]
+        local e = kmes.of_type(boot_events, "kmes.config.value.rejected")[1]
         t:assert(e and e.payload, "a report with a decodable payload")
-        local keys = {}
-        for k in pairs(e.payload) do keys[#keys + 1] = k end
-        -- msgpack nil values (received_type, received_value on a
-        -- missing report) decode to Lua nil and vanish from the
-        -- table; the seven non-nil keys plus those two are the nine.
-        t:assert_eq(#keys, 7, "seven non-nil keys on a missing report")
-        for _, want in ipairs({ "configuration_parent_path",
-                "configuration_name", "expected_type", "expected_min",
-                "expected_max", "received_kind", "retained_value" }) do
-            t:assert(e.payload[want] ~= nil, want .. " present")
-        end
-        t:assert_eq(e.payload.configuration_parent_path,
-            "Machine\\System\\KMES", "the parent path is the constant")
+        -- Every field nests under one config map, a map per path
+        -- segment. A missing report's received map holds the kind
+        -- alone: received.type and received.value are absent, not nil.
+        t:assert_eq(key_set(e.payload), "config", "one top-level map")
+        local c = e.payload.config
+        t:assert_eq(key_set(c), "expected,key,name,received,value",
+            "five keys under config")
+        t:assert_eq(key_set(c.key), "path", "config.key holds the path")
+        t:assert_eq(key_set(c.expected), "max,min,type",
+            "config.expected holds type, min and max")
+        t:assert_eq(key_set(c.received), "kind",
+            "config.received holds the kind alone on a missing report")
+        t:assert_eq(c.received.kind, "missing", "which is missing")
+        t:assert_eq(c.key.path, "Machine\\System\\KMES",
+            "the key path is the constant")
     end)
 
 test("self-configuration reports carry origin class 1",
     { spec = "PKM *config.self-events-origin-kmes" }, function(t)
         for _, e in ipairs(kmes.of_type(boot_events,
-                "KMES_SELF_CONFIG_INVALID")) do
+                "kmes.config.value.rejected")) do
             t:assert_eq(e.origin, kmes.ORIGIN.KMES,
                 "KMES reporting on itself is origin 1")
         end
@@ -146,13 +157,13 @@ test("an invalid value is rejected outright, never clamped",
             "while KMES retains the last accepted capacity — not a " ..
             "clamp to a nearby power of two")
         local invalid = kmes.of_type(kmes.drain(ring),
-            "KMES_SELF_CONFIG_INVALID")
+            "kmes.config.value.rejected")
         t:assert_eq(#invalid, 1, "and one report says why")
-        t:assert_eq(invalid[1].payload.configuration_name, "BufferCapacity",
+        t:assert_eq(invalid[1].payload.config.name, "BufferCapacity",
             "naming the value")
-        t:assert_eq(invalid[1].payload.received_value, 100000,
+        t:assert_eq(invalid[1].payload.config.received.value, 100000,
             "carrying what was received")
-        t:assert_eq(invalid[1].payload.retained_value, 131072,
+        t:assert_eq(invalid[1].payload.config.value, 131072,
             "and what stays in force")
         kmes.detach(ring); kmes.detach(after)
         -- Put a valid value back: an invalid one left in the registry
@@ -172,20 +183,20 @@ test("a right-typed value of the wrong length is a wrong-type value",
             registry.qword(65536)).ret, 0,
             "a DWORD carrying eight bytes is written")
         local reports = kmes.of_type(kmes.drain(ring),
-            "KMES_SELF_CONFIG_INVALID")
+            "kmes.config.value.rejected")
         t:assert_eq(#reports, 1, "one report")
-        t:assert_eq(reports[1].payload.received_kind, "wrong_type",
+        t:assert_eq(reports[1].payload.config.received.kind, "wrong-type",
             "classified wrong-type, not out-of-range")
 
         ring.cursor = nil; ring = kmes.attach(vm, 0)
         t:assert_eq(set_value("MaxEventSize", registry.TYPE.QWORD,
             registry.qword(65536)).ret, 0, "a QWORD where DWORD is expected")
-        reports = kmes.of_type(kmes.drain(ring), "KMES_SELF_CONFIG_INVALID")
+        reports = kmes.of_type(kmes.drain(ring), "kmes.config.value.rejected")
         t:assert_eq(#reports, 1, "one report")
-        t:assert_eq(reports[1].payload.received_kind, "wrong_type",
+        t:assert_eq(reports[1].payload.config.received.kind, "wrong-type",
             "same kind")
-        t:assert_eq(reports[1].payload.received_type, registry.TYPE.QWORD,
-            "with the actual type code")
+        t:assert_eq(reports[1].payload.config.received.type,
+            registry.TYPE.QWORD, "with the actual type code")
         -- Restore a valid value.
         t:assert_eq(set_value("MaxEventSize", registry.TYPE.DWORD,
             registry.dword(65536)).ret, 0, "restored")
@@ -208,7 +219,7 @@ test("names fold; unknown names are ignored",
         t:assert_eq(set_value("NotAKmesKey", registry.TYPE.DWORD,
             registry.dword(7)).ret, 0, "an unknown name is written")
         t:assert_eq(#kmes.of_type(kmes.drain(ring),
-            "KMES_SELF_CONFIG_INVALID"), 0,
+            "kmes.config.value.rejected"), 0,
             "and ignored without a report")
         kmes.detach(ring)
         t:assert_eq(kmes.emit(vm, "PIT_FOLD", kmes.nested(12)).ret, 0,

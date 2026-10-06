@@ -127,7 +127,7 @@ test("id is the INTEGER PRIMARY KEY rowid, increasing with each stored event", {
     local a, b = eventd.marker("ida"), eventd.marker("idb")
     local ra = emit_stored(vm, vm, "pt.ev.id", { tag = a }, a)
     local rb = emit_stored(vm, vm, "pt.ev.id", { tag = b }, b)
-    local sa, sb = stored_row(vm, "pt.ev.id", ra.sequence), stored_row(vm, "pt.ev.id", rb.sequence)
+    local sa, sb = stored_row(vm, "pt.ev.id", ra["event.sequence"]), stored_row(vm, "pt.ev.id", rb["event.sequence"])
     t:assert(sb.id > sa.id, "the later event has the larger id: " .. sa.id .. " then " .. sb.id)
     local rowid = eventd.sql(vm, SHARD0, "SELECT rowid FROM events WHERE id = " .. sb.id)
     t:assert_eq(rowid[1][1], sb.id, "id is the rowid itself")
@@ -141,7 +141,7 @@ test("boot_id is the current boot as a 16-byte PCDS-layout GUID", {
     t:assert_eq(decl.boot_id.notnull, 1, "declared NOT NULL")
     local tag = eventd.marker("boot")
     local r = emit_stored(vm, vm, "pt.ev.boot", { tag = tag }, tag)
-    local row = stored_row(vm, "pt.ev.boot", r.sequence)
+    local row = stored_row(vm, "pt.ev.boot", r["event.sequence"])
     local want = eventd.boot_pcds_hex(vm)
     t:assert_eq(#row.boot_id, 32, "sixteen bytes")
     t:assert_eq(row.boot_id, want, "the kernel boot ID with its first three groups byte-reversed")
@@ -162,7 +162,7 @@ test("timestamp is epoch nanoseconds: the emission time for a real event, eventd
     t:assert_eq(r.ret, 0, "emitted")
     local rows = eventd.wait_rows(vm, 'EVENTS pt.ev.ts WHERE tag == "' .. tag .. '" SINCE 10m ago',
         function(rs) return #rs == 1 end)
-    local row = stored_row(vm, "pt.ev.ts", rows[1].sequence)
+    local row = stored_row(vm, "pt.ev.ts", rows[1]["event.sequence"])
     t:assert(row.timestamp >= before and row.timestamp <= after,
         "stamped at emission, inside the emit call: " .. before .. " <= " .. row.timestamp .. " <= " .. after)
     -- A synthetic one: a config change is generated now, by eventd.
@@ -188,9 +188,10 @@ test("sequence is the per-CPU header sequence of a real event and null for synth
     local a, b = eventd.marker("sqa"), eventd.marker("sqb")
     local ra = emit_stored(vm, vm, "pt.ev.seq", { tag = a }, a)
     local rb = emit_stored(vm, vm, "pt.ev.seq", { tag = b }, b)
-    t:assert(math.type(ra.sequence) == "integer" and ra.sequence > 0, "a positive sequence: " .. tostring(ra.sequence))
-    t:assert(rb.sequence > ra.sequence, "later on the same CPU is higher: " .. ra.sequence .. " then " .. rb.sequence)
-    t:assert_eq(stored_row(vm, "pt.ev.seq", rb.sequence).cpu_id, 0, "both on the one CPU")
+    local sa, sb = ra["event.sequence"], rb["event.sequence"]
+    t:assert(math.type(sa) == "integer" and sa > 0, "a positive sequence: " .. tostring(sa))
+    t:assert(sb > sa, "later on the same CPU is higher: " .. sa .. " then " .. sb)
+    t:assert_eq(stored_row(vm, "pt.ev.seq", sb).cpu_id, 0, "both on the one CPU")
     -- Per boot: this boot's receipts start at sequence 1.
     local first = eventd.sql(vm, SHARD0, "SELECT min(first_sequence) FROM receipt_ranges WHERE hex(boot_id) = '" ..
         eventd.boot_pcds_hex(vm) .. "'")
@@ -205,7 +206,7 @@ test("origin_class is the header's origin, 0 for a userspace emitter, and null f
     t:assert_eq(decl.origin_class.type, "INTEGER", "origin_class is an INTEGER")
     local tag = eventd.marker("oc")
     local r = emit_stored(vm, vm, "pt.ev.origin", { tag = tag }, tag)
-    t:assert_eq(stored_row(vm, "pt.ev.origin", r.sequence).origin_class, 0, "kmes_emit from userspace is class 0")
+    t:assert_eq(stored_row(vm, "pt.ev.origin", r["event.sequence"]).origin_class, 0, "kmes_emit from userspace is class 0")
     local classes = eventd.sql(vm, SHARD0,
         "SELECT DISTINCT origin_class FROM events WHERE event_type NOT LIKE 'synthetic.%'")
     for _, c in ipairs(classes) do
@@ -223,7 +224,7 @@ test("event_type is the header's type exactly, or a synthetic.-prefixed string",
     t:assert_eq(decl.event_type.notnull, 1, "declared NOT NULL")
     local tag = eventd.marker("ty")
     local r = emit_stored(vm, vm, "pt.Ev.MixedCase", { tag = tag }, tag)
-    local rows = eventd.sql(vm, SHARD0, "SELECT event_type FROM events WHERE sequence = " .. r.sequence ..
+    local rows = eventd.sql(vm, SHARD0, "SELECT event_type FROM events WHERE sequence = " .. r["event.sequence"] ..
         " AND event_type NOT LIKE 'synthetic.%'")
     t:assert_eq(rows[1][1], "pt.Ev.MixedCase", "stored byte for byte, case kept")
     local null_seq = eventd.sql(vm, SHARD0,
@@ -265,9 +266,9 @@ test("the token and process GUID columns are the emitter's: effective follows im
     worker:kill(); worker:join()
     other:kill(); other:join()
     if not ok then error(err, 0) end
-    local b = stored_row(vm, "pt.ev.ident", rows.before.sequence)
-    local d = stored_row(vm, "pt.ev.ident", rows.during.sequence)
-    local o = stored_row(vm, "pt.ev.ident", rows.other.sequence)
+    local b = stored_row(vm, "pt.ev.ident", rows.before["event.sequence"])
+    local d = stored_row(vm, "pt.ev.ident", rows.during["event.sequence"])
+    local o = stored_row(vm, "pt.ev.ident", rows.other["event.sequence"])
     for _, r in ipairs({ b, d, o }) do
         t:assert_eq(#r.effective_token_guid, 32, "effective token GUID is 16 bytes")
         t:assert_eq(#r.true_token_guid, 32, "true token GUID is 16 bytes")
@@ -291,7 +292,7 @@ test("payload is the raw bytes for a KMES event and a MessagePack map for a synt
     local tag = eventd.marker("pl")
     local bytes = eventd.msgpack({ tag = tag, n = 3 })
     local r = emit_stored(vm, vm, "pt.ev.payload", { raw = bytes }, tag)
-    local row = stored_row(vm, "pt.ev.payload", r.sequence)
+    local row = stored_row(vm, "pt.ev.payload", r["event.sequence"])
     t:assert_eq(row.types.payload, "blob", "stored as a blob")
     t:assert_eq(row.payload, eventd.hex(bytes, true), "the bytes emitted")
     local s = synthetic_row(vm, eventd.T.startup)
@@ -307,7 +308,7 @@ test("every KMES header field is stored in its own column, not in the payload bl
     local tag = eventd.marker("hdr")
     local bytes = eventd.msgpack({ tag = tag })
     local r = emit_stored(vm, vm, "pt.ev.header", { raw = bytes }, tag)
-    local row = stored_row(vm, "pt.ev.header", r.sequence)
+    local row = stored_row(vm, "pt.ev.header", r["event.sequence"])
     for _, c in ipairs({ "boot_id", "timestamp", "cpu_id", "sequence", "origin_class", "event_type",
                          "effective_token_guid", "true_token_guid", "process_guid" }) do
         t:assert(row[c] ~= nil and row[c] ~= "", c .. " has a value of its own")
@@ -358,7 +359,7 @@ test("a KMES payload is stored byte for byte, never decoded, re-encoded or valid
     t:assert_eq(r.ret, 0, "KMES takes it (errno " .. tostring(r.errno) .. ")")
     local rows = eventd.wait_rows(vm, 'EVENTS pt.ev.raw WHERE tag == "' .. tag .. '" SINCE 10m ago',
         function(rs) return #rs == 1 end)
-    local row = stored_row(vm, "pt.ev.raw", rows[1].sequence)
+    local row = stored_row(vm, "pt.ev.raw", rows[1]["event.sequence"])
     t:assert_eq(row.payload, eventd.hex(bytes, true), "the stored blob is the emitted bytes exactly")
 end)
 
@@ -369,24 +370,31 @@ test("payload fields are flattened only when read: the blob keeps the nesting, a
     local bytes = eventd.msgpack({ tag = tag, outer = { inner = 9 } })
     local r = emit_stored(vm, vm, "pt.ev.flat", { raw = bytes }, tag)
     t:assert_eq(r["outer.inner"], 9, "a query presents the flattened path: " .. json.encode(r))
-    local row = stored_row(vm, "pt.ev.flat", r.sequence)
+    local row = stored_row(vm, "pt.ev.flat", r["event.sequence"])
     t:assert_eq(row.payload, eventd.hex(bytes, true), "the stored blob is still the nested map")
     local hit = eventd.rows(vm, 'EVENTS pt.ev.flat WHERE outer.inner == 9 WHERE tag == "' .. tag .. '" SINCE 10m ago')
     t:assert_eq(#hit, 1, "and a predicate on the path matches it")
 end)
 
-test("a payload field named like a header column is hidden from queries but kept in the blob", {
+test("a payload field at a header path is hidden from queries but kept in the blob", {
     spec = "eventd *events.a-payload-field-colliding-with-a-header-name-is-suppressed-but-kept-in-the-blob",
 }, function(t)
     local tag = eventd.marker("coll")
-    local bytes = eventd.msgpack({ tag = tag, event_type = "pt.spoofed", cpu_id = 77 })
+    -- event.type and event.cpu are header paths; emitter.process.guid is
+    -- one too, beside the payload's own emitter.process.pid.
+    local bytes = eventd.msgpack({ tag = tag, event = { type = "pt.spoofed", cpu = 77 },
+        emitter = { process = { guid = "spoofed", pid = 4242 } } })
     local r = emit_stored(vm, vm, "pt.ev.collide", { raw = bytes }, tag)
-    t:assert_eq(r.event_type, "pt.ev.collide", "the header's event_type is what a query sees")
-    t:assert_eq(r.cpu_id, 0, "and the header's cpu_id")
-    local none = eventd.rows(vm, 'EVENTS pt.ev.collide WHERE cpu_id == 77 SINCE 10m ago')
-    t:assert_eq(#none, 0, "the payload's cpu_id matches no predicate")
-    t:assert_eq(stored_row(vm, "pt.ev.collide", r.sequence).payload, eventd.hex(bytes, true),
-        "while the blob still holds both colliding fields")
+    t:assert_eq(r["event.type"], "pt.ev.collide", "the header's event.type is what a query sees")
+    t:assert_eq(r["event.cpu"], 0, "and the header's event.cpu")
+    t:assert_neq(r["emitter.process.guid"], "spoofed", "and the header's emitter.process.guid")
+    t:assert_eq(r["emitter.process.pid"], 4242, "while a payload field beside a header path resolves")
+    local none = eventd.rows(vm, 'EVENTS pt.ev.collide WHERE event.cpu == 77 SINCE 10m ago')
+    t:assert_eq(#none, 0, "the payload's event.cpu matches no predicate")
+    none = eventd.rows(vm, 'EVENTS pt.ev.collide WHERE emitter.process.guid == "spoofed" SINCE 10m ago')
+    t:assert_eq(#none, 0, "nor does its emitter.process.guid")
+    t:assert_eq(stored_row(vm, "pt.ev.collide", r["event.sequence"]).payload, eventd.hex(bytes, true),
+        "while the blob still holds every colliding field")
 end)
 
 test("event_types lists each concrete type committed to the shard", {
@@ -430,8 +438,8 @@ test("a receipt range has the four documented columns, keyed on all four, positi
     local r = emit_stored(vm, vm, "pt.ev.receipt", { tag = tag }, tag)
     local cover = eventd.sql(vm, SHARD0, "SELECT length(boot_id), first_sequence, last_sequence FROM receipt_ranges " ..
         "WHERE hex(boot_id) = '" .. eventd.boot_pcds_hex(vm) .. "' AND cpu_id = 0 AND first_sequence <= " ..
-        r.sequence .. " AND last_sequence >= " .. r.sequence)
-    t:assert_eq(#cover, 1, "one receipt for this boot and CPU 0 covers sequence " .. r.sequence)
+        r["event.sequence"] .. " AND last_sequence >= " .. r["event.sequence"])
+    t:assert_eq(#cover, 1, "one receipt for this boot and CPU 0 covers sequence " .. r["event.sequence"])
     t:assert_eq(cover[1][1], 16, "its boot_id is sixteen bytes")
     local edges = eventd.sql(vm, SHARD0, "SELECT count(*) FROM receipt_ranges r JOIN events e ON " ..
         "e.boot_id = r.boot_id AND e.cpu_id = r.cpu_id AND (e.sequence = r.first_sequence OR e.sequence = r.last_sequence)")
@@ -564,7 +572,7 @@ test("a new type is catalogued once with its first event, however many of it sha
         local rows = eventd.wait_rows(craft, 'EVENTS ' .. ty .. ' WHERE tag == "' .. tag .. '" SINCE 10m ago',
             function(rs) return #rs == 3 end)
         seqs = {}
-        for _, row in ipairs(rows) do seqs[#seqs + 1] = row.sequence end
+        for _, row in ipairs(rows) do seqs[#seqs + 1] = row["event.sequence"] end
         table.sort(seqs)
         local one = eventd.sql(craft, SHARD0, "SELECT count(*) FROM receipt_ranges WHERE cpu_id = 0 AND " ..
             "first_sequence <= " .. seqs[1] .. " AND last_sequence >= " .. seqs[3])
@@ -690,7 +698,7 @@ test("a receipt accounts for every stored event and every gap it commits with", 
     t:assert(#gaps >= 1, "there is a gap record")
     for _, g in ipairs(gaps) do
         local cover = eventd.sql(craft, SHARD0, "SELECT count(*) FROM receipt_ranges WHERE hex(boot_id) = '" ..
-            boot .. "' AND cpu_id = " .. g.cpu_id .. " AND first_sequence <= " .. g.first_sequence ..
+            boot .. "' AND cpu_id = " .. g["event.cpu"] .. " AND first_sequence <= " .. g.first_sequence ..
             " AND last_sequence >= " .. g.last_sequence)
         t:assert_eq(cover[1][1], 1, "the gap " .. g.first_sequence .. "-" .. g.last_sequence .. " is receipted")
     end
@@ -763,20 +771,20 @@ test("retention removes a type its deletes orphaned, once rechecked, and never a
     craft:clock():sleep("3s")
     t:assert(catalogued(ORPHAN), "with idx_events_event_type not material, the orphan check was skipped")
 
-    -- Indexed: query event_type 22 times, lower the create threshold to 20
+    -- Indexed: query event.type 22 times, lower the create threshold to 20
     -- (the drop threshold's default is 10) — an applied change, which
     -- makes the policy run — and wait for the quiet writer to build the
     -- index.
     for _ = 1, 22 do
-        local r = eventd.query(craft, 'EVENTS pt.ev.q WHERE event_type == "pt.x" SINCE 1h ago')
-        t:assert(r.ok, "a query on event_type: " .. tostring(r.stderr))
+        local r = eventd.query(craft, 'EVENTS pt.ev.q WHERE event.type == "pt.x" SINCE 1h ago')
+        t:assert(r.ok, "a query on event.type: " .. tostring(r.stderr))
     end
     local function applied(key, value)
         local since = eventd.guest_ns(craft)
         eventd.set(craft, key, "dword:" .. value):assert_ok()
         eventd.wait_rows(craft, "EVENTS " .. eventd.T.config_change
             .. ' WHERE key == "' .. key .. '" AND new_value == "' .. value .. '" SINCE 10m ago', function(rs)
-                for _, r in ipairs(rs) do if r.timestamp >= since then return true end end
+                for _, r in ipairs(rs) do if r["event.time"] >= since then return true end end
                 return false
             end)
     end

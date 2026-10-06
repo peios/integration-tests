@@ -131,7 +131,7 @@ local function account(lo, hi)
         end
     end
     for _, q in ipairs(eventd.rows(vm, string.format(
-        "EVENTS %s WHERE cpu_id == 0 SINCE 1h ago TAKE 10000", eventd.T.gap))) do
+        "EVENTS %s WHERE event.cpu == 0 SINCE 1h ago TAKE 10000", eventd.T.gap))) do
         gaps[#gaps + 1] = { q.first_sequence, q.last_sequence }
     end
     local lost, hole, first_lost = 0, nil, nil
@@ -202,7 +202,7 @@ test("a KMES event reaches a committed shard row through a drain thread and a wr
     local committed = eventd.sql(vm, eventd.shards(vm)[1], string.format(
         "SELECT sequence, cpu_id FROM events WHERE event_type = '%s'", event_type))
     t:assert_eq(#committed, 1, "it is a committed row in the shard database")
-    t:assert_eq(committed[1][1], rows[1].sequence, "carrying the KMES sequence it was read with")
+    t:assert_eq(committed[1][1], rows[1]["event.sequence"], "carrying the KMES sequence it was read with")
 end)
 
 -- ---------------------------------------------------------------------------

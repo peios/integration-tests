@@ -1,7 +1,7 @@
 -- PKM §3.2.7 — LogonSessions: the object a token's auth_id names, how it
 -- is created and torn down, the rollback for an empty one, and what
 -- revocation does not exist. Teardown is witnessed through the
--- logon-session-destroyed event on the KMES ring.
+-- kacs.session.destroyed event on the KMES ring.
 
 local sys = require("helpers.sys")
 local token = require("helpers.token")
@@ -11,15 +11,15 @@ local access = require("helpers.access")
 local vm = provium:vm("v", "kernel-only"):boot()
 
 local TCB = token.bit(token.PRIV.TCB)
-local DESTROYED = "logon-session-destroyed"
+local DESTROYED = "kacs.session.destroyed"
 
---- Events of the destroyed type carrying `sid` in their payload.
+--- Events of the destroyed type whose `object.session.id` is `sid`.
 local function destroyed_for(events, sid)
     local out = {}
     for _, e in ipairs(kmes.of_type(events, DESTROYED)) do
         local p = e.payload
-        local id = p and (p.logon_session_id or p.session_id or p.auth_id or p.id)
-        if id == sid or (type(p) == "table" and p.session and p.session.id == sid) then out[#out + 1] = e end
+        local session = type(p) == "table" and type(p.object) == "table" and p.object.session
+        if type(session) == "table" and session.id == sid then out[#out + 1] = e end
     end
     return out
 end
@@ -63,10 +63,11 @@ test("several tokens may share one session",
         sys.close(vm, a); sys.close(vm, b); sys.close(vm, c)
     end)
 
-test("freeing the last token destroys the session and emits logon-session-destroyed",
+test("freeing the last token destroys the session and emits kacs.session.destroyed",
     { spec = "PKM *token.session.destroyed-with-last-token" }, function(t)
         local ring = assert(kmes.attach(vm, 0))
-        local a, sid = assert(token.mint(vm, {}))
+        local a, sid = assert(token.mint(vm, { logon_type = token.LOGON_TYPE.NETWORK,
+            auth_package = "Kerberos" }))
         local b = assert(token.create(vm, { auth_id = sid }))
         kmes.drain(ring)
         sys.close(vm, a)
@@ -75,6 +76,10 @@ test("freeing the last token destroys the session and emits logon-session-destro
         local ev = destroyed_for(kmes.drain(ring), sid)
         t:assert_eq(#ev, 1, "the last close destroys the session: exactly one event")
         t:assert_eq(ev[1].origin, kmes.ORIGIN.KACS, "from KACS")
+        local s = ev[1].payload.object.session
+        t:assert_eq(s["logon-type"], "network", "naming the logon type")
+        t:assert_eq(s["auth-package"], "Kerberos", "the authentication package")
+        t:assert_eq(s.user.sid, token.SID.TEST_USER, "and whose session it was")
         local again, errno = token.create(vm, { auth_id = sid })
         t:assert(not again, "and the session id no longer resolves: " .. sys.errname(errno or 0))
         kmes.detach(ring)
@@ -103,14 +108,14 @@ test("destroying an empty session requires SeTcbPrivilege and an empty session",
         t:assert_eq(token.destroy_empty_logon_session(vm, fresh).ret, 0, "an empty session destroys cleanly")
     end)
 
-test("the rollback emits the same logon-session-destroyed event",
+test("the rollback emits the same kacs.session.destroyed event",
     { spec = "PKM *token.session.destroy-empty.emits-event" }, function(t)
         local ring = assert(kmes.attach(vm, 0))
         local sid = assert(token.create_logon_session(vm, {}))
         kmes.drain(ring)
         t:assert_eq(token.destroy_empty_logon_session(vm, sid).ret, 0, "destroy")
         local ev = destroyed_for(kmes.drain(ring), sid)
-        t:assert_eq(#ev, 1, "one logon-session-destroyed event")
+        t:assert_eq(#ev, 1, "one kacs.session.destroyed event")
         kmes.detach(ring)
     end)
 

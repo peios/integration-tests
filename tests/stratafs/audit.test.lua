@@ -13,8 +13,16 @@ local stratafs = require("helpers.stratafs")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
-local COPY_UP = "STRATAFS_COPY_UP"
-local REFUSED = "STRATAFS_MUTATION_REFUSED"
+local COPY_UP = "stratafs.file.copied-up"
+local REFUSED = "stratafs.mutation.refused"
+
+--- The number of keys a decoded msgpack map carries. A key the encoder
+--- left out is absent, so this is the map length on the wire.
+local function count(map)
+    local n = 0
+    for _ in pairs(map) do n = n + 1 end
+    return n
+end
 
 local function only(t, events, event_type, why)
     local matching = kmes.of_type(events, event_type)
@@ -42,16 +50,27 @@ test("every copy-up emits a record, successful or not",
                 "emitted through KACS's kernel-only emitter")
             local p = e.payload
             t:assert(p, "with a decodable payload")
-            t:assert_eq(p.path, "/f", "the relative path, slash-prefixed")
-            t:assert_eq(p.provider_index, 1, "the stratum copied from")
-            t:assert_eq(p.provider_stratum, s:in_stratum("src"), "and its path")
-            t:assert_eq(p.create_index, 0, "the stratum copied into")
-            t:assert_eq(p.create_stratum, s:in_stratum("dest"), "and its path")
-            t:assert_eq(p.result_errno, 0, "and a zero result")
+            t:assert_eq(count(p), 4,
+                "object, source, destination and outcome, and nothing else")
+            t:assert_eq(count(p.object), 1, "the object is its file")
+            t:assert_eq(count(p.object.file), 1, "named by one path")
+            t:assert_eq(p.object.file["path-relative"], "/f",
+                "the relative path, slash-prefixed")
+            t:assert_eq(count(p.source.stratum), 2, "the source stratum's two fields")
+            t:assert_eq(p.source.stratum.index, 1, "the stratum copied from")
+            t:assert_eq(p.source.stratum.path, s:in_stratum("src"), "and its path")
+            t:assert_eq(count(p.destination.stratum), 2,
+                "the destination stratum's two fields")
+            t:assert_eq(p.destination.stratum.index, 0, "the stratum copied into")
+            t:assert_eq(p.destination.stratum.path, s:in_stratum("dest"),
+                "and its path")
+            t:assert_eq(p.outcome.success, true, "and a successful outcome")
+            t:assert_eq(count(p.outcome), 1, "with no errno on success")
 
             -- The caller's identity is deliberately not among the keys:
             -- it is in the envelope, once, for every event.
-            t:assert(p.uid == nil and p.token == nil and p.caller == nil,
+            t:assert(p.uid == nil and p.token == nil and p.caller == nil
+                and p.subject == nil and p.emitter == nil,
                 "and no identity key, which the envelope carries instead")
         end)
     end)
@@ -59,7 +78,7 @@ test("every copy-up emits a record, successful or not",
 test("a failed copy-up emits a record carrying its errno",
     { spec = "PKM *audit.copy-up-always-emitted" }, function(t)
         -- Successful or not, and the failure is carried as a negative
-        -- errno in the same six keys. The reachable failure is §4.5.2's
+        -- errno beside a false outcome. The reachable failure is §4.5.2's
         -- staleness rule: two descriptors on one object, the first
         -- copies it up, and the second's write then finds its object is
         -- no longer the provider.
@@ -83,13 +102,19 @@ test("a failed copy-up emits a record carrying its errno",
             t:assert_eq(#records, 2,
                 "both copy-ups are recorded, the one that worked and the " ..
                 "one that did not")
-            t:assert_eq(records[1].payload.result_errno, 0,
-                "the first with a zero result")
-            t:assert_eq(records[2].payload.result_errno, -sys.E.STALE,
-                "and the second with its errno")
-            t:assert_eq(records[2].payload.path, "/f",
+            t:assert_eq(records[1].payload.outcome.success, true,
+                "the first successful")
+            t:assert_eq(records[1].payload.outcome.errno, nil,
+                "with no errno")
+            t:assert_eq(records[2].payload.outcome.success, false,
+                "and the second failed")
+            t:assert_eq(records[2].payload.outcome.errno, -sys.E.STALE,
+                "with its errno")
+            t:assert_eq(count(records[2].payload), 4,
+                "in the same four groups as a success")
+            t:assert_eq(records[2].payload.object.file["path-relative"], "/f",
                 "naming the same path")
-            t:assert_eq(records[2].payload.provider_stratum, s:in_stratum("src"),
+            t:assert_eq(records[2].payload.source.stratum.path, s:in_stratum("src"),
                 "and the same provider")
         end)
     end)
@@ -138,7 +163,7 @@ test("every record is stamped with the causing task's tokens",
 
             t:assert_neq(b.process_guid, a.process_guid,
                 "a different process is recorded for a different causer")
-            t:assert_eq(b.payload.path, "/by_worker",
+            t:assert_eq(b.payload.object.file["path-relative"], "/by_worker",
                 "and the payload names what it copied")
         end)
     end)
@@ -156,21 +181,25 @@ test("a mutation refused by the mount's arrangement emits a record",
 
             local e = only(t, events, REFUSED, "an EROFS write")
             local p = e.payload
-            t:assert_eq(p.path, "/f", "the path")
-            t:assert_eq(p.operation, "write", "the operation name")
-            t:assert_eq(p.provider_index, 0, "the provider index")
-            t:assert_eq(p.provider_stratum, s:in_stratum("only"),
+            t:assert_eq(count(p), 4,
+                "object, operation, source and outcome, and nothing else")
+            t:assert_eq(p.object.file["path-relative"], "/f", "the path")
+            t:assert_eq(p.operation.name, "write", "the operation name")
+            t:assert_eq(count(p.source.stratum), 2, "the provider's two fields")
+            t:assert_eq(p.source.stratum.index, 0, "the provider index")
+            t:assert_eq(p.source.stratum.path, s:in_stratum("only"),
                 "the provider stratum's path")
-            t:assert_eq(p.result_errno, -sys.E.ROFS, "the errno")
-            t:assert_eq(p.deferred, false, "and whether it was deferred")
+            t:assert_eq(count(p.outcome), 2, "the outcome's two fields")
+            t:assert_eq(p.outcome.errno, -sys.E.ROFS, "the errno")
+            t:assert_eq(p.outcome.deferred, false, "and whether it was deferred")
         end)
     end)
 
 test("a refusal before a provider is known names none",
     { spec = "PKM *audit.arrangement-refusal-emitted" }, function(t)
-        -- Creation, tmpfile, the heads of link and rename. They report
-        -- a provider index of -1 and a provider_stratum of msgpack nil,
-        -- so a reader can tell "no provider was involved" from "the
+        -- Creation, tmpfile, the heads of link and rename. They carry
+        -- no source stratum at all — neither index nor path — so a
+        -- reader can tell "no provider was involved" from "the
         -- provider's path is empty". The two fields agree.
         stratafs.with(vm, "audit-no-provider", {
             { name = "only", flags = { "ro" }, entries = { anchor = "a" } },
@@ -182,10 +211,11 @@ test("a refusal before a provider is known names none",
             end)
 
             local e = only(t, events, REFUSED, "a creation refusal")
-            t:assert_eq(e.payload.provider_index, -1,
-                "the provider index is -1")
-            t:assert_eq(e.payload.provider_stratum, nil,
-                "and the provider stratum is msgpack nil, not an empty string")
+            t:assert_eq(e.payload.source, nil,
+                "the provider index and stratum path are both absent, " ..
+                "not -1 or an empty string")
+            t:assert_eq(count(e.payload), 3,
+                "leaving object, operation and outcome")
         end)
     end)
 
@@ -240,10 +270,10 @@ test("a deferred deletion refused by the arrangement is audited",
                 "the deletion was refused and the object left in place")
 
             local e = only(t, events, REFUSED, "a refused deferred deletion")
-            t:assert_eq(e.payload.deferred, true, "with the deferred flag set")
-            t:assert_eq(e.payload.operation, "unlink", "naming the operation")
-            t:assert_eq(e.payload.path, "/d/f", "and the path")
-            t:assert_eq(e.payload.result_errno, -sys.E.ROFS,
+            t:assert_eq(e.payload.outcome.deferred, true, "with the deferred flag set")
+            t:assert_eq(e.payload.operation.name, "unlink", "naming the operation")
+            t:assert_eq(e.payload.object.file["path-relative"], "/d/f", "and the path")
+            t:assert_eq(e.payload.outcome.errno, -sys.E.ROFS,
                 "and carrying the errno nobody was left to receive")
         end)
     end)
@@ -276,9 +306,9 @@ test("a refused deferred deletion is audited on any non-zero result",
 
             local e = only(t, events, REFUSED,
                 "a deferred deletion refused by an access check")
-            t:assert_eq(e.payload.deferred, true, "with the deferred flag set")
-            t:assert_neq(e.payload.result_errno, 0,
-                "carrying the non-zero result")
+            t:assert_eq(e.payload.outcome.deferred, true, "with the deferred flag set")
+            t:assert(e.payload.outcome.errno and e.payload.outcome.errno < 0,
+                "carrying the non-zero result, as a negative errno")
         end)
     end)
 

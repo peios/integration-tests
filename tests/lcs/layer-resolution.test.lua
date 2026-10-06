@@ -421,7 +421,7 @@ test("every entry in a response is sequence-checked, whatever layer it names",
         sys.close(w, fd)
     end)
 
-test("a sequence validation failure is EIO and an LCS_SOURCE_VALIDATION_FAILURE audit event",
+test("a sequence validation failure is EIO and an lcs.source.response.rejected audit event",
     { spec = "PKM *layer.resolution.sequence-validation-failure-is-eio" },
     function(t)
         local fd = open(t, "Machine\\Software\\Test\\Future")
@@ -430,8 +430,8 @@ test("a sequence validation failure is EIO and an LCS_SOURCE_VALIDATION_FAILURE 
             q = lcs.query_value(src, w, fd, "Ahead")
         end)
         t:assert_eq(q.errno, sys.E.IO, "the caller sees EIO")
-        t:assert(#kmes.of_type(events, "LCS_SOURCE_VALIDATION_FAILURE") >= 1,
-            "and LCS emits an LCS_SOURCE_VALIDATION_FAILURE audit event")
+        t:assert(#kmes.of_type(events, "lcs.source.response.rejected") >= 1,
+            "and LCS emits an lcs.source.response.rejected audit event")
         sys.close(w, fd)
     end)
 

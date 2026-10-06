@@ -12,9 +12,12 @@
 -- the witness is there, the rejection has happened.
 --
 -- AccessChecks are counted through KACS's own audit: a descriptor with a
--- SACL success/failure audit ACE makes every check against it emit an
--- `access-audit` event whose object context is "metric-publish:<pattern>",
--- and eventd stores those like any other event.
+-- SACL success/failure audit ACE makes every check against it emit a
+-- `kacs.audit.access.checked` event naming the object eventd passed as the
+-- check's audit context (`object.kind` `metric-namespace`,
+-- `object.metric-namespace.pattern` the pattern), with `access.requested`
+-- EVENTD_PUBLISH for a publication check rather than a read; eventd stores
+-- those like any other event.
 --
 -- The rejection counters live only in eventd's memory and are read from
 -- its diagnostic dump (§8.5), which SIGQUIT writes to standard error on the
@@ -100,9 +103,11 @@ end
 -- Counting checks
 -- ---------------------------------------------------------------------------
 
+--- Publication checks against the metric-namespace pattern `ctx`.
 local function audits(ctx)
-    local r = eventd.query(vm, 'EVENTS access-audit WHERE object_context == x"' .. eventd.hex(ctx)
-        .. '" SINCE 1h ago TAKE 100000 SELECT sequence')
+    local r = eventd.query(vm, 'EVENTS kacs.audit.access.checked WHERE object.kind == "metric-namespace"'
+        .. ' WHERE object.metric-namespace.pattern == "' .. ctx .. '" WHERE access.requested == ' .. PUBLISH
+        .. ' SINCE 1h ago TAKE 100000 SELECT event.sequence')
     assert(r.ok, "audit query: " .. tostring(r.stderr))
     return #r.rows
 end
@@ -118,11 +123,12 @@ local function settled(ctx)
     return last
 end
 
---- An audited publication descriptor for `pattern`; returns its context.
+--- An audited publication descriptor for `pattern`; returns the pattern
+--- its checks are audited against.
 local function audited(pattern, aces)
     eventd.put_descriptor(vm, "Metrics", pattern, access.simple(aces, { sacl = AUDIT }))
     -- Prove it is in force: a publish under it is audited.
-    local ctx = "metric-publish:" .. pattern
+    local ctx = pattern
     local ok = wait_until(function()
         publish(vm, { record(pattern .. "." .. eventd.marker("probe")) })
         witness()
@@ -160,28 +166,31 @@ test("an event's identity stamps are the kernel's, whatever the payload says", {
 }, function(t)
     local ty = eventd.marker("ptstamp")
     local forged = "{11111111-2222-3333-4444-555555555555}"
-    local lie = { process_guid = forged, effective_token_guid = forged, true_token_guid = forged,
-                  origin_class = 7, cpu_id = 99, tag = "agent" }
+    -- A payload written at every header path it can name.
+    local lie = { emitter = { process = { guid = forged }, token = { guid = forged },
+                              ["true-token"] = { guid = forged }, class = 7 },
+                  event = { cpu = 99 }, tag = "agent" }
     eventd.emit(vm, ty, lie)
     eventd.emit(vm, ty, { tag = "agent2" })
     local audit = token.bit(token.PRIV.AUDIT)
     token.as_principal(t, vm, {
         groups = groups_of({ EVERYONE, AU }), privs_present = audit | NOTIFY, privs_enabled = audit | NOTIFY,
     }, function(w)
-        local r = eventd.emit(w, ty, { tag = "worker", process_guid = forged })
+        local r = eventd.emit(w, ty, { tag = "worker", emitter = { process = { guid = forged } } })
         t:assert_eq(r.ret, 0, "the worker emits: errno " .. tostring(r.errno))
     end)
     local rows = eventd.wait_rows(vm, "EVENTS " .. ty .. " SINCE 1h ago", function(rs) return #rs == 3 end)
     local by = {}
     for _, r in ipairs(rows) do by[r.tag] = r end
-    for _, f in ipairs({ "process_guid", "effective_token_guid", "true_token_guid" }) do
+    for _, f in ipairs({ "emitter.process.guid", "emitter.token.guid", "emitter.true-token.guid" }) do
         t:assert(by.agent[f] ~= forged, f .. " is not the forged value: " .. tostring(by.agent[f]))
         t:assert_eq(by.agent[f], by.agent2[f], f .. " is the same for two emits from one process and token")
     end
-    t:assert(by.agent.cpu_id ~= 99 and by.agent.origin_class ~= 7, "nor are cpu_id and origin_class the payload's")
-    t:assert(by.worker.process_guid ~= by.agent.process_guid,
-        "another process's event carries its own process_guid")
-    t:assert(by.worker.effective_token_guid ~= by.agent.effective_token_guid,
+    t:assert(by.agent["event.cpu"] ~= 99 and by.agent["emitter.class"] ~= 7,
+        "nor are event.cpu and emitter.class the payload's")
+    t:assert(by.worker["emitter.process.guid"] ~= by.agent["emitter.process.guid"],
+        "another process's event carries its own emitter.process.guid")
+    t:assert(by.worker["emitter.token.guid"] ~= by.agent["emitter.token.guid"],
         "and its own token's identity")
 end)
 
@@ -451,7 +460,7 @@ test("a recurring name is checked once per token and name, denials included", {
 
     -- Denials: a name nobody may publish, sent five times.
     eventd.put_descriptor(vm, "Metrics", p .. ".d", access.simple({ allow(PUBLISH, NOBODY) }, { sacl = AUDIT }))
-    local dctx = "metric-publish:" .. p .. ".d"
+    local dctx = p .. ".d"
     wait_until(function()
         publish(vm, { record(p .. ".d.probe" .. eventd.marker("x")) })
         witness()

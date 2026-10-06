@@ -336,23 +336,27 @@ test("the effective axes used for the verdict are the ones recorded in the event
         kmes.drain(ring)
         local denied = as_subject({ audit_policy = policy }, sd, READ,
             { pip_type = 512, pip_trust = 512 })
-        local a = kmes.of_type(kmes.drain(ring), "access-audit")
+        local a = kmes.of_type(kmes.drain(ring), "kacs.audit.access.checked")
         local granted = as_subject({ audit_policy = policy }, sd, READ,
             { pip_type = 2048, pip_trust = 2048 })
-        local b = kmes.of_type(kmes.drain(ring), "access-audit")
+        local b = kmes.of_type(kmes.drain(ring), "kacs.audit.access.checked")
         kmes.detach(ring)
         t:log(string.format("denied ret=%d events=%d, granted ret=%d events=%d",
             denied.ret, #a, granted.ret, #b))
         t:assert(denied.denied, "(512,512) does not dominate a S-1-19-1024-1024 label: ret="
             .. denied.ret .. " " .. sys.errname(denied.errno or 0))
-        t:assert_eq(#a, 1, "one forced access-audit event")
-        t:assert_eq(a[1].payload.subject.pip_type, 512, "carrying the type used for the verdict")
-        t:assert_eq(a[1].payload.subject.pip_trust, 512, "and the trust used for it")
-        t:assert_eq(a[1].payload.success, false, "and the verdict it describes")
+        t:assert_eq(#a, 1, "one forced kacs.audit.access.checked event")
+        t:assert_eq(a[1].payload.subject.pip.type, 512, "carrying the type used for the verdict")
+        t:assert_eq(a[1].payload.subject.pip.trust, 512, "and the trust used for it")
+        t:assert_eq(a[1].payload.outcome.success, false, "and the verdict it describes")
+        t:assert_eq(a[1].payload.fields.attestation.userspace, true,
+            "marked as carrying a PIP state the caller supplied")
         t:assert(granted.ok, "(2048,2048) dominates: " .. sys.errname(granted.errno or 0))
-        t:assert_eq(#b, 1, "one forced access-audit event")
-        t:assert_eq(b[1].payload.subject.pip_type, 2048, "recording the other context")
-        t:assert_eq(b[1].payload.subject.pip_trust, 2048, "on both axes")
-        t:assert_eq(b[1].payload.success, true, "agreeing with the verdict again")
+        t:assert_eq(#b, 1, "one forced kacs.audit.access.checked event")
+        t:assert_eq(b[1].payload.subject.pip.type, 2048, "recording the other context")
+        t:assert_eq(b[1].payload.subject.pip.trust, 2048, "on both axes")
+        t:assert_eq(b[1].payload.outcome.success, true, "agreeing with the verdict again")
+        t:assert_eq(b[1].payload.fields.attestation.userspace, true,
+            "and marked as asserted again")
     end)
 

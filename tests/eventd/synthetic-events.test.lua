@@ -103,7 +103,8 @@ test("a restart writes shutdown then startup straight into shard 0, and nothing 
     end
     t:assert(#through_kmes > 0, "while the watch did see KMES traffic (" .. #through_kmes .. " events)")
 
-    local rows = synthetic_rows(vm, "timestamp > " .. before.timestamp .. " AND timestamp < " .. after.timestamp)
+    before, after = before["event.time"], after["event.time"]
+    local rows = synthetic_rows(vm, "timestamp > " .. before .. " AND timestamp < " .. after)
     local shutdown = of_type(rows, eventd.T.shutdown)
     local startup = of_type(rows, eventd.T.startup)
     local change = of_type(rows, eventd.T.config_change)
@@ -113,7 +114,7 @@ test("a restart writes shutdown then startup straight into shard 0, and nothing 
     t:assert(shutdown[1].timestamp < startup[1].timestamp, "shutdown came first")
     for _, r in ipairs(rows) do
         t:assert(r.type:find("^synthetic%.%w"), "its type carries the synthetic. prefix: " .. r.type)
-        t:assert(r.timestamp > before.timestamp and r.timestamp < after.timestamp,
+        t:assert(r.timestamp > before and r.timestamp < after,
             r.type .. " carries a realtime timestamp from when eventd made it")
     end
     -- The prefix is the only marker: the table has no record-kind column.
@@ -150,10 +151,11 @@ test("synthetic records carry no KMES header and no sequence, and sort among eve
 
     local order = {}
     for _, r in ipairs(eventd.rows(vm, "EVENTS SINCE 2m ago TAKE 5000")) do
-        if r.event_type == a or r.event_type == b
-            or (r.event_type == eventd.T.config_change and r.new_value == "11") then
-            order[#order + 1] = r.event_type == eventd.T.config_change and "change" or
-                (r.event_type == a and "a" or "b")
+        local ty = r["event.type"]
+        if ty == a or ty == b
+            or (ty == eventd.T.config_change and r.new_value == "11") then
+            order[#order + 1] = ty == eventd.T.config_change and "change" or
+                (ty == a and "a" or "b")
         end
     end
     t:assert_eq(table.concat(order, ","), "b,change,a",

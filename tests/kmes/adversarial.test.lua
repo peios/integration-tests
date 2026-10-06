@@ -263,18 +263,20 @@ test("writing the current capacity swaps nothing",
         kmes.detach(ring)
     end)
 
-test("a capacity below the minimum is a u64 range rejection",
+test("a capacity below the minimum is a range rejection",
     { spec = "PKM *config.invalid-rejected-not-clamped" }, function(t)
         -- 32768 is a power of two but under the 64 KiB floor: the
         -- report names the range kind, and nothing rounds it up.
         local ring = kmes.attach(vm, 0)
         t:assert_eq(set_value("BufferCapacity", registry.TYPE.QWORD,
             registry.qword(32768)).ret, 0, "written")
-        local reports = kmes.of_type(kmes.drain(ring), "KMES_SELF_CONFIG_INVALID")
+        local reports = kmes.of_type(kmes.drain(ring),
+            "kmes.config.value.rejected")
         t:assert_eq(#reports, 1, "one report")
-        t:assert_eq(reports[1].payload.received_kind, "u64_out_of_range",
-            "of the u64 range kind")
-        t:assert_eq(reports[1].payload.expected_min, 65536, "against 64 KiB")
+        t:assert_eq(reports[1].payload.config.received.kind, "out-of-range",
+            "of the range kind")
+        t:assert_eq(reports[1].payload.config.expected.min, 65536,
+            "against 64 KiB")
         local after = kmes.attach(vm, 0)
         t:assert_eq(after.capacity, ring.capacity, "capacity unchanged")
         kmes.detach(after); kmes.detach(ring)
@@ -317,22 +319,24 @@ test("an unallocatable capacity is reported, and the old ring stays",
     { spec = "PKM *config.swap-failed-event" }, function(t)
         -- 256 MiB is a valid capacity a 192 MiB guest cannot back.
         -- The value is written, the swap fails, a
-        -- KMES_BUFFER_SWAP_FAILED event names both capacities and
+        -- kmes.buffer.swap.failed event names both capacities and
         -- ENOMEM, and the live ring is untouched.
         local ring = kmes.attach(vmem, 0)
         t:assert(ring and ring.capacity == 4194304, "the 4 MiB ring is live")
         local gen0 = string.unpack("<I8", vmem:read_mem(ring.addr + 32, 8))
         t:assert_eq(set_value2("BufferCapacity", registry.TYPE.QWORD,
             registry.qword(268435456)).ret, 0, "256 MiB is written")
-        local failed = kmes.of_type(kmes.drain(ring), "KMES_BUFFER_SWAP_FAILED")
+        local failed = kmes.of_type(kmes.drain(ring), "kmes.buffer.swap.failed")
         t:assert_eq(#failed, 1, "one swap-failed report")
         t:assert_eq(failed[1].origin, kmes.ORIGIN.KMES, "from KMES itself")
-        t:assert_eq(failed[1].payload.requested_capacity, 268435456,
+        t:assert_eq(failed[1].payload.buffer["capacity-requested"], 268435456,
             "naming what was asked")
-        t:assert_eq(failed[1].payload.retained_capacity, 4194304,
+        t:assert_eq(failed[1].payload.buffer.capacity, 4194304,
             "and what stays")
-        t:assert_eq(failed[1].payload.errno, sys.E.NOMEM, "and ENOMEM")
-        t:assert_eq(#kmes.of_type(kmes.drain(ring), "KMES_SELF_CONFIG_INVALID"),
+        t:assert_eq(failed[1].payload.outcome.errno, -sys.E.NOMEM,
+            "and -ENOMEM")
+        t:assert_eq(#kmes.of_type(kmes.drain(ring),
+            "kmes.config.value.rejected"),
             0, "with no invalid-value report — the value was valid")
         t:assert_eq(string.unpack("<I8", vmem:read_mem(ring.addr + 32, 8)), gen0,
             "the generation did not move")
@@ -347,11 +351,11 @@ test("a failed swap is not retried until the next configuration write",
         local ring = kmes.attach(vmem, 0)
         t:assert(ring and ring.capacity == 4194304, "still at 4 MiB")
         sys.nanosleep(vmem, 0, 200 * 1000 * 1000)
-        t:assert_eq(#kmes.of_type(kmes.drain(ring), "KMES_BUFFER_SWAP_FAILED"),
+        t:assert_eq(#kmes.of_type(kmes.drain(ring), "kmes.buffer.swap.failed"),
             0, "no spontaneous retry in 200 ms")
         t:assert_eq(set_value2("MaxEventSize", registry.TYPE.DWORD,
             registry.dword(65536)).ret, 0, "an unrelated write lands")
-        t:assert_eq(#kmes.of_type(kmes.drain(ring), "KMES_BUFFER_SWAP_FAILED"),
+        t:assert_eq(#kmes.of_type(kmes.drain(ring), "kmes.buffer.swap.failed"),
             1, "and the swap was attempted once more")
         t:assert_eq(kmes.emit(vmem, "PIT_ALIVE", kmes.PAYLOAD).ret, 0,
             "emission continues throughout")
@@ -373,7 +377,7 @@ test("a failed swap rolls back the capacity and nothing else",
         local ring = kmes.attach(vmem, 0)
         t:assert_eq(set_value2("MaxNestingDepth", registry.TYPE.DWORD,
             registry.dword(5)).ret, 0, "depth 5 is written")
-        t:assert_eq(#kmes.of_type(kmes.drain(ring), "KMES_BUFFER_SWAP_FAILED"),
+        t:assert_eq(#kmes.of_type(kmes.drain(ring), "kmes.buffer.swap.failed"),
             1, "the swap was attempted and failed again")
         kmes.detach(ring)
         t:assert_eq(kmes.emit(vmem, "PIT_RB", kmes.nested(20)).errno,

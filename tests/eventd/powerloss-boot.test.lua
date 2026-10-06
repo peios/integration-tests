@@ -99,10 +99,10 @@ test("a new boot's coverage for each CPU starts before sequence 1", {
     eventd.restart(vm)
     local s
     for _, r in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 10m ago")) do
-        if r.timestamp >= new.since then s = r end
+        if r["event.time"] >= new.since then s = r end
     end
     t:assert(s, "eventd started under the new boot ID")
-    t:assert_eq(s and s.boot_id, "{" .. FAKE .. "}", "the new boot")
+    t:assert_eq(s and s["event.boot.guid"], "{" .. FAKE .. "}", "the new boot")
     t:assert_eq(s and s.restart, false, "as that boot's first start")
     -- Coverage that begins before sequence 1 has nothing covered and
     -- nothing missing below the ring's oldest survivor: that survivor
@@ -112,15 +112,15 @@ test("a new boot's coverage for each CPU starts before sequence 1", {
     -- has committed, not where it began.)
     local found
     pcall(wait_until, function()
-        for _, r in ipairs(eventd.rows(vm, "EVENTS WHERE cpu_id == 0 AND sequence == 1 SINCE 1h ago")) do
-            if r.boot_id == "{" .. FAKE .. "}" then found = r end
+        for _, r in ipairs(eventd.rows(vm, "EVENTS WHERE event.cpu == 0 AND event.sequence == 1 SINCE 1h ago")) do
+            if r["event.boot.guid"] == "{" .. FAKE .. "}" then found = r end
         end
         return found ~= nil
     end, { timeout = 15, interval = 0.5 })
     t:assert(found, "sequence 1 on CPU 0 was ingested for the new boot")
     local gaps = 0
     for _, g in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 10m ago")) do
-        if g.timestamp >= new.since then gaps = gaps + 1 end
+        if g["event.time"] >= new.since then gaps = gaps + 1 end
     end
     t:assert_eq(gaps, 0, "with no gap before it")
 end)
@@ -135,7 +135,7 @@ test("a new boot's ring is never reconciled against the previous boot's receipts
     local rows = eventd.wait_rows(vm, 'EVENTS pt.oldboot WHERE tag == "' .. new.tag .. '" SINCE 10m ago',
         function(r) return #r >= 2 end)
     local boots = {}
-    for _, r in ipairs(rows) do boots[r.boot_id] = true end
+    for _, r in ipairs(rows) do boots[r["event.boot.guid"]] = true end
     vm:run("umount /proc/sys/kernel/random/boot_id")
     eventd.restart(vm)
     t:assert(boots["{" .. FAKE .. "}"], "the survivor was ingested for the new boot: " .. json.encode(rows))
@@ -291,7 +291,7 @@ end
 local function gaps_past(v, boot, after)
     local out = {}
     for _, g in ipairs(eventd.rows(v, "EVENTS " .. eventd.T.gap .. " SINCE 1h ago")) do
-        if g.boot_id == boot and (after == nil or (g.last_sequence or 0) > after) then
+        if g["event.boot.guid"] == boot and (after == nil or (g.last_sequence or 0) > after) then
             out[#out + 1] = g
         end
     end
@@ -368,7 +368,7 @@ local function checkpoint_cut(t)
     -- (pt.plcommit is emitted on this boot only, so its sequences name
     -- these five.)
     local seqs = {}
-    for _, r in ipairs(ck.events) do seqs[#seqs + 1] = tostring(math.tointeger(r.sequence)) end
+    for _, r in ipairs(ck.events) do seqs[#seqs + 1] = tostring(math.tointeger(r["event.sequence"])) end
     ck.events_main = 0
     local shards = eventd.shards(dvm)
     assert(#shards > 0, "the event store's shard files were found")
@@ -404,11 +404,11 @@ test("every committed event transaction survives power loss", {
     t:assert(c.new_boot ~= c.old_boot, "the machine came back as a new boot")
     local survived = {}
     for _, r in ipairs(c.events_now or {}) do
-        if r.boot_id == c.old_boot then survived[r.sequence] = true end
+        if r["event.boot.guid"] == c.old_boot then survived[r["event.sequence"]] = true end
     end
     for _, r in ipairs(c.events or {}) do
-        t:assert(survived[r.sequence],
-            "the committed event at sequence " .. tostring(r.sequence) .. " survived the power cut")
+        t:assert(survived[r["event.sequence"]],
+            "the committed event at sequence " .. tostring(r["event.sequence"]) .. " survived the power cut")
     end
     t:assert_eq(#(c.events_now or {}), 5, "every one, once each")
 end)
@@ -453,7 +453,7 @@ local function inflight_cut(t)
     inf.old_boot = boot_id(dvm)
     inf.last_committed = 0
     for _, r in ipairs(kept) do
-        if r.sequence > inf.last_committed then inf.last_committed = r.sequence end
+        if r["event.sequence"] > inf.last_committed then inf.last_committed = r["event.sequence"] end
     end
     inf.gaps_before = #gaps_past(dvm, inf.old_boot, inf.last_committed)
     inf.old_boot_gaps_before = #gaps_past(dvm, inf.old_boot)
@@ -511,7 +511,7 @@ test("the event store loses only the in-flight batch", {
     t:assert(c.new_boot ~= c.old_boot, "the machine came back as a new boot")
     local kept = 0
     for _, r in ipairs(c.kept_now or {}) do
-        if r.boot_id == c.old_boot then kept = kept + 1 end
+        if r["event.boot.guid"] == c.old_boot then kept = kept + 1 end
     end
     t:assert_eq(kept, 3, "every event committed before the batch survived")
     t:assert_eq(#(c.lost_now or {}), 0,

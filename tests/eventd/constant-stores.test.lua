@@ -74,7 +74,7 @@ test("synthetic.shutdown is written when a graceful shutdown begins", {
     local rows = eventd.rows(vm, "EVENTS " .. eventd.T.shutdown .. " SINCE 1h ago")
     t:assert_eq(#rows, before + 1, "svctl's graceful stop left one shutdown record")
     local startup = eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1h ago TAKE 1")[1]
-    t:assert(rows[1].timestamp >= stopping_at and rows[1].timestamp < startup.timestamp,
+    t:assert(rows[1]["event.time"] >= stopping_at and rows[1]["event.time"] < startup["event.time"],
         "written after the stop was asked for and before the next start")
 end)
 
@@ -96,11 +96,12 @@ test("synthetic.gap is written when a CPU's sequence has a gap, naming the CPU a
     t:assert_eq(#gaps, before + 1, "one gap record")
     local g = gaps[1]
     t:assert_eq(g.cpu_id, 0, "naming CPU 0: " .. json.encode(g))
+    t:assert_eq(g["event.cpu"], 0, "the CPU it is stored under too")
     t:assert(math.type(g.first_sequence) == "integer" and g.last_sequence >= g.first_sequence,
         "and the range of sequence numbers lost")
     local survivors = eventd.rows(vm, "EVENTS " .. flood .. " SINCE 1h ago")
     local lowest = math.huge
-    for _, r in ipairs(survivors) do lowest = math.min(lowest, r.sequence) end
+    for _, r in ipairs(survivors) do lowest = math.min(lowest, r["event.sequence"]) end
     t:assert_eq(g.last_sequence, lowest - 1, "ending just before the oldest surviving event")
     t:assert(#survivors < 120, "which is fewer than were emitted: " .. #survivors)
 end)
@@ -113,7 +114,7 @@ test("synthetic.config_change is written when a value is applied at runtime", {
         ' WHERE key == "LogRetentionDays" AND new_value == "21" SINCE 1h ago', function(rs) return #rs == 1 end)
     eventd.unset(vm, "LogRetentionDays")
     t:assert(ok, "applying LogRetentionDays=21 is recorded")
-    t:assert_eq(rows[1] and rows[1].event_type, eventd.T.config_change, "as synthetic.config_change")
+    t:assert_eq(rows[1] and rows[1]["event.type"], eventd.T.config_change, "as synthetic.config_change")
 end)
 
 test("synthetic.storage_error is written when a store is found corrupt, not when it is full", {

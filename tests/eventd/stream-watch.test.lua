@@ -385,7 +385,7 @@ test("in one batch, the line near the event passes and the line far from it does
     local ok, err = pcall(function()
         emit(etype, { n = 1 })
         local ev = eventd.wait_rows(vm, "EVENTS " .. etype, function(rs) return #rs == 1 end)
-        local at = ev[1].timestamp
+        local at = ev[1]["event.time"]
         local c = stream("LOGS FROM " .. m .. " WHERE EVENT " .. etype .. " EXISTS SINCE 10m ago STREAM")
         logs({ { origin = m, is_error = false, message = "near", timestamp = at + 100000000 },
                { origin = m, is_error = false, message = "far", timestamp = at - 30000000000 } })
@@ -425,7 +425,7 @@ test("a stream whose reader stops is dropped once the socket fills, while ingest
     end
     -- eventd did not stop for the stalled reader: everything was stored,
     -- and other queries are answered.
-    local stored = eventd.wait_rows(vm, "EVENTS " .. etype .. " COUNT BY event_type",
+    local stored = eventd.wait_rows(vm, "EVENTS " .. etype .. " COUNT BY event.type",
         function(rs) return rs[1] and rs[1].count == 400 end)
     t:assert_eq(stored[1] and stored[1].count, 400, "all 400 events were committed")
     -- Now drain what eventd managed to send before giving up.

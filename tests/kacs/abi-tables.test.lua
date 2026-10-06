@@ -305,7 +305,7 @@ test("the four audit-policy bits select the four audited outcomes",
             local fd = fresh({ audit_policy = policy })
             kmes.drain(ring)
             access.check(vm, { token_fd = fd, sd = sd, desired = 0x1 })
-            local n = #kmes.of_type(kmes.drain(ring), "access-audit")
+            local n = #kmes.of_type(kmes.drain(ring), "kacs.audit.access.checked")
             sys.close(vm, fd)
             return n
         end

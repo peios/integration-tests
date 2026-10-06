@@ -120,12 +120,13 @@ test("a predicate on a header column adds one to that column's counter", {
     spec = "eventd *account.a-header-column-predicate-increments-that-columns-counter",
 }, function(t)
     local before = policy_pass(t)
-    eventd.rows(vm, "EVENTS pt.acct WHERE process_guid IS NOT NULL")
-    eventd.rows(vm, 'EVENTS pt.acct WHERE true_token_guid == "00000000-0000-0000-0000-000000000000"')
-    eventd.rows(vm, "EVENTS pt.acct WHERE process_guid IS NULL")
+    eventd.rows(vm, "EVENTS pt.acct WHERE emitter.process.guid IS NOT NULL")
+    eventd.rows(vm, 'EVENTS pt.acct WHERE emitter.true-token.guid == "00000000-0000-0000-0000-000000000000"')
+    eventd.rows(vm, "EVENTS pt.acct WHERE emitter.process.guid IS NULL")
     local after = policy_pass(t)
-    t:assert_eq((after.process_guid or 0) - (before.process_guid or 0), 2, "process_guid counted twice")
-    t:assert_eq((after.true_token_guid or 0) - (before.true_token_guid or 0), 1, "true_token_guid once")
+    local process, true_token = "emitter.process.guid", "emitter.true-token.guid"
+    t:assert_eq((after[process] or 0) - (before[process] or 0), 2, "emitter.process.guid counted twice")
+    t:assert_eq((after[true_token] or 0) - (before[true_token] or 0), 1, "emitter.true-token.guid once")
 end)
 
 -- "Cross-type WHERE predicates are counted like any other."
@@ -158,7 +159,7 @@ test("log and metric queries leave no counter behind", {
     t:assert_eq(after.is_error, nil, "no is_error counter")
     t:assert_eq(after["mlab" .. m], nil, "no counter for the metric label")
     t:assert_eq(after["mw" .. m], nil, "no counter for the metric predicate")
-    t:assert_eq(after.event_type or 0, before.event_type or 0,
+    t:assert_eq(after["event.type"] or 0, before["event.type"] or 0,
         "the log query's EVENT condition counted nothing either")
 end)
 

@@ -307,7 +307,8 @@ test("the events root is {a1b2c3d4-0001-4000-8000-000000000001}, the level-0 nod
     local granted = user_sees(t, key, sd({ allow(0x1, SY), allow_obj(0x1, USER, guid_bytes(ROOT.events)) }), q)
     t:assert_eq(#granted.rows, 1, "an object ACE for the events root grants the event: " .. tostring(granted.stderr))
     -- Granting the root grants what is under it: every field.
-    for _, f in ipairs({ "timestamp", "cpu_id", "sequence", "origin_class", "event_type", "boot_id", "n" }) do
+    for _, f in ipairs({ "event.time", "event.cpu", "event.sequence", "emitter.class", "event.type",
+                         "event.boot.guid", "n" }) do
         t:assert(granted.rows[1] and granted.rows[1][f] ~= nil, "the root grant covers " .. f)
     end
     local wrong = user_sees(t, key, sd({ allow(0x1, SY), allow_obj(0x1, USER, guid_bytes(ROOT.logs)) }), q)

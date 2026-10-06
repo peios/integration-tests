@@ -114,7 +114,7 @@ end
 local function storage_errors(since)
     local out = {}
     for _, r in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.storage_error .. " SINCE 30m ago")) do
-        if r.timestamp >= since then out[#out + 1] = r end
+        if r["event.time"] >= since then out[#out + 1] = r end
     end
     return out
 end
@@ -190,11 +190,11 @@ test("a required store SQLite cannot read is quarantined, replaced, logged and r
     t:assert(ok, "and is in use")
     t:assert(eventd.stderr_line(vm,"quarantined corrupt metric store", since), "the corruption was logged")
     local errs = eventd.wait_rows(vm, "EVENTS " .. eventd.T.storage_error .. " SINCE 10m ago", function(r)
-        for _, e in ipairs(r) do if e.timestamp >= since and e.store == "metric" then return true end end
+        for _, e in ipairs(r) do if e["event.time"] >= since and e.store == "metric" then return true end end
         return false
     end)
     local found
-    for _, e in ipairs(errs) do if e.timestamp >= since and e.store == "metric" then found = e end end
+    for _, e in ipairs(errs) do if e["event.time"] >= since and e.store == "metric" then found = e end end
     t:assert(found, "and reported as a storage_error naming the metric store")
 end)
 
@@ -264,7 +264,7 @@ test("corruption met at write time is quarantined, reported, and writing resumes
     eventd.unset(vm, "LogRetentionDays")
     t:assert(ok, "the corrupt logs.db was quarantined when a write met it")
     local errs = eventd.wait_rows(vm, "EVENTS " .. eventd.T.storage_error .. " SINCE 10m ago", function(r)
-        for _, e in ipairs(r) do if e.timestamp >= since and e.store == "log" then return true end end
+        for _, e in ipairs(r) do if e["event.time"] >= since and e.store == "log" then return true end end
         return false
     end)
     t:assert(#errs > 0, "a storage_error for the log store was emitted")
@@ -423,7 +423,7 @@ test("the failed batch is lost, and on the writer's next commit the loss is reco
     local gap_rows = eventd.rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 10m ago")
     local covered = 0
     for _, g in ipairs(gap_rows) do
-        if g.timestamp >= full.since then covered = covered + (g.count or 0) end
+        if g["event.time"] >= full.since then covered = covered + (g.count or 0) end
     end
     t:assert(covered >= 10, "covering at least the ten lost events: " .. covered)
 end)
@@ -442,15 +442,15 @@ test("a crash before the disk recovers still records the loss, through restart r
     -- Each lost event is either back (it survived in the ring and no
     -- receipt covered it) or inside a gap record.
     local stored = {}
-    for _, r in ipairs(eventd.rows(vm, 'EVENTS pt.crashfull WHERE tag == "' .. tag .. '" SINCE 10m ago SELECT i, sequence')) do
-        stored[r.i] = r.sequence
+    for _, r in ipairs(eventd.rows(vm, 'EVENTS pt.crashfull WHERE tag == "' .. tag .. '" SINCE 10m ago SELECT i, event.sequence')) do
+        stored[r.i] = r["event.sequence"]
     end
     local missing = 0
     for i = 1, 10 do if not stored[i] then missing = missing + 1 end end
     if missing > 0 then
         local gaps = eventd.rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 10m ago")
         local spanned = 0
-        for _, g in ipairs(gaps) do if g.timestamp >= since then spanned = spanned + g.count end end
+        for _, g in ipairs(gaps) do if g["event.time"] >= since then spanned = spanned + g.count end end
         t:assert(spanned >= missing, "every event not recovered is inside a gap record")
     end
     t:assert(true, "recovered " .. (10 - missing) .. " of 10 from the ring")
@@ -478,7 +478,7 @@ test("a failed log commit loses that batch and the log writer carries on, with n
     local errs = storage_errors(since)
     local gaps = eventd.rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 10m ago")
     local new_gaps = 0
-    for _, g in ipairs(gaps) do if g.timestamp >= since then new_gaps = new_gaps + 1 end end
+    for _, g in ipairs(gaps) do if g["event.time"] >= since then new_gaps = new_gaps + 1 end end
     local alive = eventd.alive(vm, pid)
     eventd.stop(vm)
     vm:run("umount " .. eventd.STORE.logs):assert_ok()

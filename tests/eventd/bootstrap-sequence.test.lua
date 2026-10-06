@@ -56,8 +56,9 @@ test("with StorageShards absent the default applies: one shard per attached KMES
     t:assert_eq(rings, 2, "eventd holds one KMES ring descriptor per CPU: " .. fds)
     -- Mapped, not merely opened: events from both CPUs are being read.
     local cpus = {}
-    for _, r in ipairs(eventd.rows(vm, "EVENTS SINCE 1h ago SELECT cpu_id TAKE 2000")) do
-        if r.cpu_id ~= nil and r.cpu_id ~= json.null then cpus[r.cpu_id] = true end
+    for _, r in ipairs(eventd.rows(vm, "EVENTS SINCE 1h ago SELECT event.cpu TAKE 2000")) do
+        local cpu = r["event.cpu"]
+        if cpu ~= nil and cpu ~= json.null then cpus[cpu] = true end
     end
     t:assert(cpus[0] and cpus[1], "events from both CPUs' rings are stored: " .. json.encode(cpus))
 end)
@@ -108,7 +109,7 @@ test("the boot ID is read from the kernel and stored in PCDS GUID layout", {
 }, function(t)
     local s = startups()
     s = s[#s]
-    t:assert_eq(s.boot_id, "{" .. boot_uuid .. "}", "the startup record's boot is the kernel's")
+    t:assert_eq(s["event.boot.guid"], "{" .. boot_uuid .. "}", "the startup record's boot is the kernel's")
     local stored = eventd.sql(vm, eventd.shards(vm)[1],
         "SELECT DISTINCT hex(boot_id) FROM events WHERE event_type = '"
         .. eventd.T.startup .. "'")
@@ -122,7 +123,8 @@ test("the startup record carries the boot ID, the shard count and per-CPU covera
 }, function(t)
     local s = startups()
     s = s[#s]
-    t:assert_eq(s.boot_id, "{" .. boot_uuid .. "}", "boot ID")
+    t:assert_eq(s.boot_id, "{" .. boot_uuid .. "}", "boot ID, the payload's own field")
+    t:assert_eq(s["event.boot.guid"], s.boot_id, "naming the boot the record was stored under")
     t:assert_eq(s.shard_count, 2, "shard count")
     t:assert_eq(#(s.resume_points or {}), 2, "a coverage point for each CPU: " .. json.encode(s))
     for _, p in ipairs(s.resume_points) do
@@ -159,7 +161,7 @@ test("the boot's first start is told from a restart by what the store holds for 
 }, function(t)
     local all = startups()
     t:assert(#all >= 2, "at least the boot's start and one restart: " .. #all)
-    table.sort(all, function(a, b) return a.timestamp < b.timestamp end)
+    table.sort(all, function(a, b) return a["event.time"] < b["event.time"] end)
     t:assert_eq(all[1].restart, false, "the first start of this boot is not a restart")
     for i = 2, #all do
         t:assert_eq(all[i].restart, true, "every later start in the boot is a restart")
@@ -202,7 +204,7 @@ test("each drain starts from the merged receipts: covered sequences skipped, unc
     t:assert_eq(dups, 0, "no covered sequence was stored a second time")
     local gaps = 0
     for _, g in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 10m ago")) do
-        if g.timestamp >= since then gaps = gaps + 1 end
+        if g["event.time"] >= since then gaps = gaps + 1 end
     end
     t:assert_eq(gaps, 0, "and nothing was recorded as a gap: every sequence was in one source or the other")
 end)
@@ -235,7 +237,7 @@ test("a configured StorageShards is read at startup and the CPU-to-shard assignm
     eventd.set(vm, "StorageShards", "dword:3"):assert_ok()
     eventd.restart(vm)
     local s = startups()
-    table.sort(s, function(a, b) return a.timestamp < b.timestamp end)
+    table.sort(s, function(a, b) return a["event.time"] < b["event.time"] end)
     t:assert_eq(s[#s].shard_count, 3, "the restart read StorageShards=3")
     local shards = eventd.shards(vm)
     t:assert_eq(#shards, 3, "and created a third shard: " .. json.encode(shards))
@@ -252,7 +254,7 @@ test("a configured StorageShards is read at startup and the CPU-to-shard assignm
     -- both CPUs have written since the restart.
     for i = 1, 200 do eventd.emit(vm, "pt.assign", { i = i }) end
     eventd.wait_rows(vm, "EVENTS pt.assign SINCE 10m ago", function(rs) return #rs >= 200 end)
-    local start_ts = s[#s].timestamp
+    local start_ts = s[#s]["event.time"]
     for idx, want in pairs({ [0] = 0, [1] = 1, [2] = 0 }) do
         local path = eventd.DB.meta:gsub("eventd%-meta%.db$", string.format("shard-%04d.db", idx))
         local rows = eventd.sql(vm, path, "SELECT DISTINCT cpu_id FROM events WHERE cpu_id IS NOT NULL"
@@ -286,7 +288,7 @@ test("historical shards are read for their receipts and their rows; an unreadabl
     eventd.start(vm)
 
     local s = startups()
-    table.sort(s, function(a, b) return a.timestamp < b.timestamp end)
+    table.sort(s, function(a, b) return a["event.time"] < b["event.time"] end)
     local cpu1
     for _, p in ipairs(s[#s].resume_points) do if p.cpu_id == 1 then cpu1 = p.sequence end end
     t:assert(cpu1 and cpu1 >= seq,
@@ -295,7 +297,7 @@ test("historical shards are read for their receipts and their rows; an unreadabl
     local dup = eventd.sql(vm, shard0, "SELECT count(*) FROM events WHERE cpu_id = 1 AND sequence = " .. seq)
     t:assert_eq(dup[1][1], 0, "so that event was not ingested again into the active shard")
 
-    local rows = eventd.rows(vm, "EVENTS " .. etype .. " WHERE cpu_id == 1 AND sequence == " .. seq
+    local rows = eventd.rows(vm, "EVENTS " .. etype .. " WHERE event.cpu == 1 AND event.sequence == " .. seq
         .. " SINCE 1h ago")
     t:assert_eq(#rows, 1, "the historical row is queryable, once: the bad-schema copy is not read")
     local before = eventd.sql(vm, shard1, "SELECT count(*) FROM events")[1][1]
@@ -336,7 +338,7 @@ test("the sequence checkpoints are not used for recovery", {
     eventd.edit_store(vm, eventd.DB.meta, "UPDATE sequence_checkpoints SET sequence = 900000000;")
     eventd.start(vm)
     local s = startups()
-    table.sort(s, function(a, b) return a.timestamp < b.timestamp end)
+    table.sort(s, function(a, b) return a["event.time"] < b["event.time"] end)
     for _, p in ipairs(s[#s].resume_points) do
         t:assert(p.sequence < 900000000, "CPU " .. p.cpu_id .. "'s coverage is from receipts, not the checkpoint")
     end

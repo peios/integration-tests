@@ -515,15 +515,18 @@ test("an audit event is emitted when the file's SACL carries a matching audit AC
         local events = kmes.recording(t, vm, function()
             t:assert_eq(kacs.set_sd(vm, path, new_dacl, SI.DACL).ret, 0, "the DACL is set")
         end)
-        t:assert(#kmes.of_type(events, "access-audit") > 0,
-            "a matching audit ACE produced an access-audit event")
+        local audits = kmes.of_type(events, "kacs.audit.access.checked")
+        t:assert(#audits > 0,
+            "a matching audit ACE produced a kacs.audit.access.checked event")
+        t:assert_eq(audits[1].payload.object.kind, "file", "about a file")
+        t:assert_eq(audits[1].payload.trigger.kind, "sacl", "triggered by its SACL")
 
         -- And an object with no SACL produces none.
         local quiet = file_granting("audit-off", kacs.ALL_RIGHTS)
         local silent = kmes.recording(t, vm, function()
             t:assert_eq(kacs.set_sd(vm, quiet, new_dacl, SI.DACL).ret, 0, "the same write")
         end)
-        t:assert_eq(#kmes.of_type(silent, "access-audit"), 0,
+        t:assert_eq(#kmes.of_type(silent, "kacs.audit.access.checked"), 0,
             "with no SACL there is nothing to match and no event")
     end)
 

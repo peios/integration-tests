@@ -72,8 +72,9 @@ test("an event's header fields are the nine names", {
     spec = "eventd *constant.the-nine-event-header-field-names",
 }, function(t)
     local _, row = one_event(eventd.map{})
-    t:assert_eq(keys_of(row), "boot_id,cpu_id,effective_token_guid,event_type,origin_class," ..
-        "process_guid,sequence,timestamp,true_token_guid", "an event with an empty payload has exactly these")
+    t:assert_eq(keys_of(row), "emitter.class,emitter.process.guid,emitter.token.guid,emitter.true-token.guid," ..
+        "event.boot.guid,event.cpu,event.sequence,event.time,event.type",
+        "an event with an empty payload has exactly these")
 end)
 
 test("a log record's fields are the six names", {
@@ -120,13 +121,13 @@ test("a payload path that is suppressed, or collides with a header, is not a fie
     spec = "eventd *constant.suppressed-and-header-colliding-payload-paths-have-no-field-guid",
 }, function(t)
     -- `bad.key` contains a dot, which PSPU §3.22 makes unqueryable; the
-    -- payload's `process_guid` collides with a header and the header wins,
-    -- its subtree included.
-    local etype, row = one_event({ process_guid = { inner = 99 }, ["bad.key"] = 1, kept = "k" })
+    -- payload's map at `emitter.process.guid` collides with a header path
+    -- and the header wins, its subtree included.
+    local etype, row = one_event({ emitter = { process = { guid = { inner = 99 } } }, ["bad.key"] = 1, kept = "k" })
     t:assert(row["bad.key"] == nil, "the dotted key is not a field: " .. json.encode(row))
-    t:assert(row["process_guid.inner"] == nil and type(row.process_guid) == "string",
-        "process_guid is the header's, and the payload's subtree is gone: " .. json.encode(row))
-    t:assert_eq(#eventd.rows(vm, "EVENTS " .. etype .. " WHERE process_guid.inner == 99 SINCE 10m ago"), 0,
+    t:assert(row["emitter.process.guid.inner"] == nil and type(row["emitter.process.guid"]) == "string",
+        "emitter.process.guid is the header's, and the payload's subtree is gone: " .. json.encode(row))
+    t:assert_eq(#eventd.rows(vm, "EVENTS " .. etype .. " WHERE emitter.process.guid.inner == 99 SINCE 10m ago"), 0,
         "and it cannot be queried")
     -- With no field there is no GUID: denies naming uuid_v5(ns, path) for
     -- those paths have nothing to act on, and the record is untouched.
@@ -134,8 +135,8 @@ test("a payload path that is suppressed, or collides with a header, is not a fie
     local key = eventd.SECURITY .. [[\Events\]] .. etype
     t:assert(user_sees_field(t, key, q, "kept", eventd.field_guid("bad.key")),
         "a deny on uuid_v5(ns, \"bad.key\") leaves the record as it was")
-    t:assert(user_sees_field(t, key, q, "kept", eventd.field_guid("process_guid.inner")),
-        "and so does one on uuid_v5(ns, \"process_guid.inner\")")
+    t:assert(user_sees_field(t, key, q, "kept", eventd.field_guid("emitter.process.guid.inner")),
+        "and so does one on uuid_v5(ns, \"emitter.process.guid.inner\")")
 end)
 
 test("a metric label's field name is the label key itself", {
@@ -182,17 +183,17 @@ local function newest(etype)
 end
 
 local function both_spellings(t, etype, number, name)
-    local by_number = eventd.rows(vm, "EVENTS " .. etype .. " WHERE origin_class == " .. number .. " SINCE 10m ago")
-    local by_name = eventd.rows(vm, "EVENTS " .. etype .. " WHERE origin_class == " .. name .. " SINCE 10m ago")
-    t:assert(#by_number >= 1, etype .. " matches origin_class == " .. number)
-    t:assert_eq(#by_name, #by_number, "and origin_class == " .. name .. " matches the same")
+    local by_number = eventd.rows(vm, "EVENTS " .. etype .. " WHERE emitter.class == " .. number .. " SINCE 10m ago")
+    local by_name = eventd.rows(vm, "EVENTS " .. etype .. " WHERE emitter.class == " .. name .. " SINCE 10m ago")
+    t:assert(#by_number >= 1, etype .. " matches emitter.class == " .. number)
+    t:assert_eq(#by_name, #by_number, "and emitter.class == " .. name .. " matches the same")
 end
 
 test("origin class 0 is userspace", {
     spec = "eventd *constant.origin-class-0-is-userspace",
 }, function(t)
     local etype, row = one_event({ n = 1 })
-    t:assert_eq(row.origin_class, 0, "an event a userspace process emitted through kmes_emit")
+    t:assert_eq(row["emitter.class"], 0, "an event a userspace process emitted through kmes_emit")
 end)
 
 test("origin class 1 is KMES", {
@@ -200,16 +201,16 @@ test("origin class 1 is KMES", {
 }, function(t)
     vm:run([[reg set -p 'Machine\System\KMES' MaxNestingDepth dword:1]]):assert_ok()
     vm:run([[reg del 'Machine\System\KMES' MaxNestingDepth]])
-    local row = newest("KMES_SELF_CONFIG_INVALID")
-    t:assert_eq(row.origin_class, 1, "KMES's own report of a setting it rejected: " .. json.encode(row))
+    local row = newest("kmes.config.value.rejected")
+    t:assert_eq(row["emitter.class"], 1, "KMES's own report of a setting it rejected: " .. json.encode(row))
 end)
 
 test("origin class 2 is KACS", {
     spec = "eventd *constant.origin-class-2-is-kacs",
 }, function(t)
     token.as_principal(t, vm, reader(), function() end)
-    local row = newest("logon-session-destroyed")
-    t:assert_eq(row.origin_class, 2, "KACS's report of a logon session ending: " .. json.encode(row))
+    local row = newest("kacs.session.destroyed")
+    t:assert_eq(row["emitter.class"], 2, "KACS's report of a logon session ending: " .. json.encode(row))
 end)
 
 test("origin class 3 is LCS", {
@@ -218,8 +219,8 @@ test("origin class 3 is LCS", {
     local key = [[Machine\System\PtBackup]] .. eventd.marker()
     vm:run("reg new '" .. key .. "'"):assert_ok()
     vm:run("reg backup '" .. key .. "' /tmp/pt-backup.bin"):assert_ok()
-    local row = newest("LCS_BACKUP_START")
-    t:assert_eq(row.origin_class, 3, "LCS's own report of a key backup: " .. json.encode(row))
+    local row = newest("lcs.audit.backup.started")
+    t:assert_eq(row["emitter.class"], 3, "LCS's own report of a key backup: " .. json.encode(row))
 end)
 
 test("the query language takes the origin class names for the numbers", {
@@ -227,7 +228,7 @@ test("the query language takes the origin class names for the numbers", {
 }, function(t)
     local etype = one_event({ n = 1 })
     both_spellings(t, etype, 0, "userspace")
-    both_spellings(t, "KMES_SELF_CONFIG_INVALID", 1, "kmes")
-    both_spellings(t, "logon-session-destroyed", 2, "kacs")
-    both_spellings(t, "LCS_BACKUP_START", 3, "lcs")
+    both_spellings(t, "kmes.config.value.rejected", 1, "kmes")
+    both_spellings(t, "kacs.session.destroyed", 2, "kacs")
+    both_spellings(t, "lcs.audit.backup.started", 3, "lcs")
 end)

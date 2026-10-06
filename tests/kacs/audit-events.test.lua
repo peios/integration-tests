@@ -96,20 +96,23 @@ test("every KACS record carries origin class 2",
             sys.close(vm, fd)
         end)
         for _, e in ipairs(events) do
-            if e.type == "access-audit" or e.type == "privilege-use"
-                or e.type == "logon-session-destroyed" then
+            if e.type == "kacs.audit.access.checked"
+                or e.type == "kacs.audit.privilege.used"
+                or e.type == "kacs.session.destroyed" then
                 seen[e.type] = true
                 t:assert_eq(e.origin, kmes.ORIGIN.KACS,
                     e.type .. " is stamped KMES_ORIGIN_KACS (2)")
             end
         end
-        t:assert(seen["access-audit"], "an access-audit record was produced")
-        t:assert(seen["privilege-use"], "a privilege-use record too")
-        t:assert(seen["logon-session-destroyed"],
-            "and a logon-session-destroyed record")
+        t:assert(seen["kacs.audit.access.checked"],
+            "a kacs.audit.access.checked record was produced")
+        t:assert(seen["kacs.audit.privilege.used"],
+            "a kacs.audit.privilege.used record too")
+        t:assert(seen["kacs.session.destroyed"],
+            "and a kacs.session.destroyed record")
     end)
 
-test("access-audit comes from the SACL walk and from token audit policy",
+test("kacs.audit.access.checked comes from the SACL walk and from token audit policy",
     { spec = "PKM *audit-events.access-audit-record" }, function(t)
         -- The SACL walk: the token's own policy is zero, and the
         -- descriptor asks for the record.
@@ -120,13 +123,16 @@ test("access-audit comes from the SACL walk and from token audit policy",
                 desired = 0x1, mapping = MAP })
             sys.close(vm, fd)
         end)
-        local walk = kmes.of_type(from_sacl, "access-audit")
-        t:assert_eq(#walk, 1, "the SACL walk emits one access-audit record")
-        t:assert_eq(walk[1].payload.success, true,
+        local walk = kmes.of_type(from_sacl, "kacs.audit.access.checked")
+        t:assert_eq(#walk, 1,
+            "the SACL walk emits one kacs.audit.access.checked record")
+        t:assert_eq(walk[1].payload.outcome.success, true,
             "reporting the outcome it audited")
-        t:assert(walk[1].payload.subject,
+        t:assert_eq(walk[1].payload.trigger.kind, "sacl",
+            "triggered by the SACL")
+        t:assert(walk[1].payload.subject and walk[1].payload.subject.token,
             "with the resolved subject attached at emission")
-        t:assert(walk[1].payload.process,
+        t:assert(walk[1].payload.emitter and walk[1].payload.emitter.process,
             "and the calling process")
         -- Token audit-policy forcing: the descriptor has no SACL at all.
         local from_policy = recorded(t, function()
@@ -135,14 +141,18 @@ test("access-audit comes from the SACL walk and from token audit policy",
                 desired = 0x1, mapping = MAP })
             sys.close(vm, fd)
         end)
-        local forced = kmes.of_type(from_policy, "access-audit")
+        local forced = kmes.of_type(from_policy, "kacs.audit.access.checked")
         t:assert_eq(#forced, 1,
             "the token's own audit policy forces one without a SACL")
-        t:assert_eq(forced[1].payload.success, false,
+        t:assert_eq(forced[1].payload.outcome.success, false,
             "for the failure it was asked to audit")
+        t:assert_eq(forced[1].payload.trigger.kind, "policy",
+            "triggered by the token's policy")
+        t:assert_eq(forced[1].payload.trigger.ace, nil,
+            "which names no ACE")
     end)
 
-test("continuous-audit comes from an enforcement point, per operation",
+test("kacs.audit.handle.used comes from an enforcement point, per operation",
     { spec = "PKM *audit-events.continuous-audit-record" }, function(t)
         local p = B .. "/continuous"
         vm:write_file(p, "hello")
@@ -163,19 +173,27 @@ test("continuous-audit comes from an enforcement point, per operation",
             sys.flock(vm, fd, sys.LOCK_SH)
             sys.close(vm, fd)
         end)
-        local records = kmes.of_type(events, "continuous-audit")
+        local records = kmes.of_type(events, "kacs.audit.handle.used")
         t:assert(#records >= 2,
             "one record per operation, not one per handle: " .. #records)
         local payload = records[1].payload
-        t:assert(payload.operation, "each names its enforcement point")
-        t:assert(payload.matched_access and payload.matched_access ~= 0,
+        t:assert(payload.operation and payload.operation.name,
+            "each names its enforcement point")
+        t:assert(payload.access.matched and payload.access.matched ~= 0,
             "and the part of the handle's continuous mask it matched")
-        t:assert(payload.granted_access, "alongside the granted mask")
-        t:assert(payload.subject and payload.process,
-            "with the shared subject and process sub-maps")
+        t:assert(payload.access.granted, "alongside the granted mask")
+        local audit_mask = payload.access["audit-mask"]
+        t:assert(audit_mask
+            and audit_mask & payload.access.matched == payload.access.matched,
+            "and the whole continuous mask cached on the handle")
+        t:assert_eq(payload.object.kind, "file", "on a file")
+        t:assert_eq(payload.object.file.path, p, "named by its path")
+        t:assert(payload.subject and payload.emitter
+            and payload.emitter.process,
+            "with the shared subject and emitter process sub-maps")
     end)
 
-test("privilege-use comes from privilege-use auditing on a check",
+test("kacs.audit.privilege.used comes from privilege-use auditing on a check",
     { spec = "PKM *audit-events.privilege-use-record" }, function(t)
         local BACKUP = token.bit(token.PRIV.BACKUP)
         local events = recorded(t, function()
@@ -187,17 +205,25 @@ test("privilege-use comes from privilege-use auditing on a check",
             t:assert(r.ok, "SeBackupPrivilege grants read against an empty DACL")
             sys.close(vm, fd)
         end)
-        local records = kmes.of_type(events, "privilege-use")
-        t:assert_eq(#records, 1, "one privilege-use record")
+        local records = kmes.of_type(events, "kacs.audit.privilege.used")
+        t:assert_eq(#records, 1, "one kacs.audit.privilege.used record")
         local p = records[1].payload
-        t:assert_eq(p.privilege, "SeBackupPrivilege",
+        t:assert_eq(p.privilege.name, "SeBackupPrivilege",
             "naming the privilege that influenced the check")
-        t:assert_eq(p.success, true, "and whether its bits survived")
-        t:assert(p.requested_access and p.granted_access
-            and p.surviving_access, "with the three masks the record carries")
+        t:assert_eq(p.outcome.success, true, "and whether its bits survived")
+        t:assert(p.privilege.contributed and p.privilege.surviving
+            and p.access.requested and p.access.granted,
+            "with the masks the record carries")
+        t:assert_eq(p.privilege.contributed, 0x1,
+            "the privilege contributed the read it was asked for")
+        t:assert_eq(p.privilege.surviving, 0x1, "and all of it survived")
+        t:assert_eq(p.access.requested, 0x1,
+            "beside the whole check's requested mask")
+        t:assert_eq(p.access.granted & 0x1, 0x1,
+            "and its final granted mask")
     end)
 
-test("caap-policy-diagnostic comes from a staged-versus-effective mismatch",
+test("CAAP staging divergence comes from a staged-versus-effective mismatch",
     { spec = "PKM *audit-events.caap-policy-diagnostic-record" }, function(t)
         local policy = token.sid(5, 21, 1000, 2000, 3000, 9101)
         local effective = access.acl({ access.ace(A.ALLOWED, 0x1, U) })
@@ -218,20 +244,21 @@ test("caap-policy-diagnostic comes from a staged-versus-effective mismatch",
                 "the check reports the mismatch to its caller")
             sys.close(vm, fd)
         end)
-        local records = kmes.of_type(events, "caap-policy-diagnostic")
+        local records = kmes.of_type(events, "kacs.caap.staging.diverged")
         t:assert_eq(#records, 1, "and emits one diagnostic record")
+        t:assert_eq(#kmes.of_type(events, "kacs.caap.sacl.skipped"), 0,
+            "of the divergence type, not the skipped-SACL one")
         local p = records[1].payload
-        t:assert_eq(p.kind, "staging-mismatch", "of the mismatch kind")
-        t:assert_eq(p.effective_granted_access & 0x3, 0x1,
+        t:assert_eq(p.access["granted"] & 0x3, 0x1,
             "carrying what the effective rules granted")
-        t:assert_eq(p.staged_granted_access & 0x3, 0x3,
+        t:assert_eq(p.access["granted-staged"] & 0x3, 0x3,
             "and what the staged rules would have")
-        t:assert_neq(p.effective_granted_access, p.staged_granted_access,
+        t:assert_neq(p.access["granted"], p.access["granted-staged"],
             "which is the mismatch the record exists to report")
         access.set_caap(vm, policy, nil)
     end)
 
-test("logon-session-destroyed comes from LogonSession teardown",
+test("kacs.session.destroyed comes from LogonSession teardown",
     { spec = "PKM *audit-events.logon-session-destroyed-record" }, function(t)
         local session
         local events = recorded(t, function()
@@ -243,22 +270,28 @@ test("logon-session-destroyed comes from LogonSession teardown",
             sys.close(vm, fd)
         end)
         local records = {}
-        for _, e in ipairs(kmes.of_type(events, "logon-session-destroyed")) do
-            if e.payload and e.payload.session_id == session then
+        for _, e in ipairs(kmes.of_type(events, "kacs.session.destroyed")) do
+            if e.payload and e.payload.object.session.id == session then
                 records[#records + 1] = e
             end
         end
         t:assert_eq(#records, 1,
             "the last token going emits one teardown record")
-        local p = records[1].payload
-        t:assert_eq(p.logon_type, token.LOGON_TYPE.SERVICE,
-            "carrying the session's logon type")
-        t:assert_eq(p.auth_package, "Kerberos", "its authentication package")
-        t:assert(p.user_sid, "the authenticated user's SID")
-        t:assert(p.created_at, "and when the session was created")
+        local s = records[1].payload.object.session
+        t:assert_eq(s["logon-type"], "service",
+            "carrying the session's logon type, by name")
+        t:assert_eq(s["auth-package"], "Kerberos", "its authentication package")
+        t:assert(s.user and s.user.sid, "the authenticated user's SID")
+        t:assert(s["logon-time"], "and when the session was created")
+        -- Nanoseconds since the epoch, converted from whole seconds: a
+        -- seconds value would sit near 1.8e9, a nanosecond one near 1.8e18.
+        t:assert(s["logon-time"] > 1000000000000000,
+            "in realtime nanoseconds, not seconds: " .. s["logon-time"])
+        t:assert_eq(s["logon-time"] % 1000000000, 0,
+            "of whole-second resolution")
     end)
 
-test("corrupt-sd comes from a descriptor xattr that fails validation",
+test("kacs.descriptor.rejected comes from a descriptor xattr that fails validation",
     { spec = "PKM *audit-events.corrupt-sd-record",
       covered_by = "kunit:pkm_kunit_file",
       skip = "the canonical descriptor xattr cannot be written through " ..
@@ -269,7 +302,7 @@ test("corrupt-sd comes from a descriptor xattr that fails validation",
              "pkm_kunit_file_sd_cache_population_corrupt_emits_once" },
     function(t) end)
 
-test("STRATAFS_COPY_UP comes from the copy-up lifecycle",
+test("stratafs.file.copied-up comes from the copy-up lifecycle",
     { spec = "PKM *audit-events.stratafs-copy-up-record" }, function(t)
         stratafs.with(vm, "auditev-copy-up", {
             { name = "dest", flags = { "create" } },
@@ -279,18 +312,22 @@ test("STRATAFS_COPY_UP comes from the copy-up lifecycle",
                 t:assert(stratafs.try_write(vm, s:join("f"), "modified"),
                     "a write to a read-only stratum copies up")
             end)
-            local records = kmes.of_type(events, "STRATAFS_COPY_UP")
-            t:assert_eq(#records, 1, "which emits one STRATAFS_COPY_UP record")
+            local records = kmes.of_type(events, "stratafs.file.copied-up")
+            t:assert_eq(#records, 1,
+                "which emits one stratafs.file.copied-up record")
             t:assert_eq(records[1].origin, kmes.ORIGIN.KACS,
                 "through KACS's kernel-only emitter")
-            t:assert(records[1].payload.path,
+            local p = records[1].payload
+            t:assert_eq(p.object.file["path-relative"], "/f",
                 "naming the object that was copied")
-            t:assert_eq(records[1].payload.result_errno, 0,
+            t:assert_eq(p.outcome.success, true,
                 "and the outcome of the copy")
+            t:assert_eq(p.outcome.errno, nil,
+                "with no errno on success")
         end)
     end)
 
-test("STRATAFS_MUTATION_REFUSED comes from an arrangement refusal",
+test("stratafs.mutation.refused comes from an arrangement refusal",
     { spec = "PKM *audit-events.stratafs-mutation-refused-record" }, function(t)
         stratafs.with(vm, "auditev-refused", {
             { name = "only", flags = { "ro" }, entries = { f = "x" } },
@@ -300,14 +337,14 @@ test("STRATAFS_MUTATION_REFUSED comes from an arrangement refusal",
                 t:assert(not ok and errno == sys.E.ROFS,
                     "a create with no create stratum is refused")
             end)
-            local records = kmes.of_type(events, "STRATAFS_MUTATION_REFUSED")
+            local records = kmes.of_type(events, "stratafs.mutation.refused")
             t:assert_eq(#records, 1,
-                "which emits one STRATAFS_MUTATION_REFUSED record")
+                "which emits one stratafs.mutation.refused record")
             t:assert_eq(records[1].origin, kmes.ORIGIN.KACS,
                 "through KACS's kernel-only emitter")
-            t:assert(records[1].payload.operation,
+            t:assert(records[1].payload.operation.name,
                 "naming the arrangement that was refused")
-            t:assert_eq(records[1].payload.result_errno, -sys.E.ROFS,
+            t:assert_eq(records[1].payload.outcome.errno, -sys.E.ROFS,
                 "and the errno it was refused with")
         end)
     end)
@@ -345,9 +382,9 @@ test("only five privilege names are representable in a privilege-use record",
                     intent = c[4].intent, mapping = MAP })
                 sys.close(vm, fd)
             end)
-            local records = kmes.of_type(events, "privilege-use")
+            local records = kmes.of_type(events, "kacs.audit.privilege.used")
             t:assert_eq(#records, 1, c[1] .. " produces one record")
-            t:assert_eq(records[1].payload.privilege, c[1],
+            t:assert_eq(records[1].payload.privilege.name, c[1],
                 "under its canonical name")
         end
     end)
@@ -379,7 +416,7 @@ test("no other privilege ever appears in a privilege-use record",
                 "and a denied one")
             sys.close(vm, fd)
         end)
-        t:assert_eq(#kmes.of_type(events, "privilege-use"), 0,
+        t:assert_eq(#kmes.of_type(events, "kacs.audit.privilege.used"), 0,
             "every other privilege enabled at once, and no record at all")
         -- And nothing that does emit carries a name outside the five.
         local NAMED = { SeSecurityPrivilege = true,
@@ -393,16 +430,16 @@ test("no other privilege ever appears in a privilege-use record",
                 desired = 0x1, intent = access.INTENT.BACKUP, mapping = MAP })
             sys.close(vm, fd)
         end)
-        local records = kmes.of_type(emitted, "privilege-use")
+        local records = kmes.of_type(emitted, "kacs.audit.privilege.used")
         t:assert(#records > 0, "a token holding one of the five does emit")
         for _, e in ipairs(records) do
-            t:assert(NAMED[e.payload.privilege],
+            t:assert(NAMED[e.payload.privilege.name],
                 "and never an unnamed privilege: " ..
-                tostring(e.payload.privilege))
+                tostring(e.payload.privilege.name))
         end
     end)
 
-test("continuous-audit names its enforcement point from a fixed vocabulary",
+test("kacs.audit.handle.used names its enforcement point from a fixed vocabulary",
     { spec = "PKM *audit-events.continuous-operation-names" }, function(t)
         local NAMES = { ["file.access"] = true, ["file.mmap"] = true,
             ["file.mprotect"] = true, ["file.permission"] = true,
@@ -436,8 +473,9 @@ test("continuous-audit names its enforcement point from a fixed vocabulary",
             sys.close(vm, fd)
         end)
         local seen = {}
-        for _, e in ipairs(kmes.of_type(events, "continuous-audit")) do
+        for _, e in ipairs(kmes.of_type(events, "kacs.audit.handle.used")) do
             local op = e.payload and e.payload.operation
+                and e.payload.operation.name
             t:assert(NAMES[op], "an operation outside the ten: " ..
                 tostring(op))
             seen[op] = true
@@ -451,7 +489,7 @@ test("continuous-audit names its enforcement point from a fixed vocabulary",
         end
     end)
 
-test("a continuous-audit record's object_context is always nil",
+test("a kacs.audit.handle.used record names its file and carries no opaque context",
     { spec = "PKM *audit-events.continuous-object-context-nil" }, function(t)
         local p = B .. "/objctx"
         vm:write_file(p, "hello")
@@ -470,13 +508,18 @@ test("a continuous-audit record's object_context is always nil",
             sys.flock(vm, fd, sys.LOCK_SH)
             sys.close(vm, fd)
         end)
-        local records = kmes.of_type(events, "continuous-audit")
+        local records = kmes.of_type(events, "kacs.audit.handle.used")
         t:assert(#records > 0, "records were produced")
         for _, e in ipairs(records) do
             t:assert_eq(e.payload.object_context, nil,
-                "object_context is nil on every one — the field exists in " ..
-                "the schema and is never filled at this point")
-            t:assert(e.payload.operation,
+                "no opaque object_context key on any of them")
+            t:assert_eq(e.payload.fields, nil,
+                "and nothing userspace asserted: the kernel observed it all")
+            t:assert_eq(e.payload.object.kind, "file",
+                "the object is always a file at this enforcement point")
+            t:assert_eq(e.payload.object.file.path, p,
+                "named by its absolute path")
+            t:assert(e.payload.operation and e.payload.operation.name,
                 "while the operation beside it always is")
         end
     end)
@@ -496,11 +539,11 @@ test("an audit event cannot be suppressed by a bad output pointer",
                 "with EFAULT: " .. sys.errname(r.errno))
             sys.close(vm, fd)
         end)
-        t:assert_eq(#kmes.of_type(events, "access-audit"), 1,
+        t:assert_eq(#kmes.of_type(events, "kacs.audit.access.checked"), 1,
             "and the audit record is on the ring regardless")
     end)
 
-test("a logon-session-destroyed with an invalid UTF-8 package drops silently",
+test("a kacs.session.destroyed with an invalid UTF-8 package drops silently",
     { spec = "PKM *audit-events.best-effort-logon-session-utf8",
       covered_by = "kunit:pkm_kunit_misc",
       skip = "kacs_create_logon_session validates the auth-package name as " ..

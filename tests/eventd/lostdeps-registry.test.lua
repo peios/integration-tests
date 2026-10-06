@@ -30,7 +30,7 @@ end
 local function wait_change(key, value, since)
     local _, ok = eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 30m ago", function(rows)
         for _, r in ipairs(rows) do
-            if r.timestamp >= since and r.key == key and r.new_value == value then return true end
+            if r["event.time"] >= since and r.key == key and r.new_value == value then return true end
         end
         return false
     end, { desc = key .. "=" .. value .. " to apply" })
@@ -117,7 +117,7 @@ test("when the registry returns eventd reads its configuration again", {
     eventd.unset(vm, "MaxStreamingQueries"):assert_ok()
     local _, applied = eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 30m ago", function(rows)
         for _, r in ipairs(rows) do
-            if r.timestamp >= since and r.key == "MaxStreamingQueries" and r.new_value_type == "absent" then
+            if r["event.time"] >= since and r.key == "MaxStreamingQueries" and r.new_value_type == "absent" then
                 return true
             end
         end
