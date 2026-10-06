@@ -18,6 +18,7 @@ local token = require("helpers.token")
 local access = require("helpers.access")
 local us = require("helpers.unixsock")
 local kmes = require("helpers.kmes")
+local lcs = require("helpers.lcs")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -665,10 +666,31 @@ test("a refused impersonation is recorded with its errno and reason",
             "the gate never answered with a level")
     end)
 
+--- Run `fn` with kacs.impersonation.reverted switched on. It is verbose,
+--- so the tier default leaves it off: a Machine source seeding every
+--- kernel-read key, with Events\kacs\impersonation\reverted Enabled = 1,
+--- is registered so the kernel's bootstrap walk reads the policy, and
+--- closed again afterwards.
+local function with_reverted_enabled(fn)
+    local src = lcs.source(vm, { hives = { { name = "Machine", root = lcs.guid() } } })
+    src:key("Machine\\Software\\Test")
+    src:key(lcs.PARAMS_PATH)
+    src:key(lcs.LAYERS_PATH)
+    src:key("Machine\\System\\KMES")
+    src:key("Machine\\System\\Network\\TcpIp\\PortReservations")
+    local reverted = src:key("Machine\\Generic\\Events\\kacs\\impersonation\\reverted")
+    src:value(reverted, "Enabled", lcs.TYPE.DWORD, lcs.dword(1))
+    assert(src:register())
+    src:pump()
+    local ok, err = pcall(fn)
+    src:close()
+    if not ok then error(err, 0) end
+end
+
 test("ending an impersonation writes kacs.impersonation.reverted with its cause",
     { spec = "PKM *imp.audit.reverted-record" }, function(t)
-        local a_id, b_id
-        local events = recording(t, function()
+        local events
+        with_reverted_enabled(function() events = recording(t, function()
             token.as_principal(t, vm, { privs_present = MINTER | IMPERSONATE,
                 privs_enabled = MINTER | IMPERSONATE }, function(w)
                 local a = assert(token.mint(w, { user_sid = token.SID.TEST_USER_2,
@@ -681,7 +703,7 @@ test("ending an impersonation writes kacs.impersonation.reverted with its cause"
                 t:assert_eq(token.revert(w).ret, 0, "a revert with nothing to end")
                 sys.close(w, a); sys.close(w, b)
             end)
-        end)
+        end) end)
         local rec = kmes.of_type(events, REVERTED)
         t:assert_eq(#rec, 2, "two impersonations ended, two records; the idle revert writes none")
         t:assert_eq(rec[1].payload.operation.name, "replaced", "A was replaced by B")
