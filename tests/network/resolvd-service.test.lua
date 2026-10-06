@@ -544,10 +544,13 @@ test("every line resolvd logs is `resolvd: <info|warn|error>: <text>` on standar
 test("the /dev/kmsg mirror fails once per process, directly after the first line, and nothing reaches the kernel log",
     { spec = "resolvd *service.kmsg-mirror-fails-once" }, function(t)
         local mark = guest_ns()
-        -- A run that fails at once: the first line is its fatal error
-        -- (the stale socket it cannot remove, PEI-1373).
+        -- A run that fails at once: the first line is its fatal error. A
+        -- directory where the socket goes cannot be removed as a stale
+        -- socket (EISDIR). This used to be the stale socket itself, which
+        -- the service could not remove until PEI-1373 was fixed.
         sut:run("svctl stop resolvd"):assert_ok()
         wait_until(function() return rpid() == nil end, { timeout = 30, interval = 0.25, desc = "resolvd stopped" })
+        sh("rm -f " .. SOCK .. " && mkdir " .. SOCK):assert_ok()
         sut:run("svctl start resolvd")
         wait_until(function()
             for _, l in ipairs(log_since(mark)) do
@@ -558,7 +561,8 @@ test("the /dev/kmsg mirror fails once per process, directly after the first line
         -- A start without a stale socket but with a Dns warning first.
         sut:run("svctl stop resolvd"):assert_ok()
         wait_until(function() return rpid() == nil end, { timeout = 30, interval = 0.25, desc = "resolvd stopped" })
-        sut:run("rm -f " .. SOCK):assert_ok()
+        sut:run("rm -rf " .. SOCK):assert_ok()
+        sut:run("svctl reset resolvd")
         network.write(sut, "Dns", { FallbackServers = "multi:pt-bad-address" })
         sut:run("svctl start resolvd"):assert_ok()
         answering(nil)
