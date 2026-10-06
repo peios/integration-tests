@@ -73,29 +73,8 @@ local function open(t, src, w, path)
     return r.ret
 end
 
--- ---- the seed ---------------------------------------------------------
-
-test("the kernel's seed creates Events with Enabled = 1",
-    { spec = "PKM *policy.seed-enables-at-root" }, function(t)
-        -- Shipped by the kernel package, inert until an image names it:
-        -- the kernel-only image names nothing, so it is read as a file.
-        local doc = json.decode(vm:read_file("/usr/share/regim/event-policy.reg"))
-        t:assert(doc and doc.keys, "the seed is a batch document")
-        local events, generic
-        for _, k in ipairs(doc.keys) do
-            if k.path == EVENTS_PATH then events = k end
-            if k.path == "Machine\\Generic" then generic = k end
-        end
-        t:assert(generic, "it creates Machine\\Generic")
-        t:assert(events, "and Machine\\Generic\\Events beneath it")
-        local enabled
-        for _, v in ipairs(events.values or {}) do
-            if v.name == "Enabled" then enabled = v end
-        end
-        t:assert(enabled, "which holds Enabled")
-        t:assert_eq(enabled.type, "dword", "as a REG_DWORD")
-        t:assert_eq(enabled.data, 1, "of 1")
-    end)
+-- The shipped seed, applied as an image applies it, is
+-- kmes/event-policy-seed (the peinit image: this one has no `reg`).
 
 -- ---- bootstrap ----------------------------------------------------------
 
