@@ -1,5 +1,6 @@
--- eventd TRM §7.3 — per-field control: object ACEs over a two-level object
--- type list, field GUIDs derived by UUID v5 from the field's name, the
+-- eventd TRM §7.3 — per-field control: object ACEs over an object type
+-- list that is the tree of the fields' dotted paths, field GUIDs derived
+-- by UUID v5 from the field's name, granting a subtree by its prefix, the
 -- names each kind of field goes by, and the list built for each record.
 --
 -- One file-scope eventd serves every test; each writes descriptors only
@@ -188,8 +189,8 @@ test("an object ACE with no GUID applies to every field, and one with a field's 
     local rs = settle(ev(ty), count(2), "an object ACE with no GUID to grant the records")
     t:assert_eq(keys(where(rs, "n", 1)), with, "an object ACE without a GUID grants every field")
 
-    -- A field GUID names a level-1 node, and only in the list of a record
-    -- that carries the field.
+    -- A field GUID names a node, and only in the list of a record that
+    -- carries the field.
     eventd.put_descriptor(vm, "Events", ty, access.simple({
         access.ace(access.ACE.DENIED_OBJECT, READ, SY, 0, { object_type = eventd.field_guid("extra") }),
         allow_object(READ, nil) }))
@@ -199,8 +200,8 @@ test("an object ACE with no GUID applies to every field, and one with a field's 
         "and the record without extra, whose list has no such node, is shown whole")
 end)
 
-test("the object type list has the type's root at level 0 and its fields at level 1", {
-    spec = "eventd *fieldaccess.the-object-type-list-is-the-type-root-at-level-0-and-one-field-per-level-1-node",
+test("the object type list has the type's root at level 0 and its fields' paths beneath it", {
+    spec = "eventd *fieldaccess.the-object-type-list-is-the-root-and-the-tree-of-field-paths-one-node-per-segment",
 }, function(t)
     local ty = eventd.marker("ptroot")
     emit(ty, { n = 1, extra = "x" })
@@ -219,7 +220,7 @@ test("the object type list has the type's root at level 0 and its fields at leve
     local rs = settle(ev(ty), count(2), "the Events root GUID to grant the records")
     t:assert_eq(keys(where(rs, "n", 1)), with, "the Events root GUID is the list's level-0 node")
 
-    -- And a field GUID is a level-1 node below it.
+    -- And a field GUID is a node below it.
     eventd.put_descriptor(vm, "Events", ty, access.simple({
         access.ace(access.ACE.DENIED_OBJECT, READ, SY, 0, { object_type = eventd.field_guid("extra") }),
         allow_object(READ, ROOT.events) }))
@@ -307,6 +308,140 @@ test("an event payload field is named by its flattened dot path", {
     end
     t:assert_eq(where(rs, "i", 2)["source.kind"], "k2",
         "and the sibling path source.kind is its own field, untouched")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Granting a subtree by its prefix
+-- ---------------------------------------------------------------------------
+
+--- Three subject fields under two shared things, and one field outside.
+local SUBJECT = { subject = { token = { sid = "S-1-5-18", ["auth-id"] = 7 }, process = { pid = 9 } }, other = 1 }
+local SUBJECT_FIELDS = { "subject.token.sid", "subject.token.auth-id", "subject.process.pid" }
+
+--- `list`, then each of `more`.
+local function plus(list, more)
+    local out = {}
+    for _, k in ipairs(list) do out[#out + 1] = k end
+    for _, k in ipairs(more) do out[#out + 1] = k end
+    return out
+end
+
+--- Put `descriptor` for `ty`, wait until its one record holds exactly the
+--- keys `want`, and assert so.
+local function shows(t, ty, descriptor, want, desc)
+    eventd.put_descriptor(vm, "Events", ty, descriptor)
+    local ws = keyset(want)
+    local rs = settle(ev(ty), function(r) return #r == 1 and keys(r[1]) == ws end, desc)
+    t:assert_eq(keys(rs[1]), ws, desc)
+    return rs[1]
+end
+
+test("an ACE naming a prefix applies to every field beneath it", {
+    spec = "eventd *fieldaccess.an-ace-naming-a-prefix-applies-to-every-field-beneath-it"
+        .. " eventd *fieldaccess.a-prefix-node-has-the-guid-of-the-prefix-as-a-field-name"
+        .. " eventd *fieldaccess.a-shared-prefix-is-one-node-and-the-list-is-in-preorder"
+        .. " eventd *fieldaccess.the-object-type-list-is-the-root-and-the-tree-of-field-paths-one-node-per-segment",
+}, function(t)
+    local ty = eventd.marker("ptpre")
+    emit(ty, SUBJECT)
+    settle(ev(ty), count(1))
+    -- The GUID of the name `subject` names the node all three are beneath.
+    -- `subject` and `subject.token` are shared prefixes: a list naming one
+    -- twice, or out of preorder, is refused, and the query with it.
+    shows(t, ty, only({ "subject" }), SUBJECT_FIELDS, "a grant on subject: every subject field, nothing else")
+    shows(t, ty, only({ "subject.token" }), { "subject.token.sid", "subject.token.auth-id" },
+        "a grant on subject.token: the token's fields, not the process's")
+    shows(t, ty, only({ "subject.token.sid" }), { "subject.token.sid" },
+        "and a grant naming a full path is that one field's, as before")
+end)
+
+test("a field is decided by the first ACE naming it, a prefix of it, or the root", {
+    spec = "eventd *fieldaccess.a-field-is-decided-by-the-first-ace-naming-it-a-prefix-of-it-or-the-root",
+}, function(t)
+    local ty = eventd.marker("ptfirst")
+    emit(ty, SUBJECT)
+    settle(ev(ty), count(1))
+    -- Canonical order puts the deny first: a deny on the prefix hides the
+    -- field an allow after it names.
+    shows(t, ty, access.simple({ deny_field("subject"), allow_field("subject.token.sid"), allow_field("other") }),
+        { "other" }, "deny subject, then allow subject.token.sid: no subject field")
+    -- A deny on the field first, then an allow on its prefix: the allow
+    -- grants the rest of the subtree.
+    shows(t, ty, access.simple({ deny_field("subject.token.sid"), allow_field("subject"), allow_field("other") }),
+        { "subject.token.auth-id", "subject.process.pid", "other" },
+        "deny subject.token.sid, then allow subject: every subject field but the sid")
+    -- Out of canonical order the allow on the field comes first and
+    -- decides it; the deny on its prefix decides only the rest.
+    shows(t, ty, access.simple({ allow_field("subject.token.sid"), deny_field("subject"), allow(READ) }),
+        plus({ "subject.token.sid", "other" }, HEADERS),
+        "allow subject.token.sid, then deny subject: the sid is read and its siblings are not")
+end)
+
+test("a deny on a field leaves its siblings untouched", {
+    spec = "eventd *fieldaccess.a-deny-on-a-field-leaves-its-siblings-untouched",
+}, function(t)
+    local ty = eventd.marker("ptsib")
+    emit(ty, SUBJECT)
+    settle(ev(ty), count(1))
+    -- KACS carries the deny up to subject.token, subject and the root, but
+    -- onto no other field.
+    shows(t, ty, hiding({ "subject.token.sid" }),
+        plus({ "subject.token.auth-id", "subject.process.pid", "other" }, HEADERS),
+        "a deny on subject.token.sid hides it alone")
+    shows(t, ty, hiding({ "subject.token" }), plus({ "subject.process.pid", "other" }, HEADERS),
+        "a deny on subject.token hides the token's fields and not the process's")
+end)
+
+test("a grant on event or on emitter covers the header fields beneath it", {
+    spec = "eventd *fieldaccess.a-grant-on-event-or-emitter-covers-the-header-fields-beneath-it",
+}, function(t)
+    local ty = eventd.marker("pthsub")
+    emit(ty, { emitter = { process = { pid = 7 } }, n = 1 })
+    settle(ev(ty), count(1))
+    shows(t, ty, only({ "event" }), { "event.time", "event.cpu", "event.sequence", "event.type", "event.boot.guid" },
+        "a grant on event: every event.* header field")
+    shows(t, ty, only({ "emitter" }), { "emitter.class", "emitter.token.guid", "emitter.true-token.guid",
+        "emitter.process.guid", "emitter.process.pid" },
+        "a grant on emitter: every emitter.* header field and the payload field beside them")
+    local r = shows(t, ty, only({ "emitter.process" }), { "emitter.process.guid", "emitter.process.pid" },
+        "a grant on emitter.process: the header's process GUID and the payload's pid")
+    t:assert_eq(r["emitter.process.pid"], 7, "the pid is the payload's")
+end)
+
+test("the list is as deep as the deepest path, with no level limit", {
+    spec = "eventd *fieldaccess.the-list-is-as-deep-as-the-deepest-path-with-no-level-limit",
+}, function(t)
+    local ty = eventd.marker("ptdeep")
+    -- a.b.c.d.e.f is six segments, a node at level 6: past MS-DTYP's
+    -- level 4, which KACS does not impose.
+    emit(ty, { a = { b = { c = { d = { e = { f = 1, g = 2 } } } } }, h = 3 })
+    settle(ev(ty), count(1))
+    shows(t, ty, only({ "a.b.c" }), { "a.b.c.d.e.f", "a.b.c.d.e.g" }, "a grant on a.b.c reaches level 6")
+    local r = shows(t, ty, hiding({ "a.b.c.d.e.f" }), plus({ "a.b.c.d.e.g", "h" }, HEADERS),
+        "a deny on the level-6 field hides it alone")
+    t:assert_eq(r["a.b.c.d.e.g"], 2, "its sibling is shown with its value")
+end)
+
+test("a field that is also a prefix of another is checked with only its prefixes", {
+    spec = "eventd *fieldaccess.a-field-that-is-also-a-prefix-is-checked-with-only-its-prefixes",
+}, function(t)
+    local ty = eventd.marker("ptboth")
+    -- A payload value at `emitter`, the prefix of the header's emitter.*.
+    emit(ty, { emitter = 5, n = 1 })
+    settle(ev(ty), count(1))
+    -- Granting every field beneath `emitter` grants all of its node's
+    -- children, which KACS carries up to the node; `emitter` itself is
+    -- granted nothing.
+    shows(t, ty, only({ "emitter.class", "emitter.token.guid", "emitter.true-token.guid", "emitter.process.guid" }),
+        { "emitter.class", "emitter.token.guid", "emitter.true-token.guid", "emitter.process.guid" },
+        "every field beneath emitter, and not emitter")
+    -- Denying one field beneath it, which KACS carries up to the node,
+    -- does not deny `emitter`, which the allow after it grants.
+    local all_but_class = {}
+    for _, h in ipairs(HEADERS) do if h ~= "emitter.class" then all_but_class[#all_but_class + 1] = h end end
+    local r = shows(t, ty, hiding({ "emitter.class" }), plus({ "emitter", "n" }, all_but_class),
+        "every field but emitter.class, emitter included")
+    t:assert_eq(r.emitter, 5, "emitter is the payload's value")
 end)
 
 local function lg(origin) return "LOGS FROM " .. origin .. " SINCE 1h ago TAKE 1000" end
