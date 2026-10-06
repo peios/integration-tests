@@ -17,6 +17,7 @@ local kacs = require("helpers.kacs")
 local token = require("helpers.token")
 local access = require("helpers.access")
 local us = require("helpers.unixsock")
+local kmes = require("helpers.kmes")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -571,4 +572,124 @@ test("KACS_IOC_IMPERSONATE works on a token fd however it was obtained",
             token.revert(w)
             for _, fd in ipairs({ minted, peer, passed, srv, cli, acc }) do sys.close(w, fd) end
         end)
+    end)
+
+-- Audit records -------------------------------------------------------------------
+
+local STARTED, REVERTED = "kacs.impersonation.started", "kacs.impersonation.reverted"
+
+--- Run `fn` with CPU 0's ring attached and return what was written.
+local function recording(t, fn)
+    return kmes.recording(t, vm, fn)
+end
+
+--- The worker's thread id: a worker issues every syscall on one thread.
+local function tid_of(w) return w:syscall(sys.NR.gettid).ret end
+
+test("an impersonation writes kacs.impersonation.started naming server, client and levels",
+    { spec = "PKM *imp.audit.started-record" }, function(t)
+        local rec, client_id, tid
+        local events = recording(t, function()
+            token.as_principal(t, vm, { privs_present = MINTER | IMPERSONATE,
+                privs_enabled = MINTER | IMPERSONATE }, function(w)
+                tid = tid_of(w)
+                local client = assert(token.mint(w, { user_sid = token.SID.TEST_USER_2,
+                    token_type = token.TYPE.IMPERSONATION, impersonation_level = L.IMPERSONATION }))
+                client_id = assert(token.statistics(w, client)).token_id
+                t:assert_eq(token.impersonate(w, client).ret, 0, "the server impersonates")
+                token.revert(w)
+                sys.close(w, client)
+            end)
+        end)
+        rec = kmes.of_type(events, STARTED)
+        t:assert_eq(#rec, 1, "one started record")
+        local p = rec[1].payload
+        t:assert_eq(p.subject.token.sid, token.SID.TEST_USER, "the subject is the server")
+        t:assert_eq(p.emitter.thread.tid, tid, "the thread that took the identity on")
+        t:assert_eq(p.object.kind, "token", "the object is a token")
+        t:assert_eq(p.object.token.sid, token.SID.TEST_USER_2, "the client's")
+        t:assert_eq(p.object.token.type, "impersonation", "an impersonation token")
+        t:assert_eq(p.object.token.id, client_id, "unclamped, the installed token is the client's own")
+        t:assert_eq(p.object.token.impersonation, L.IMPERSONATION, "the level offered")
+        t:assert_eq(p.object.token["impersonation-permitted"], L.IMPERSONATION, "and allowed")
+        t:assert_eq(p.privilege.name, "SeImpersonatePrivilege",
+            "a different user needed SeImpersonatePrivilege")
+        t:assert_eq(p.privilege.held, true, "which the server held")
+        t:assert_eq(p.outcome.success, true, "and it succeeded")
+    end)
+
+test("a lowered level is recorded as permitted below requested, on the new token's id",
+    { spec = "PKM *imp.audit.started-permitted-level" }, function(t)
+        local client_id
+        local events = recording(t, function()
+            token.as_principal(t, vm, { privs_present = MINTER, privs_enabled = MINTER }, function(w)
+                local client = assert(token.mint(w, { user_sid = token.SID.TEST_USER_2,
+                    token_type = token.TYPE.IMPERSONATION, impersonation_level = L.IMPERSONATION }))
+                client_id = assert(token.statistics(w, client)).token_id
+                t:assert_eq(token.impersonate(w, client).ret, 0,
+                    "without SeImpersonatePrivilege the impersonation still succeeds")
+                token.revert(w)
+                sys.close(w, client)
+            end)
+        end)
+        local rec = kmes.of_type(events, STARTED)
+        t:assert_eq(#rec, 1, "one started record")
+        local tok = rec[1].payload.object.token
+        t:assert_eq(tok.impersonation, L.IMPERSONATION, "Impersonation was asked for")
+        t:assert_eq(tok["impersonation-permitted"], L.IDENTIFICATION, "Identification was allowed")
+        t:assert(tok.id ~= client_id, "the lowered clone is a new token, and the record names it")
+        t:assert_eq(rec[1].payload.privilege, nil, "and no privilege was used")
+        t:assert_eq(rec[1].payload.outcome.success, true, "a success all the same")
+    end)
+
+test("a refused impersonation is recorded with its errno and reason",
+    { spec = "PKM *imp.audit.started-records-refusals" }, function(t)
+        local RESTRICTION = { { sid = token.SID.TEST_GROUP_2, attributes = 0 } }
+        local events = recording(t, function()
+            token.as_principal(t, vm, { privs_present = MINTER, privs_enabled = MINTER,
+                restricted_sids = RESTRICTION }, function(w)
+                local own = assert(token.mint(w, { user_sid = token.SID.TEST_USER,
+                    token_type = token.TYPE.IMPERSONATION, impersonation_level = L.IMPERSONATION }))
+                t:assert_eq(token.impersonate(w, own).errno, sys.E.PERM,
+                    "a restricted server cannot take on an unrestricted token of its own user")
+                sys.close(w, own)
+            end)
+        end)
+        local rec = kmes.of_type(events, STARTED)
+        t:assert_eq(#rec, 1, "the refusal is recorded")
+        local o = rec[1].payload.outcome
+        t:assert_eq(o.success, false, "as a failure")
+        t:assert_eq(o.errno, -sys.E.PERM, "with EPERM")
+        t:assert_eq(o.reason, "restriction-escape", "and why")
+        t:assert_eq(rec[1].payload.object.token["impersonation-permitted"], nil,
+            "the gate never answered with a level")
+    end)
+
+test("ending an impersonation writes kacs.impersonation.reverted with its cause",
+    { spec = "PKM *imp.audit.reverted-record" }, function(t)
+        local a_id, b_id
+        local events = recording(t, function()
+            token.as_principal(t, vm, { privs_present = MINTER | IMPERSONATE,
+                privs_enabled = MINTER | IMPERSONATE }, function(w)
+                local a = assert(token.mint(w, { user_sid = token.SID.TEST_USER_2,
+                    token_type = token.TYPE.IMPERSONATION, impersonation_level = L.IMPERSONATION }))
+                local b = assert(token.mint(w, { user_sid = token.sid(5, 21, 1000, 2000, 3000, 1109),
+                    token_type = token.TYPE.IMPERSONATION, impersonation_level = L.IMPERSONATION }))
+                t:assert_eq(token.impersonate(w, a).ret, 0, "impersonate A")
+                t:assert_eq(token.impersonate(w, b).ret, 0, "then B, which ends A")
+                t:assert_eq(token.revert(w).ret, 0, "then revert, which ends B")
+                t:assert_eq(token.revert(w).ret, 0, "a revert with nothing to end")
+                sys.close(w, a); sys.close(w, b)
+            end)
+        end)
+        local rec = kmes.of_type(events, REVERTED)
+        t:assert_eq(#rec, 2, "two impersonations ended, two records; the idle revert writes none")
+        t:assert_eq(rec[1].payload.operation.name, "replaced", "A was replaced by B")
+        t:assert_eq(rec[1].payload.object.token.sid, token.SID.TEST_USER_2, "naming A")
+        t:assert_eq(rec[2].payload.operation.name, "revert", "B was reverted explicitly")
+        t:assert_eq(rec[2].payload.object.token.sid, token.sid(5, 21, 1000, 2000, 3000, 1109),
+            "naming B")
+        t:assert_eq(rec[2].payload.subject.token.sid, token.SID.TEST_USER,
+            "and the subject is the thread's own token again")
+        t:assert_eq(rec[2].payload.outcome.success, true, "the revert succeeded")
     end)
