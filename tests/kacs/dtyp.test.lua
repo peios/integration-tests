@@ -326,6 +326,50 @@ test("a zero desired mask succeeds rather than returning access denied",
         sys.close(vm, fd)
     end)
 
+test("an object type list may nest deeper than MS-DTYP's four levels",
+    { spec = "PKM *dtyp.object-type-list-no-level-limit" }, function(t)
+        -- A single chain, root at level 0 down to a leaf at level 6: two
+        -- levels past MS-DTYP's limit of four.
+        local chain = {}
+        for level = 0, 6 do
+            chain[#chain + 1] = { level = level, guid = string.rep(string.char(0x40 + level), 16) }
+        end
+        local function nodes(sd)
+            local fd = subject({})
+            local r = access.check_list(vm, { token_fd = fd, sd = sd,
+                desired = STD.MAXIMUM_ALLOWED, mapping = MAP, tree = chain })
+            sys.close(vm, fd)
+            return r
+        end
+        local function grant_on(guid)
+            return owned(U, access.acl({ access.ace(A.ALLOWED_OBJECT, READ,
+                kacs.SID.EVERYONE, 0, { object_type = guid }) }))
+        end
+        local function dump(r)
+            local parts = {}
+            for i, n in ipairs(r.nodes or {}) do parts[i] = string.format("%d:0x%x", i - 1, n.granted) end
+            return table.concat(parts, " ")
+        end
+
+        local down = nodes(grant_on(chain[2].guid))
+        t:log("grant on level 1: ret=" .. tostring(down.ret) .. " " .. dump(down))
+        t:assert(down.ok, "a seven-level list is accepted: " .. sys.errname(down.errno or 0))
+        t:assert_eq(#down.nodes, 7, "and every node gets a result")
+        t:assert_eq(down.nodes[1].granted, 0, "the root, above the named node, is not granted")
+        for i = 2, 7 do
+            t:assert_eq(down.nodes[i].granted, READ,
+                "a grant at level 1 flows down to level " .. (i - 1))
+        end
+
+        local up = nodes(grant_on(chain[7].guid))
+        t:log("grant on level 6: ret=" .. tostring(up.ret) .. " " .. dump(up))
+        t:assert(up.ok, "the same list answers a grant on its deepest node")
+        for i = 1, 7 do
+            t:assert_eq(up.nodes[i].granted, READ,
+                "the level-6 leaf is its parent's only child, so the right reaches level " .. (i - 1))
+        end
+    end)
+
 test("an alarm ACE drives continuous per-operation auditing",
     { spec = "PKM *dtyp.alarm-ace-continuous-audit" }, function(t)
         local fd = subject({})
