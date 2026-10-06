@@ -206,10 +206,24 @@ test("the pair's own references do not keep the session alive",
         local e, l, sid = pair(vm)
         t:assert_eq(token.link(vm, e, e, l, sid).ret, 0, "link")
         kmes.drain(ring)
+        -- The record is written by a kernel work item after the teardown,
+        -- so each drain first gives that work a moment to run.
+        local function settled_destroyed()
+            local ev = {}
+            for _ = 1, 10 do
+                sys.nanosleep(vm, 0, 50 * 1000 * 1000)
+                for _, rec in ipairs(kmes.of_type(kmes.drain(ring), "kacs.session.destroyed")) do
+                    ev[#ev + 1] = rec
+                end
+                if #ev > 0 then break end
+            end
+            return ev
+        end
         sys.close(vm, e)
+        sys.nanosleep(vm, 0, 50 * 1000 * 1000)
         t:assert_eq(#kmes.of_type(kmes.drain(ring), "kacs.session.destroyed"), 0, "l still held: session alive")
         sys.close(vm, l)
-        local ev = kmes.of_type(kmes.drain(ring), "kacs.session.destroyed")
+        local ev = settled_destroyed()
         t:assert_eq(#ev, 1, "the last external reference gone: the session is destroyed despite the pair")
         t:assert_eq(ev[1].payload.object.session.id, sid, "and the record names that session")
         local again, errno = token.create(vm, { auth_id = sid })

@@ -24,6 +24,22 @@ local function destroyed_for(events, sid)
     return out
 end
 
+--- Drain `ring` once the session-audit work has had a chance to run.
+--- kacs.session.destroyed is written by a kernel work item after the
+--- teardown rather than by the call that ended the session, so a drain
+--- straight after the close can come too early. Polls until `sid` has a
+--- record, or for about half a second; with `expect_none`, waits once and
+--- returns what arrived, so a "no record" assertion is not vacuous.
+local function settled(ring, sid, expect_none)
+    local events = {}
+    for _ = 1, expect_none and 1 or 10 do
+        sys.nanosleep(vm, 0, 50 * 1000 * 1000)
+        for _, e in ipairs(kmes.drain(ring)) do events[#events + 1] = e end
+        if not expect_none and #destroyed_for(events, sid) > 0 then break end
+    end
+    return events
+end
+
 test("a LogonSession is created through a KACS syscall before the token that references it",
     { spec = "PKM *token.session.created-before-token" }, function(t)
         local sid = assert(token.create_logon_session(vm, { logon_type = token.LOGON_TYPE.SERVICE }))
@@ -71,9 +87,9 @@ test("freeing the last token destroys the session and emits kacs.session.destroy
         local b = assert(token.create(vm, { auth_id = sid }))
         kmes.drain(ring)
         sys.close(vm, a)
-        t:assert_eq(#destroyed_for(kmes.drain(ring), sid), 0, "one token left: no event yet")
+        t:assert_eq(#destroyed_for(settled(ring, sid, true), sid), 0, "one token left: no event yet")
         sys.close(vm, b)
-        local ev = destroyed_for(kmes.drain(ring), sid)
+        local ev = destroyed_for(settled(ring, sid), sid)
         t:assert_eq(#ev, 1, "the last close destroys the session: exactly one event")
         t:assert_eq(ev[1].origin, kmes.ORIGIN.KACS, "from KACS")
         local s = ev[1].payload.object.session
@@ -114,7 +130,7 @@ test("the rollback emits the same kacs.session.destroyed event",
         local sid = assert(token.create_logon_session(vm, {}))
         kmes.drain(ring)
         t:assert_eq(token.destroy_empty_logon_session(vm, sid).ret, 0, "destroy")
-        local ev = destroyed_for(kmes.drain(ring), sid)
+        local ev = destroyed_for(settled(ring, sid), sid)
         t:assert_eq(#ev, 1, "one kacs.session.destroyed event")
         kmes.detach(ring)
     end)

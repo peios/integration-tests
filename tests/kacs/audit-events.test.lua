@@ -38,6 +38,9 @@ local function recorded(t, fn)
     local ring, errno = kmes.attach(vm, 0)
     t:assert(ring, "a KMES ring attaches: " .. sys.errname(errno or 0))
     local ok, err = pcall(fn, ring)
+    -- kacs.session.destroyed is written by a kernel work item after the
+    -- teardown, not by the call that ended the session: give it a moment.
+    sys.nanosleep(vm, 0, 50 * 1000 * 1000)
     local events = kmes.drain(ring)
     kmes.detach(ring)
     if not ok then error(err, 0) end
