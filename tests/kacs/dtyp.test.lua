@@ -328,22 +328,36 @@ test("a zero desired mask succeeds rather than returning access denied",
 
 test("an object type list may nest deeper than MS-DTYP's four levels",
     { spec = "PKM *dtyp.object-type-list-no-level-limit" }, function(t)
-        -- A single chain, root at level 0 down to a leaf at level 6: two
-        -- levels past MS-DTYP's limit of four.
+        -- A chain, root at level 0 down to a leaf at level 6 (two levels
+        -- past MS-DTYP's limit of four), and one more child of the root
+        -- at level 1 after it. A grant reaches a parent only when every
+        -- child holds it, so the sibling, never granted on its own, is
+        -- what keeps the root from inheriting a grant made down the
+        -- chain.
         local chain = {}
         for level = 0, 6 do
             chain[#chain + 1] = { level = level, guid = string.rep(string.char(0x40 + level), 16) }
         end
+        local sibling = { level = 1, guid = string.rep("S", 16) }
+        local tree = {}
+        for i, n in ipairs(chain) do tree[i] = n end
+        tree[#tree + 1] = sibling
         local function nodes(sd)
             local fd = subject({})
             local r = access.check_list(vm, { token_fd = fd, sd = sd,
-                desired = STD.MAXIMUM_ALLOWED, mapping = MAP, tree = chain })
+                desired = STD.MAXIMUM_ALLOWED, mapping = MAP, tree = tree })
             sys.close(vm, fd)
             return r
         end
-        local function grant_on(guid)
-            return owned(U, access.acl({ access.ace(A.ALLOWED_OBJECT, READ,
-                kacs.SID.EVERYONE, 0, { object_type = guid }) }))
+        -- Owned by U2, so the subject holds no owner's implicit rights
+        -- and a node's grant is only what the object ACEs gave it.
+        local function grant_on(...)
+            local aces = {}
+            for i, guid in ipairs({ ... }) do
+                aces[i] = access.ace(A.ALLOWED_OBJECT, READ,
+                    kacs.SID.EVERYONE, 0, { object_type = guid })
+            end
+            return owned(U2, access.acl(aces))
         end
         local function dump(r)
             local parts = {}
@@ -354,19 +368,32 @@ test("an object type list may nest deeper than MS-DTYP's four levels",
         local down = nodes(grant_on(chain[2].guid))
         t:log("grant on level 1: ret=" .. tostring(down.ret) .. " " .. dump(down))
         t:assert(down.ok, "a seven-level list is accepted: " .. sys.errname(down.errno or 0))
-        t:assert_eq(#down.nodes, 7, "and every node gets a result")
-        t:assert_eq(down.nodes[1].granted, 0, "the root, above the named node, is not granted")
+        t:assert_eq(#down.nodes, 8, "and every node gets a result")
+        t:assert_eq(down.nodes[1].granted, 0,
+            "the root, whose other child is not granted, is not granted")
         for i = 2, 7 do
             t:assert_eq(down.nodes[i].granted, READ,
                 "a grant at level 1 flows down to level " .. (i - 1))
         end
+        t:assert_eq(down.nodes[8].granted, 0, "and not across to the sibling")
 
         local up = nodes(grant_on(chain[7].guid))
         t:log("grant on level 6: ret=" .. tostring(up.ret) .. " " .. dump(up))
         t:assert(up.ok, "the same list answers a grant on its deepest node")
-        for i = 1, 7 do
+        for i = 2, 7 do
             t:assert_eq(up.nodes[i].granted, READ,
-                "the level-6 leaf is its parent's only child, so the right reaches level " .. (i - 1))
+                "each node of the chain is its parent's only child, so the right climbs to level " .. (i - 1))
+        end
+        t:assert_eq(up.nodes[1].granted, 0,
+            "and stops below the root, whose other child is not granted")
+
+        local both = nodes(grant_on(chain[7].guid, sibling.guid))
+        t:log("grant on level 6 and the sibling: ret=" .. tostring(both.ret) .. " " .. dump(both))
+        t:assert(both.ok, "the same list answers a grant on both")
+        for i = 1, 8 do
+            t:assert_eq(both.nodes[i].granted, READ,
+                "with the sibling granted too, every node holds the right, level "
+                    .. tree[i].level .. " included")
         end
     end)
 
