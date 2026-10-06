@@ -408,11 +408,21 @@ test("each interface map carries every tabled field, from identity to lease",
         t:assert(e.lease, "lease: present while bound")
         t:log(string.format("lease: server %s expires_in %s state %s", tostring(e.lease.server),
             tostring(e.lease.expires_in), tostring(e.lease.state)))
-        t:assert_eq(sorted(e.lease._keys), "expires_in,server,state", "lease fields")
+        -- A netd before the lease's length and T1/T2 reached status lacks
+        -- the last three, as the table says; when they are there they are
+        -- exact.
+        local keys = sorted(e.lease._keys)
+        t:assert(keys == "expires_in,server,state" or keys == "duration,expires_in,rebind_at,renew_at,server,state",
+            "lease fields: " .. keys)
         t:assert_eq(e.lease.server, "10.77.0.1", "lease.server")
         t:assert_eq(e.lease.state, "bound", "lease.state")
         t:assert(math.type(e.lease.expires_in) == "integer" and e.lease.expires_in > 3000
             and e.lease.expires_in <= 3600, "lease.expires_in: whole seconds left of 3600")
+        if e.lease.duration ~= nil then
+            t:assert_eq(e.lease.duration, 3600, "lease.duration: the lease's length")
+            t:assert_eq(e.lease.renew_at, 1800, "lease.renew_at: T1, half the lease (no option 58)")
+            t:assert_eq(e.lease.rebind_at, 3150, "lease.rebind_at: T2, seven-eighths (no option 59)")
+        end
 
         -- tunl0: no rule speaks for it, it has no MAC, path or driver, and
         -- it is down and not joined.
