@@ -85,11 +85,24 @@ test("a refused attestation is recorded with the denial", function(t)
 end)
 
 test("an administrator's account and group changes are recorded by SID", function(t)
+    -- The edition provisions its live account with `lps add` at first boot,
+    -- and a record names no account by name, so this test's account is the
+    -- one created after the accounts already recorded.
+    local before = {}
+    for _, row in ipairs(eventd.rows(vm, "EVENTS lpsd.account.created SINCE 1h ago "
+            .. "TAKE 1000 SELECT object.account.sid")) do
+        local sid = hex(row["object.account.sid"])
+        if sid then before[sid] = true end
+    end
+
     vm:run("lps add pt-audit-user --no-password --no-prompt"):assert_ok()
     local created = find("EVENTS lpsd.account.created SINCE 1h ago TAKE 1000 SELECT "
             .. "subject.token.sid, object.account.sid, outcome.success",
-        function(row) return row["outcome.success"] == true and hex(row["object.account.sid"]) end,
-        "lpsd.account.created")
+        function(row)
+            local sid = hex(row["object.account.sid"])
+            return row["outcome.success"] == true and sid ~= nil and not before[sid]
+        end,
+        "lpsd.account.created for pt-audit-user")
     local account = hex(created["object.account.sid"])
     t:assert_eq(hex(created["subject.token.sid"]), SYSTEM, "the administrator who asked")
 
