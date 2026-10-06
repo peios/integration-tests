@@ -471,8 +471,13 @@ test("eventd.events.lost carries buffer.cpu and loss.{sequence,sequence-last,cou
         t:assert_eq(math.type(preceding), "integer", "loss.preceding-time is a timestamp")
         t:assert_eq(preceding, edge_before, "loss.preceding-time is the event before the gap")
     else
-        t:assert(first == 1 or edge_before == nil,
-            "loss.preceding-time is left out only when no event before the gap is known")
+        -- "Known" is known to the drain in this run. This gap is found by
+        -- restart reconciliation after the ring lapped, so the event before
+        -- it is accounted only by a committed receipt, which eventd does
+        -- not read back for a timestamp (§2.5): leaving it out is right
+        -- even though that event is stored.
+        t:assert(first == 1 or highest_contiguous(cpu) >= first - 1,
+            "loss.preceding-time is left out only when the event before the gap is unseen in this run")
     end
 end)
 
