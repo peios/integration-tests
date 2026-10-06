@@ -47,16 +47,31 @@ test("a clock jump reorders timestamps and nothing else",
             bufs = { string.pack("<i8i8", sec - 3600, 0) }, ptrs = { 1 },
         }).ret, 0, "the clock jumps an hour back")
         t:assert_eq(kmes.emit(vmc, "PIT_JUMP", kmes.PAYLOAD).ret, 0, "after")
-        local events = kmes.of_type(kmes.drain(ring), "PIT_JUMP")
+        local all = kmes.drain(ring)
         kmes.detach(ring)
         vmc:syscall(227, { args = { 0, 0 },
             bufs = { string.pack("<i8i8", sec + 1, 0) }, ptrs = { 1 } })
 
-        t:assert_eq(#events, 2, "both events in the ring")
-        t:assert(events[2].timestamp < events[1].timestamp,
+        -- Setting the clock is itself recorded (the agent is SYSTEM, whose
+        -- privilege use is audited), so the ring may hold more than the
+        -- two PIT_JUMPs. Every event between them still takes the next
+        -- number, whatever its timestamp.
+        local at = {}
+        for i, e in ipairs(all) do
+            if e.type == "PIT_JUMP" then at[#at + 1] = i end
+        end
+        t:assert_eq(#at, 2, "both events in the ring")
+        local first, second = all[at[1]], all[at[2]]
+        local between = {}
+        for i = at[1] + 1, at[2] - 1 do between[#between + 1] = all[i].type end
+        t:log("between the two: " .. table.concat(between, ", "))
+        t:assert(second.timestamp < first.timestamp,
             "the second is stamped an hour before the first")
-        t:assert_eq(events[2].sequence, events[1].sequence + 1,
-            "while its sequence number is simply the next")
+        for i = at[1] + 1, at[2] do
+            t:assert_eq(all[i].sequence, all[i - 1].sequence + 1,
+                "while each sequence number is simply the next ("
+                    .. all[i].type .. ")")
+        end
     end)
 
 test("a CPU taken offline keeps its ring, silent",
