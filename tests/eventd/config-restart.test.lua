@@ -131,7 +131,7 @@ test("store paths, socket paths and StorageShards are deferred until a restart, 
     end
     local startup = eventd.wait_rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1m ago",
         function(rs) return #rs >= 1 end, { socket = ALT.query })
-    t:assert_eq(startup[1].shard_count, 3, "the restarted eventd runs three shards: " .. json.encode(startup[1]))
+    t:assert_eq(startup[1]["store.shard-count"], 3, "the restarted eventd runs three shards: " .. json.encode(startup[1]))
     local files = names_in(ALT.events)
     t:assert(files["shard-0000.db"] and files["shard-0001.db"] and files["shard-0002.db"],
         "three shards in the new event store: " .. json.encode(files))
@@ -237,7 +237,7 @@ test("StorageShards defaults to 0, which is one shard per attached KMES buffer",
 }, function(t)
     local function started()
         local rows = eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1h ago TAKE 1")
-        return rows[1].shard_count
+        return rows[1]["store.shard-count"]
     end
     local fds = eventd.fd_listing(vm, eventd.pid(vm))
     local buffers = select(2, fds:gsub("anon_inode:kmes%-cpu", ""))
