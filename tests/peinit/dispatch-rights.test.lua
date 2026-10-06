@@ -10,8 +10,9 @@
 -- image has never heard of, which since PEI-1231 the control socket
 -- admits like any authenticated principal. Second, the check behind
 -- `granted` is a question rather than a command, so it must leave no
--- audit record; that is read from the KMES ring beside a deliberate
--- denial that must.
+-- record of a refusal; that is read from KACS's
+-- `kacs.audit.access.checked` records, in eventd, beside a deliberate
+-- denial that must leave one.
 --
 -- The same second caller is what §4.6's built-in default needs: the
 -- default lets every authenticated principal query a service, and the
@@ -28,6 +29,8 @@ local token = require("helpers.token")
 local us = require("helpers.unixsock")
 local sys = require("helpers.sys")
 local f = require("helpers.peinit_client")
+local eventd = require("helpers.eventd")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local SERVICES = [[Machine\System\Services]]
@@ -123,37 +126,50 @@ local function granted(answer)
     return answer:match('"granted":(%[[^%]]*%])')
 end
 
---- Every event of `kind` in the KMES ring, as revstrm's pretty payloads.
-local function events(kind)
-    local r = vm:run("revstrm --snapshot --pretty --type '" .. kind .. "'", { timeout = 60 })
-    r:assert_ok()
-    local out, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        if line:match("^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+([%w_]+%.[%w_]+)%s*$") then
-            current = { payload = "" }
-            out[#out + 1] = current
-        elseif current and line:match("^%s") then
-            current.payload = current.payload .. line .. "\n"
-        end
+--- `f.descriptor_hex`'s descriptor with a SACL of one failure-audit ACE
+--- for Everyone over every right, as peinit's built-in defaults carry. A
+--- descriptor written to the registry is used as given, so a test that
+--- wants KACS to record a refusal under its own has to ask for it.
+local function audited_descriptor_hex(owner, aces)
+    local body = ""
+    for _, ace in ipairs(aces) do
+        body = body .. string.pack("<BBI2I4", 0, 0, 8 + #ace.sid, ace.mask) .. ace.sid
     end
-    return out
+    local dacl = string.pack("<BBI2I2I2", 2, 0, 8 + #body, #aces, 0) .. body
+    local everyone = string.pack("BB", 1, 1) .. string.pack(">I2>I4", 0, 1)
+        .. string.pack("<I4", 0)
+    -- SYSTEM_AUDIT_ACE_TYPE (2), FAILED_ACCESS_ACE_FLAG (0x80).
+    local audit = string.pack("<BBI2I4", 2, 0x80, 8 + #everyone, 0xf) .. everyone
+    local sacl = string.pack("<BBI2I2I2", 2, 0, 8 + #audit, 1, 0) .. audit
+    -- SACL_PRESENT | DACL_PRESENT | SELF_RELATIVE.
+    local sacl_at = 20 + 2 * #owner
+    local header = string.pack("<BBI2I4I4I4I4", 1, 0, 0x8014,
+        20, 20 + #owner, sacl_at, sacl_at + #sacl)
+    return ((header .. owner .. owner .. sacl .. dacl):gsub(".",
+        function(byte) return string.format("%02x", byte:byte()) end))
 end
 
-local function field(event, name)
-    local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
-    if not value then return nil end
-    return (value:gsub('^"', ""):gsub('"$', ""))
-end
-
---- The requested rights of every `kind` denial whose target is `target`.
-local function denials(kind, target)
+--- The rights requested by every refused check KACS recorded on an object
+--- of `kind` that `match(row)` picks out (`kacs.audit.access.checked`,
+--- read from eventd).
+local function denials(kind, match)
+    local rows = eventd.rows(vm, 'EVENTS kacs.audit.access.checked WHERE object.kind == "'
+        .. kind .. '" SINCE 1h ago TAKE 1000')
     local rights = {}
-    for _, event in ipairs(events(kind)) do
-        if field(event, "target") == target then
-            rights[#rights + 1] = tostring(field(event, "requested_right"))
+    for _, row in ipairs(rows) do
+        if match(row) and row["outcome.success"] == false then
+            rights[#rights + 1] = tostring(row["access.requested"])
         end
     end
     return rights
+end
+
+local function service_named(name)
+    return function(row) return row["object.service.name"] == name end
+end
+
+local function job_named(id)
+    return function(row) return revstrm.guid(row["object.job.guid"]) == id:lower() end
 end
 
 --- Submit a job as the console (SYSTEM) under `sddl`; return its id and
@@ -281,31 +297,38 @@ test("every job view on the control socket carries the caller's job rights, and 
 test("asking what a caller may do is not a denial of what it may not",
     { spec = "peinit *dispatch.a-maximum-allowed-check-is-not-a-denial" },
     function(t)
-        -- A service on which SYSTEM may only query: the status answer
-        -- leaves out start, stop and interrogate, and records nothing for
+        -- A service on which SYSTEM may only query, under a descriptor
+        -- whose SACL audits every refusal: the status answer leaves out
+        -- start, stop and interrogate, and KACS records no refusal for
         -- leaving them out. A start afterwards is a command, refused and
-        -- recorded — which is the evidence the ring is being read at all.
-        set_descriptor("pt-dr-narrow", { { sid = SYSTEM, mask = 0x0001 } }, function()
+        -- recorded — which is the evidence the record is being read at
+        -- all.
+        eventd.ready(vm)
+        vm:run("reg set '" .. SERVICES .. "\\pt-dr-narrow' ServiceSecurity hex:"
+            .. audited_descriptor_hex(SYSTEM, { { sid = SYSTEM, mask = 0x0001 } })):assert_ok()
+        wait_until(function()
             return granted(vm:run("svctl --json status pt-dr-narrow").stdout)
-                == '["query_status"]'
-        end)
-        local before = #denials("access.denied", "pt-dr-narrow")
+                == '["query_status"]' or nil
+        end, { timeout = 60, interval = 0.5, desc = "the descriptor on pt-dr-narrow to land" })
+        local before = #denials("service", service_named("pt-dr-narrow"))
         t:assert_eq(granted(vm:run("svctl --json status pt-dr-narrow").stdout),
             '["query_status"]', "the status is answered with query alone")
         t:assert_eq(verdict(vm:run("svctl start pt-dr-narrow")), "denied",
             "and a start is refused")
 
         local after = wait_until(function()
-            local rights = denials("access.denied", "pt-dr-narrow")
+            local rights = denials("service", service_named("pt-dr-narrow"))
             return #rights > before and rights or nil
-        end, { timeout = 30, interval = 0.5, desc = "the start's denial to be recorded" })
+        end, { timeout = 30, interval = 0.5, desc = "the start's refusal to be recorded" })
         local fresh = {}
         for i = before + 1, #after do fresh[#fresh + 1] = after[i] end
-        t:assert_eq(table.concat(fresh, ","), "SERVICE_START",
-            "the one denial recorded since is the start's: the status's check left none")
+        t:assert_eq(table.concat(fresh, ","), "2",
+            "the one refusal recorded since is the start's (SERVICE_START, 0x2): "
+            .. "the status's check left none")
 
-        -- The same for a job: SYSTEM may only query it.
-        local id = submit("O:SYG:SYD:(A;;0x1;;;SY)")
+        -- The same for a job: SYSTEM may only query it. The submitter's
+        -- descriptor is used as given, so it carries the SACL itself.
+        local id = submit("O:SYG:SYD:(A;;0x1;;;SY)S:(AU;FA;0x7;;;WD)")
         local status = vm:run("svctl --json job status " .. id)
         status:assert_ok()
         t:assert_eq(granted(status.stdout), '["query"]',
@@ -314,11 +337,11 @@ test("asking what a caller may do is not a denial of what it may not",
         t:assert(stop.stdout:find("ACCESS_DENIED", 1, true),
             "and a job-stop is refused: " .. stop.stdout)
         local job_denials = wait_until(function()
-            local rights = denials("job.access_denied", id)
+            local rights = denials("job", job_named(id))
             return #rights > 0 and rights or nil
-        end, { timeout = 30, interval = 0.5, desc = "the job-stop's denial to be recorded" })
-        t:assert_eq(table.concat(job_denials, ","), "JOB_STOP",
-            "the only job.access_denied for the job is the stop's")
+        end, { timeout = 30, interval = 0.5, desc = "the job-stop's refusal to be recorded" })
+        t:assert_eq(table.concat(job_denials, ","), "2",
+            "the only refusal recorded for the job is the stop's (JOB_STOP, 0x2)")
     end)
 
 test("an operation outlives its service and is still checked against the service's descriptor",

@@ -148,15 +148,20 @@ test("the downgrade reason is recorded at boot level, on the console and as an e
         local downgrade_at = log:find("peinit: boot downgraded to safe mode:", 1, true)
         t:assert(downgrade_at, "the console carries the reason")
 
-        -- The event half. `boot.safe_mode_downgrade`, one per finding,
-        -- naming the services involved — this is the account that survives
-        -- the boot, since nothing about these services' own state records
-        -- it. eventd is Critical, so a Safe boot of this image still has it.
+        -- The event half. `peinit.boot.downgraded`, one per finding,
+        -- naming the services involved — the cycle's in `graph.services`,
+        -- the conflicting pair as `object.service.name` and
+        -- `object.service.conflict.name`. This is the account that
+        -- survives the boot, since nothing about these services' own state
+        -- records it. eventd is Critical, so a Safe boot of this image
+        -- still has it, and the event is essential, so no policy can
+        -- switch it off.
         local events
         for _ = 1, 60 do
             events = vm:run(
-                "evctl 'EVENTS boot.safe_mode_downgrade SINCE 1h ago TAKE 20' --format jsonl")
-            if events.exit_code == 0 and events.stdout:find("safe_mode_downgrade", 1, true) then
+                "evctl 'EVENTS peinit.boot.downgraded SINCE 1h ago TAKE 20' --format jsonl")
+            if events.exit_code == 0 and events.stdout:find("pt%-dg%-clash")
+                and events.stdout:find("pt%-dg%-crit") then
                 break
             end
             vm:clock():sleep("500ms")

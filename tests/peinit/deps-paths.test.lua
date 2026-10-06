@@ -8,7 +8,8 @@
 -- Failed with `ValidationError` — so the discriminator is what else
 -- happened: a decode failure is found while the registry is read, and a
 -- graph finding while the plan is built, which is why only the latter
--- appears as a `graph.validation_error` event naming the graph problem.
+-- appears as a `peinit.graph.validation.failed` event naming the graph
+-- problem.
 --
 -- The reload half of each is the sharper evidence, because the two
 -- paths disagree there: boot marks one service and continues, reload
@@ -102,7 +103,7 @@ test("a definition that parses and fits but cannot run is caught at start, not b
         -- Nothing found it before then: a definition problem would have
         -- produced a graph finding while the plan was built.
         local events = vm:run(
-            "evctl 'EVENTS graph.validation_error SINCE 1h ago TAKE 400' --format jsonl").stdout
+            "evctl 'EVENTS peinit.graph.validation.failed SINCE 1h ago TAKE 400' --format jsonl").stdout
         t:assert(not events:find("pt%-p%-nobinary"),
             "and graph validation had nothing to say about it: " .. events)
     end)
@@ -119,10 +120,10 @@ test("a definition that parses but does not fit is caught at graph validation",
         end
         local events = wait_until(function()
             local out = vm:run(
-                "evctl 'EVENTS graph.validation_error SINCE 1h ago TAKE 400' --format jsonl").stdout
+                "evctl 'EVENTS peinit.graph.validation.failed SINCE 1h ago TAKE 400' --format jsonl").stdout
             return out:find("pt%-p%-cyc") and out or nil
         end, { timeout = 60, interval = 1, desc = "the cycle finding" })
-        t:assert(events:find('"phase":"boot"', 1, true),
+        t:assert(events:find('"graph.phase":"boot"', 1, true),
             "the finding was made while the boot graph was built")
     end)
 

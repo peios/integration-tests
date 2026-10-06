@@ -111,9 +111,9 @@ end
 local function findings(needle)
     return wait_until(function()
         local out = vm:run(
-            "evctl 'EVENTS graph.validation_error SINCE 1h ago TAKE 400' --format jsonl").stdout
+            "evctl 'EVENTS peinit.graph.validation.failed SINCE 1h ago TAKE 400' --format jsonl").stdout
         return out:find(needle) and out or nil
-    end, { timeout = 60, interval = 1, desc = "graph.validation_error containing " .. needle })
+    end, { timeout = 60, interval = 1, desc = "peinit.graph.validation.failed containing " .. needle })
 end
 
 test("a level dependency waits for the level as well as for the service",
@@ -190,7 +190,7 @@ test("the target splits on the first colon, and no service is ever looked for by
         t:assert_eq(status("pt-lv-hold").state, "inactive",
             "the level dependent is waiting rather than failed")
         local events = vm:run(
-            "evctl 'EVENTS graph.validation_error SINCE 1h ago TAKE 400' --format jsonl").stdout
+            "evctl 'EVENTS peinit.graph.validation.failed SINCE 1h ago TAKE 400' --format jsonl").stdout
         t:assert(not events:find("netd:" .. NO_SUCH_LEVEL, 1, true),
             "nothing went looking for a service named with the level attached: " .. events)
 
@@ -290,9 +290,17 @@ test("a role no service fills is a missing hard dependency, named as the definit
         -- stripped, because a level qualifies a service and there is no
         -- service here to qualify.
         local events = findings("pt%-lv%-norole")
-        t:assert(events:find(
-            '"message":"service pt-lv-norole has missing hard dependency pt-no-such-role"',
-            1, true), "the finding names the role the definition wrote: " .. events)
+        local named = false
+        for line in events:gmatch("[^\r\n]+") do
+            local ok, row = pcall(json.decode, line)
+            if ok and type(row) == "table"
+                and row["object.service.name"] == "pt-lv-norole"
+                and row["outcome.reason"] == "missing-hard-dependency"
+                and row["object.service.dependency.name"] == "pt-no-such-role" then
+                named = true
+            end
+        end
+        t:assert(named, "the finding names the role the definition wrote: " .. events)
     end)
 
 test("netd fills the network role, and timed is the other shipped publisher",

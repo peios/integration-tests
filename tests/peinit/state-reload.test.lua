@@ -267,9 +267,9 @@ test("the outcome is carried in the operation's result, and an expiring window s
         t:assert(not vm:console():read_log():find("signalled RELOADING=1", 1, true),
             "no console report for an expiring detection window")
         local events = vm:run(
-            "evctl 'EVENTS service.reload_unconfirmed SINCE 1h ago TAKE 50' --format jsonl")
+            "evctl 'EVENTS peinit.service.reload.timed-out SINCE 1h ago TAKE 50' --format jsonl")
         t:assert(not events.stdout:find("pt-rl-", 1, true),
-            "and no service.reload_unconfirmed event: " .. events.stdout)
+            "and no peinit.service.reload.timed-out event: " .. events.stdout)
     end)
 
 test("a reload command runs in the service's hooks cgroup under the service's own identity",

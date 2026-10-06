@@ -13,6 +13,7 @@
 -- because the tests share a machine.
 
 local peinit = require("helpers.peinit")
+local eventd = require("helpers.eventd")
 peinit.claim(1)
 
 -- A self-relative security descriptor granting SYSTEM one mask,
@@ -240,38 +241,70 @@ test("a command naming no service is refused as unknown rather than as denied",
             "and does not report a denial: " .. output)
     end)
 
-test("a denial is recorded as an access.denied event carrying the whole attempt",
-    { spec = "peinit *svcsd.a-denial-is-recorded-as-an-access-denied-event" },
-    function(t)
-        set_descriptor(TARGET, 0x0001, "allowed")
-        t:assert_eq(run("start"), "denied", "the attempt was refused")
+--- `descriptor_hex`'s descriptor with a SACL of one failure-audit ACE for
+--- Everyone over every service right (`S:(AU;FA;0xf;;;WD)`), as the
+--- built-in default carries. A descriptor written to the registry is used
+--- as given, so this test asks for the audit in its own SACL.
+local function audited_descriptor_hex(mask)
+    local system = string.pack("BB", 1, 1) .. string.pack(">I2>I4", 0, 5)
+        .. string.pack("<I4", 18)
+    local everyone = string.pack("BB", 1, 1) .. string.pack(">I2>I4", 0, 1)
+        .. string.pack("<I4", 0)
+    -- SYSTEM_AUDIT_ACE_TYPE (2), FAILED_ACCESS_ACE_FLAG (0x80).
+    local audit = string.pack("<BBI2I4", 2, 0x80, 8 + #everyone, 0xf) .. everyone
+    local sacl = string.pack("<BBI2I2I2", 2, 0, 8 + #audit, 1, 0) .. audit
+    local allow = string.pack("<BBI2I4", 0, 0, 8 + #system, mask) .. system
+    local dacl = string.pack("<BBI2I2I2", 2, 0, 8 + #allow, 1, 0) .. allow
+    -- SACL_PRESENT | DACL_PRESENT | SELF_RELATIVE.
+    local sacl_at = 20 + 2 * #system
+    local header = string.pack("<BBI2I4I4I4I4", 1, 0, 0x8014,
+        20, 20 + #system, sacl_at, sacl_at + #sacl)
+    return ((header .. system .. system .. sacl .. dacl):gsub(".",
+        function(byte) return string.format("%02x", byte:byte()) end))
+end
 
-        -- The event is peinit's own audit record of the refusal, so it
-        -- carries what an auditor would need: who asked, for what, and
-        -- what they were given instead.
-        -- Several denials against this target have been recorded by now,
-        -- so pick out the one this test caused: a refused SERVICE_START.
-        local found
-        for _ = 1, 20 do
-            local query = vm:run([[evctl 'EVENTS access.denied SINCE 1h ago TAKE 50']])
-            for _, line in ipairs(peinit.lines(query.stdout)) do
-                if line:find('target="pt-svcsd"', 1, true)
-                    and line:find('requested_right="SERVICE_START"', 1, true) then
-                    found = line
-                end
-            end
-            if found then break end
+test("a denial is recorded by KACS, under the descriptor's SACL, carrying the whole attempt",
+    { spec = "peinit *svcsd.a-denial-is-recorded-by-kacs-under-the-descriptors-sacl" },
+    function(t)
+        eventd.ready(vm)
+        vm:run("reg set '" .. TARGET .. "' ServiceSecurity hex:"
+            .. audited_descriptor_hex(0x0001)):assert_ok()
+        for _ = 1, 40 do
+            if run("status") == "allowed" and run("start") == "denied" then break end
             vm:run("sleep 1")
         end
+        t:assert_eq(run("start"), "denied", "the attempt was refused")
+
+        -- The record is KACS's: the descriptor's SACL audits every
+        -- refusal, and peinit's check named the service in its audit
+        -- context. It carries what an auditor would need: who asked, for
+        -- what, and what they were given instead. Several refusals of
+        -- this target may be recorded by now, so pick out the one this
+        -- test caused: a refused SERVICE_START (0x2).
+        local function mine(row)
+            return row["object.service.name"] == "pt-svcsd" and row["access.requested"] == 0x2
+        end
+        local rows = eventd.wait_rows(vm,
+            'EVENTS kacs.audit.access.checked WHERE object.kind == "service" SINCE 1h ago TAKE 1000',
+            function(rs)
+                for _, row in ipairs(rs) do
+                    if mine(row) then return true end
+                end
+                return false
+            end, { timeout = 30, desc = "the refused start's record in the event store" })
+        local found
+        for _, row in ipairs(rows) do
+            if mine(row) then found = row end
+        end
+        local text = json.encode(found)
         t:assert(found, "the denial reached the event store, named by the right it asked for")
-        t:assert(found:find('caller_sid="S-1-5-18"', 1, true),
-            "it names the caller's SID: " .. found)
-        t:assert(found:find('target_type="service"', 1, true),
-            "and the kind of target: " .. found)
-        t:assert(found:find("requested_access_bits=2", 1, true),
-            "and the bits that were asked for: " .. found)
-        t:assert(found:find("granted_access_bits=", 1, true),
-            "and the bits that were granted: " .. found)
+        t:assert_eq(require("helpers.revstrm").sid(found["subject.token.sid"]), "S-1-5-18",
+            "it names the caller's SID: " .. text)
+        t:assert_eq(found["object.kind"], "service", "and the kind of object: " .. text)
+        t:assert_eq(found["fields.attestation.userspace"], true,
+            "whose name is peinit's claim: " .. text)
+        t:assert(found["access.granted"] ~= nil, "and the bits that were granted: " .. text)
+        t:assert_eq(found["outcome.success"], false, "as a refusal: " .. text)
 
         clear_descriptors()
     end)

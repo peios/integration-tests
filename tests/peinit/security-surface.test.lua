@@ -28,6 +28,7 @@ local peinit = require("helpers.peinit")
 local token = require("helpers.token")
 local us = require("helpers.unixsock")
 local f = require("helpers.peinit_client")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local NOTIFY_SOCKET = "/run/services/peinit/notify.sock"
@@ -136,12 +137,14 @@ local function mint_user(w, extra)
     }))
 end
 
---- Every `notify.rejected` still in the KMES ring, as sender pids.
+--- Every `peinit.notify.rejected` still in the KMES ring, as sender pids
+--- (`subject.process.pid`).
 local function rejected_senders()
-    local r = vm:run("revstrm --snapshot --pretty --type 'notify.rejected'", { timeout = 60 })
-    r:assert_ok()
     local pids = {}
-    for pid in r.stdout:gmatch("sender_pid%s+(%d+)") do pids[#pids + 1] = pid end
+    for _, event in ipairs(revstrm.snapshot(vm, { "peinit.notify.rejected" })) do
+        local pid = revstrm.field(event, "subject.process.pid")
+        if pid then pids[#pids + 1] = pid end
+    end
     return pids
 end
 

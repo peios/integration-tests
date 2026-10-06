@@ -15,12 +15,13 @@
 -- cleanup's window, and `OnFailure` so the readiness timeout restarts it.
 --
 -- Three oracles, because "no leak" is a negative and each alone could be
--- vacuous: the status `warnings` array, the `cgroup.leaked` event on the
+-- vacuous: the status `warnings` array, the `peinit.cgroup.leaked` event on the
 -- KMES ring (neither depends on the console), and where the instance
 -- after the cleanup lives — a recorded leak advances the generation, and
 -- the next start would build `pt-relaunch%gen1`.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local SERVICE = "pt-relaunch"
@@ -53,23 +54,13 @@ local function main_pid()
     return ok and procs:match("^(%d+)") or nil
 end
 
---- The `cgroup.leaked` events on the ring naming `service`.
+--- The `peinit.cgroup.leaked` events on the ring naming `service` in
+--- `object.service.name`.
 local function leak_events(service)
-    local r = vm:run("revstrm --snapshot --pretty --type 'cgroup.leaked'", { timeout = 60 })
-    r:assert_ok()
-    local found, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        if line:match("cgroup%.leaked%s*$") then
-            current = {}
-            found[#found + 1] = current
-        elseif current then
-            local k, v = line:match("^%s+([%w_]+)%s+(.*)$")
-            if k then current[k] = (v:gsub('^"', ""):gsub('"$', "")) end
-        end
-    end
+    local found = revstrm.snapshot(vm, { "peinit.cgroup.leaked" })
     local out = {}
     for _, e in ipairs(found) do
-        if e.service == service then out[#out + 1] = e end
+        if revstrm.field(e, "object.service.name") == service then out[#out + 1] = e end
     end
     return out
 end
@@ -112,7 +103,7 @@ test("a relaunch running in the tree when its post-kill deadline fires is not re
             "no leak is recorded against the service: " ..
             vm:run("svctl --json status " .. SERVICE).stdout)
         t:assert_eq(#leak_events(SERVICE), 0,
-            "and no cgroup.leaked event names it")
+            "and no peinit.cgroup.leaked event names it")
 
         -- The generation did not move. Stop it, start it again: a leak
         -- would have advanced it, and this start would build %gen1.

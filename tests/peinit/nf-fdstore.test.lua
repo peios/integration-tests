@@ -32,6 +32,7 @@ local kacs = require("helpers.kacs")
 local token = require("helpers.token")
 local us = require("helpers.unixsock")
 local f = require("helpers.peinit_client")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local vm = peinit.boot({ name = "nffdstore", files = peinit.tool("pt-notify") })
@@ -179,35 +180,13 @@ local function report(path)
     return out
 end
 
-local function events(globs)
-    local flags = ""
-    for _, glob in ipairs(globs) do flags = flags .. " --type '" .. glob .. "'" end
-    local r = vm:run("revstrm --snapshot --pretty" .. flags, { timeout = 60 })
-    r:assert_ok()
-    local out, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        local kind = line:match("^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+([%w_]+%.[%w_]+)%s*$")
-        if kind then
-            current = { type = kind, payload = "" }
-            out[#out + 1] = current
-        elseif current and line:match("^%s") then
-            current.payload = current.payload .. line .. "\n"
-        end
-    end
-    return out
-end
+local field = revstrm.field
 
-local function field(event, name)
-    local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
-    if not value then return nil end
-    return (value:gsub('^"', ""):gsub('"$', ""))
-end
-
---- Every `fd_store.rejected` event naming `service`.
+--- Every `peinit.fd-store.rejected` event naming `service`.
 local function rejections(service)
     local out = {}
-    for _, event in ipairs(events({ "fd_store.rejected" })) do
-        if field(event, "service") == service then out[#out + 1] = event end
+    for _, event in ipairs(revstrm.snapshot(vm, { "peinit.fd-store.rejected" })) do
+        if field(event, "object.service.name") == service then out[#out + 1] = event end
     end
     return out
 end
@@ -241,9 +220,9 @@ test("a store disabled by FdStoreMax=0 closes the descriptor and says why",
 
         local rejected = rejections("pt-fs-off")
         t:assert_eq(#rejected, 1, "and recorded exactly one rejection")
-        t:assert_eq(field(rejected[1], "outcome"), "disabled",
-            "naming the disabled store as the outcome: " .. rejected[1].payload)
-        t:assert_eq(field(rejected[1], "name"), "hopeful",
+        t:assert_eq(field(rejected[1], "outcome.reason"), "disabled",
+            "naming the disabled store as the reason: " .. rejected[1].payload)
+        t:assert_eq(field(rejected[1], "object.fd-store.name"), "hopeful",
             "and the name the service asked for, so it can tell which send was dropped")
     end)
 
@@ -274,9 +253,9 @@ test("a full store rejects the overflow and does not evict what it holds",
 
         local rejected = rejections("pt-fs-full")
         t:assert_eq(#rejected, 1, "one rejection, for the third send")
-        t:assert_eq(field(rejected[1], "outcome"), "full",
+        t:assert_eq(field(rejected[1], "outcome.reason"), "full",
             "naming a full store: " .. rejected[1].payload)
-        t:assert_eq(field(rejected[1], "name"), "third",
+        t:assert_eq(field(rejected[1], "object.fd-store.name"), "third",
             "and the name the rejected descriptor was sent under")
     end)
 
@@ -301,7 +280,7 @@ test("several descriptors share one name, each subject to the limit on its own",
 
         local rejected = rejections("pt-fs-share")
         t:assert_eq(#rejected, 1, "and the overflowing third was rejected")
-        t:assert_eq(field(rejected[1], "outcome"), "full",
+        t:assert_eq(field(rejected[1], "outcome.reason"), "full",
             "for a full store: " .. rejected[1].payload)
 
         -- And the two that fitted are genuinely two entries under one

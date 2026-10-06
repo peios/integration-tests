@@ -341,12 +341,12 @@ test("a chain of handlers that names itself is suppressed and audited",
         -- silently.
         local event = wait_until(function()
             local out = vm:run(
-                "evctl 'EVENTS on_failure.loop_suppressed SINCE 1h ago TAKE 50' --format jsonl")
+                "evctl 'EVENTS peinit.on-failure.suppressed SINCE 1h ago TAKE 50' --format jsonl")
             for _, line in ipairs(peinit.lines(out.stdout)) do
                 if line:find("pt%-of%-loop") then return line end
             end
             return nil
-        end, { timeout = 90, interval = 1, desc = "an on_failure.loop_suppressed event" })
+        end, { timeout = 90, interval = 1, desc = "a peinit.on-failure.suppressed event" })
         t:assert(event:find("pt-of-loop", 1, true),
             "the event names the pair whose chain was cut: " .. event)
 
@@ -378,13 +378,13 @@ test("a chain of handlers is not followed past a depth of sixteen",
 
         local event = wait_until(function()
             local out = vm:run(
-                "evctl 'EVENTS on_failure.loop_suppressed SINCE 1h ago TAKE 50' --format jsonl")
+                "evctl 'EVENTS peinit.on-failure.suppressed SINCE 1h ago TAKE 50' --format jsonl")
             for _, line in ipairs(peinit.lines(out.stdout)) do
                 if line:find(refused, 1, true) then return line end
             end
             return nil
-        end, { timeout = 90, interval = 1, desc = "a max-depth on_failure.loop_suppressed event" })
-        t:assert(event:find("max_depth", 1, true),
+        end, { timeout = 90, interval = 1, desc = "a max-depth peinit.on-failure.suppressed event" })
+        t:assert(event:find('"max-depth"', 1, true),
             "the event says the depth bound is what tripped, not the cycle bound: " .. event)
         t:assert(event:find(last_started, 1, true),
             "and names the failure the refused handoff came from: " .. event)
@@ -398,12 +398,12 @@ test("a chain of handlers is not followed past a depth of sixteen",
         t:assert(not view.cause, "with no transition recorded against it at all")
     end)
 
---- The on_failure.loop_suppressed event that ended the chain between
+--- The peinit.on-failure.suppressed event that ended the chain between
 --- `a` and `b`, once there is one.
 local function suppression_between(a, b)
     return wait_until(function()
         local out = vm:run(
-            "evctl 'EVENTS on_failure.loop_suppressed SINCE 1h ago TAKE 200' --format jsonl",
+            "evctl 'EVENTS peinit.on-failure.suppressed SINCE 1h ago TAKE 200' --format jsonl",
             { timeout = 30 })
         for _, line in ipairs(peinit.lines(out.stdout)) do
             if line:find('"' .. a .. '"', 1, true) and line:find('"' .. b .. '"', 1, true) then
@@ -415,9 +415,10 @@ local function suppression_between(a, b)
            desc = "the chain between " .. a .. " and " .. b .. " to be suppressed" })
 end
 
---- The three names of a suppressed chain, as the event lists them.
+--- The three names of a suppressed chain, as the event lists them in
+--- `object.service.on-failure-chain`.
 local function chain_of(event)
-    local list = event:match('"chain"%s*:%s*%[([^%]]*)%]')
+    local list = event:match('"object%.service%.on%-failure%-chain"%s*:%s*%[([^%]]*)%]')
     local names = {}
     for name in (list or ""):gmatch('"([^"]+)"') do names[#names + 1] = name end
     return names

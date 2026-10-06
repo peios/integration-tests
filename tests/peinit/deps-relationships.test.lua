@@ -375,9 +375,20 @@ test("a service that names itself is a cycle of length one",
         -- refusal.
         local events = wait_until(function()
             local out = vm:run(
-                "evctl 'EVENTS graph.validation_error SINCE 1h ago TAKE 400' --format jsonl").stdout
+                "evctl 'EVENTS peinit.graph.validation.failed SINCE 1h ago TAKE 400' --format jsonl").stdout
             return out:find("pt%-rel%-self") and out or nil
         end, { timeout = 60, interval = 1, desc = "the cycle finding to reach eventd" })
-        t:assert(events:find('"message":"dependency cycle: pt-rel-self"', 1, true),
-            "the logged cycle path is the service on its own")
+        local alone = false
+        for line in events:gmatch("[^\r\n]+") do
+            local ok, row = pcall(json.decode, line)
+            if ok and type(row) == "table" and row["outcome.reason"] == "cycle" then
+                local services = row["graph.services"] or {}
+                local only_self = #services > 0
+                for _, name in ipairs(services) do
+                    if name ~= "pt-rel-self" then only_self = false end
+                end
+                alone = alone or only_self
+            end
+        end
+        t:assert(alone, "the recorded cycle is the service on its own: " .. events)
     end)

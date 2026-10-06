@@ -147,21 +147,33 @@ test("a Full boot downgraded to Safe is reported as a downgrade, with every find
         end
         t:assert(cycle and conflict, "one is the cycle and one the conflict: " .. raw)
 
-        -- And the event's: boot.safe_mode_downgrade carries the same words
-        -- as its message.
+        -- And the events': one `peinit.boot.downgraded` per finding, the
+        -- same two findings as fields rather than words — the cycle's
+        -- members in `graph.services`, the conflict's pair as the service
+        -- and its `object.service.conflict.name`.
         local events = wait_until(function()
             local r = vm:run(
-                "evctl 'EVENTS boot.safe_mode_downgrade SINCE 1h ago TAKE 20' --format jsonl")
+                "evctl 'EVENTS peinit.boot.downgraded SINCE 1h ago TAKE 20' --format jsonl")
             if r.exit_code ~= 0 then return nil end
-            for _, finding in ipairs(boot.downgrade) do
-                if not r.stdout:find("boot downgraded to safe mode: " .. finding, 1, true) then
-                    return nil
+            local saw_cycle, saw_conflict = false, false
+            for line in r.stdout:gmatch("[^\r\n]+") do
+                local ok, row = pcall(json.decode, line)
+                if ok and type(row) == "table" then
+                    if row["outcome.reason"] == "critical-cycle" then
+                        for _, name in ipairs(row["graph.services"] or {}) do
+                            if name == "pt-bqm-crit" then saw_cycle = true end
+                        end
+                    elseif row["outcome.reason"] == "critical-boot-conflict"
+                        and row["object.service.name"] == "pt-bqm-clash"
+                        and row["object.service.conflict.name"] == "pt-bqm-other" then
+                        saw_conflict = true
+                    end
                 end
             end
-            return r.stdout
+            return saw_cycle and saw_conflict and r.stdout or nil
         end, { timeout = 60, interval = 0.5,
-               desc = "both boot.safe_mode_downgrade events to carry boot's words" })
-        t:assert(events, "the events name each finding in the same words")
+               desc = "both peinit.boot.downgraded events to name boot's findings" })
+        t:assert(events, "the events name each finding boot names")
 
         -- Nothing on the command line, so the threshold is the default.
         t:assert_eq(boot.max_attempts, 3,

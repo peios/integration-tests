@@ -477,25 +477,37 @@ test("a sink that would block loses lines for the sink only, and says so once",
         t:assert(copied < COUNT,
             "and lost the rest: " .. copied .. " of " .. COUNT .. " reached the blocked sink")
 
-        -- One event, however many lines were lost.
+        -- One event, however many lines were lost. The event names the
+        -- job by `object.job.guid`, a bin.guid that evctl's JSON prints as
+        -- `{"$binary": hex}` of the PCDS GUID — the first three fields of
+        -- the UUID byte-reversed — so that is the form looked for.
+        local function pcds_hex(uuid)
+            local hex = uuid:lower():gsub("[^%x]", "")
+            local out = {}
+            for _, i in ipairs({ 4, 3, 2, 1, 6, 5, 8, 7, 9, 10, 11, 12, 13, 14, 15, 16 }) do
+                out[#out + 1] = hex:sub(2 * i - 1, 2 * i)
+            end
+            return table.concat(out)
+        end
+        local guid = pcds_hex(id)
         local events = 0
         wait_until(function()
             events = 0
             local out = vm:run(
-                "evctl 'EVENTS output.dropped SINCE 1h ago TAKE 200' --format jsonl").stdout
+                "evctl 'EVENTS peinit.job.output.dropped SINCE 1h ago TAKE 200' --format jsonl").stdout
             for line in out:gmatch("[^\r\n]+") do
-                if line:find(id, 1, true) then events = events + 1 end
+                if line:lower():find(guid, 1, true) then events = events + 1 end
             end
             return events > 0
-        end, { timeout = 30, interval = 1, desc = "an output.dropped event for the job" })
+        end, { timeout = 30, interval = 1, desc = "a peinit.job.output.dropped event for the job" })
         vm:run("sleep 2")
         events = 0
-        for line in vm:run("evctl 'EVENTS output.dropped SINCE 1h ago TAKE 200' --format jsonl")
+        for line in vm:run("evctl 'EVENTS peinit.job.output.dropped SINCE 1h ago TAKE 200' --format jsonl")
             .stdout:gmatch("[^\r\n]+") do
-            if line:find(id, 1, true) then events = events + 1 end
+            if line:lower():find(guid, 1, true) then events = events + 1 end
         end
         t:assert_eq(events, 1,
-            "exactly one output.dropped event for the job, though " .. (COUNT - copied) ..
+            "exactly one peinit.job.output.dropped event for the job, though " .. (COUNT - copied) ..
             " lines were dropped")
     end)
 

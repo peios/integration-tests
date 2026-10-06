@@ -290,13 +290,18 @@ test("Triggers is boot and peinit started resolvd from the boot transaction",
         local live = values_of(SERVICE_KEY)
         t:assert_eq(live.Triggers and live.Triggers.type, "multi", "Triggers is a REG_MULTI_SZ")
         t:assert(same(live.Triggers and live.Triggers.data, { "boot" }), "holding boot")
-        local r = sut:run("evctl 'EVENTS SINCE 1h ago TAKE 5000'")
+        -- peinit records an operation's end as `peinit.operation.ended`,
+        -- told apart by `object.operation.state`; evctl's pretty form
+        -- prints each flattened field as `path=value`.
+        local r = sut:run("evctl 'EVENTS peinit.operation.ended SINCE 1h ago TAKE 5000'")
         local found
         for line in r.stdout:gmatch("[^\n]+") do
-            if line:find('event_type="operation.completed"', 1, true) and line:find('service="resolvd"', 1, true)
-                and line:find('type="start"', 1, true) then
+            if line:find('event.type="peinit.operation.ended"', 1, true)
+                and line:find('object.service.name="resolvd"', 1, true)
+                and line:find('object.operation.type="start"', 1, true) then
                 t:log(line:sub(1, 400))
-                if line:find('source="boot"', 1, true) and line:find('state="completed"', 1, true) then found = true end
+                if line:find('object.operation.source="boot"', 1, true)
+                    and line:find('object.operation.state="completed"', 1, true) then found = true end
             end
         end
         t:assert(found, "a completed start operation for resolvd with source boot")

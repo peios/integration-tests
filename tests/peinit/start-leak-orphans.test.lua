@@ -15,10 +15,12 @@
 -- at the five-second default this is a race against a shell loop.
 --
 -- Each leak is provoked once and the tests read the state it leaves: the
--- service's `warnings` array, the `cgroup.leaked` event on the KMES ring,
+-- service's `warnings` array, the `peinit.cgroup.leaked` event on the
+-- KMES ring,
 -- and — for a hook/health leak — that the service goes on running.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local ROOT = "/sys/fs/cgroup/peinit/"
@@ -174,39 +176,34 @@ test("a leaked pre-start check helper is treated the same way",
             "the next start built into pt-chkleak%gen1, not the leaked tree")
     end)
 
-test("a leak is announced on the event stream, carrying the service, path, kind and time",
+test("a leak is announced on the event stream, carrying the service, path and kind",
     { spec = "peinit *cgroup.the-leak-event" },
     function(t)
-        -- The push side: a cgroup.leaked event on the KMES ring, one per
-        -- leak detected, in the same `type` vocabulary the status warnings
-        -- use. Both provocations above are on the ring by now.
-        local r = vm:run("revstrm --snapshot --pretty --type 'cgroup.leaked'",
-            { timeout = 60 })
-        r:assert_ok()
-
-        local events, current = {}, nil
-        for line in r.stdout:gmatch("[^\r\n]+") do
-            if line:match("cgroup%.leaked%s*$") then
-                current = {}
-                events[#events + 1] = current
-            elseif current then
-                local k, v = line:match("^%s+([%w_]+)%s+(.*)$")
-                if k then current[k] = (v:gsub('^"', ""):gsub('"$', "")) end
-            end
-        end
-        t:assert(#events >= 2, "both leaks reached the event stream: " .. #events)
+        -- The push side: a peinit.cgroup.leaked event on the KMES ring,
+        -- one per leak detected, in the same vocabulary the status
+        -- warnings use, written in kebab-case. Both provocations above are
+        -- on the ring by now. When it was detected is the record's own
+        -- time, in the header, not a field of the payload.
+        local events, raw = revstrm.snapshot(vm, { "peinit.cgroup.leaked" })
+        t:assert(#events >= 2, "both leaks reached the event stream: " .. raw)
 
         local by_service = {}
-        for _, e in ipairs(events) do by_service[e.service] = e end
+        for _, e in ipairs(events) do
+            local service = revstrm.field(e, "object.service.name")
+            if service then by_service[service] = e end
+        end
         for service, kind in pairs({ ["pt-hookleak"] = "hooks", ["pt-chkleak"] = "helper" }) do
             local e = by_service[service]
-            t:assert(e, "a cgroup.leaked event names " .. service)
-            t:assert_eq(e.type, kind, service .. "'s event carries its kind")
-            t:assert(e.path and e.path:find(service, 1, true),
-                service .. "'s event names the sub-cgroup path: " .. tostring(e.path))
-            t:assert(e.detected_at_ns and e.detected_at_ns:match("%d"),
-                service .. "'s event carries the detection time in monotonic ns: " ..
-                tostring(e.detected_at_ns))
+            t:assert(e, "a peinit.cgroup.leaked event names " .. service)
+            t:assert_eq(revstrm.field(e, "object.cgroup.type"), kind,
+                service .. "'s event carries its kind")
+            local path = revstrm.field(e, "object.cgroup.path")
+            t:assert(path and path:find(service, 1, true),
+                service .. "'s event names the sub-cgroup path: " .. tostring(path))
+            t:assert(e.header:match("^%d%d:%d%d:%d%d"),
+                service .. "'s record has the time it was written: " .. e.header)
+            t:assert(not revstrm.has(e, "detected_at_ns"),
+                "and carries no monotonic detection time of its own: " .. e.payload)
         end
     end)
 

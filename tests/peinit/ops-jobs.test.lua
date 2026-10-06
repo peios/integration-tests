@@ -6,12 +6,13 @@
 -- never handed out whole on either socket: the control interface shows a
 -- service's current job as four fields, and the jobs interface shows a
 -- submitted job's view. The one place the full record appears is the
--- KMES event stream, which is where a `job.ended` payload carries every
--- field the article lists. So the instrument here is `revstrm
--- --snapshot`, the guest's own probe onto the ring — it needs
--- SeSecurityPrivilege, which the console has, and `--type` takes a glob
--- so a snapshot can be narrowed to `job.*` before the boot's several
--- hundred other events arrive.
+-- KMES event stream, which is where a `peinit.job.ended` payload carries
+-- the whole record. So the instrument here is `revstrm --snapshot`, the
+-- guest's own probe onto the ring — it needs SeSecurityPrivilege, which
+-- the console has, and `--type` takes a glob so a snapshot can be
+-- narrowed to `peinit.job.*` before the boot's several hundred other
+-- events arrive. `peinit.job.created` is verbose, off unless the emission
+-- policy turns it on, so the seed switches every `peinit.*` event on.
 --
 -- A submitted job (§8.5) is the only job a test can create on demand, so
 -- it stands in for "a job" wherever the claim is about jobs in general.
@@ -20,6 +21,7 @@
 -- services below are the subject instead.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 -- One VM for the file: every claim here is about a job rather than
 -- about a boot, and one booted Peios produces all six job types.
 peinit.claim(1)
@@ -61,7 +63,13 @@ local function definitions()
     }
 end
 
-local vm = peinit.boot({ name = "opsjob", files = peinit.seed("pt-job", definitions()) })
+local function seed_keys()
+    local keys = definitions()
+    for _, key in ipairs(peinit.verbose_events_keys()) do keys[#keys + 1] = key end
+    return keys
+end
+
+local vm = peinit.boot({ name = "opsjob", files = peinit.seed("pt-job", seed_keys()) })
 
 --- Submit a job and return its identifier and the view the submit
 --- answered with.
@@ -73,40 +81,25 @@ local function submit(arguments)
     return id, r.stdout
 end
 
---- Every event whose type matches one of `globs`, as
---- `{type, payload}`, oldest first.
+--- Every event whose type matches one of `globs`, oldest first, with its
+--- payload read back into dotted catalogue paths (helpers/revstrm).
 ---
 --- `--snapshot` drains what the ring holds and exits, so this is finite;
 --- without it revstrm follows the stream and never returns. `--pretty`
 --- rather than the default line form because the default caps the
 --- payload at a couple of hundred characters and elides the rest, which
---- silently hides exactly the fields §8.1 is about. The pretty form is
---- a header line followed by indented `key   value` rows, so an event
---- is a header plus every indented line under it.
+--- silently hides exactly the fields §8.1 is about.
 local function events(globs)
-    local flags = ""
-    for _, glob in ipairs(globs) do flags = flags .. " --type '" .. glob .. "'" end
-    local r = vm:run("revstrm --snapshot --pretty" .. flags, { timeout = 60 })
-    r:assert_ok()
-    local out, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        local kind = line:match("^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+([%w_]+%.[%w_]+)%s*$")
-        if kind then
-            current = { type = kind, payload = "" }
-            out[#out + 1] = current
-        elseif current and line:match("^%s") then
-            current.payload = current.payload .. line .. "\n"
-        end
-    end
-    return out
+    return revstrm.snapshot(vm, globs)
 end
 
---- The value of one field in a pretty-rendered payload, without the
+--- The value at one dotted path in an event's payload, without the
 --- quotes a string carries.
-local function field(event, name)
-    local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
-    if not value then return nil end
-    return (value:gsub('^"', ""):gsub('"$', ""))
+local field = revstrm.field
+
+--- The job an event is about, as the text svctl names it by.
+local function job_of(event)
+    return revstrm.guid(field(event, "object.job.guid"))
 end
 
 --- Wait until `service` is Active.
@@ -130,7 +123,7 @@ end
 local function events_for(kind, id)
     local out = {}
     for _, event in ipairs(events({ kind })) do
-        if field(event, "job_id") == id then out[#out + 1] = event end
+        if job_of(event) == id:lower() then out[#out + 1] = event end
     end
     return out
 end
@@ -142,7 +135,7 @@ test("every fork peinit performs is a job, and the job records which kind it was
         -- seeded service carries a pre-start hook, a post-start hook, a
         -- reload command and a health check as well as its own main
         -- binary; a submitted job is the sixth. A census of the ring's
-        -- `job.created` payloads should therefore name all six.
+        -- `peinit.job.created` payloads should therefore name all six.
         wait_active("pt-forks")
         vm:run("svctl --json reload pt-forks", { timeout = 90 }):assert_ok()
         submit("/bin/true")
@@ -151,13 +144,13 @@ test("every fork peinit performs is a job, and the job records which kind it was
         vm:run("sleep 4", { timeout = 30 })
 
         local seen = {}
-        for _, event in ipairs(events({ "job.created" })) do
-            local kind = field(event, "type")
+        for _, event in ipairs(events({ "peinit.job.created" })) do
+            local kind = field(event, "object.job.type")
             if kind then seen[kind] = true end
         end
 
-        for _, kind in ipairs({ "service_main", "pre_exec_hook", "post_exec_hook",
-                                "reload_hook", "health_check", "submitted" }) do
+        for _, kind in ipairs({ "service-main", "pre-exec-hook", "post-exec-hook",
+                                "reload-hook", "health-check", "submitted" }) do
             t:assert(seen[kind], "peinit forked a " .. kind .. " job")
         end
     end)
@@ -212,9 +205,11 @@ test("a job goes Created, then Running, then to a terminal state",
         vm:run("svctl --json job wait " .. bad_id, { timeout = 60 })
 
         local states = { [ok_id] = {}, [bad_id] = {} }
-        for _, event in ipairs(events({ "job.created", "job.started", "job.ended" })) do
-            local seq = states[field(event, "job_id")]
-            if seq then seq[#seq + 1] = field(event, "state") end
+        local by_guid = { [ok_id:lower()] = states[ok_id], [bad_id:lower()] = states[bad_id] }
+        for _, event in ipairs(events({ "peinit.job.created", "peinit.job.started",
+                                        "peinit.job.ended" })) do
+            local seq = by_guid[job_of(event) or ""]
+            if seq then seq[#seq + 1] = field(event, "object.job.state") end
         end
 
         t:assert_eq(table.concat(states[ok_id], ","), "created,running,completed",
@@ -282,11 +277,13 @@ test("exit_code and exit_signal are never both populated",
 test("a submitted job's resolved identity is its job identity's user SID",
     { spec = "peinit *job.a-submitted-jobs-resolved-identity-is-the-job-identitys-user-sid" },
     function(t)
-        -- `resolved_identity` is the identity string a job was launched
-        -- under. For a service that is a name — SYSTEM, LocalService —
-        -- because a name is what the definition gave. A submission names
-        -- nobody, so what is recorded is the SID of the token peinit
-        -- opened, and the record in the event stream says so.
+        -- The resolved identity is the identity a job was launched under.
+        -- For a service that is a name — SYSTEM, LocalService — because a
+        -- name is what the definition gave. A submission names nobody, so
+        -- what is resolved is the SID of the token peinit opened. The
+        -- event stream carries no names at all: it names the token the
+        -- job ran as by its user SID, `object.job.token.sid`, which for a
+        -- submitted job is that same SID.
         local caller = vm:run("token user")
         caller:assert_ok()
         local sid = caller.stdout:match("S%-[%d%-]+")
@@ -294,10 +291,12 @@ test("a submitted job's resolved identity is its job identity's user SID",
 
         local id = submit("/bin/true")
         vm:run("svctl --json job wait " .. id, { timeout = 60 })
-        local event = events_for("job.ended", id)[1]
+        local event = events_for("peinit.job.ended", id)[1]
         t:assert(event, "the job's end was emitted")
-        t:assert_eq(field(event, "resolved_identity"), sid,
+        t:assert_eq(field(event, "object.job.token.sid"), sid,
             "and records the SID rather than a name: " .. event.payload)
+        t:assert(not revstrm.has(event, "resolved_identity"),
+            "with no identity name beside it: " .. event.payload)
 
         -- The same job, seen through a service's eyes, would carry a
         -- name — which is what makes the SID here a property of
@@ -311,21 +310,23 @@ test("a terminal job's record is emitted whole and then dropped",
     { spec = "peinit *job.a-terminal-job-is-emitted-then-dropped" },
     function(t)
         -- peinit keeps no job history: the last thing it does with a
-        -- record is put it in an event. `job.ended` therefore carries
-        -- the fields no view exposes — the arguments, the cgroup, the
-        -- pidfd, the creation timestamp — and afterwards the only thing
+        -- record is put it in an event. `peinit.job.ended` therefore
+        -- carries the fields no view exposes — the arguments, the cgroup,
+        -- the creation time, the token — and afterwards the only thing
         -- that can answer for the job is the retained entry, which does
-        -- not have a PID to report.
+        -- not have a PID to report. (When it ended is the event's own
+        -- time, in its header.)
         local id = submit("/bin/sleep 1")
         vm:run("svctl --json job wait " .. id, { timeout = 60 })
 
-        local event = events_for("job.ended", id)[1]
+        local event = events_for("peinit.job.ended", id)[1]
         t:assert(event, "the terminal job was emitted")
-        for _, name in ipairs({ "arguments", "cgroup_id", "created_at_ns",
-                                "started_at_ns", "ended_at_ns", "resolved_identity",
-                                "pidfd", "duration_ns" }) do
-            t:assert(field(event, name),
-                "the event carries the record's " .. name .. ": " .. event.payload)
+        for _, path in ipairs({ "object.job.arguments", "object.cgroup.path",
+                                "object.cgroup.generation", "object.job.created-time",
+                                "object.job.started-time", "object.job.duration",
+                                "object.job.token.sid", "object.process.pid" }) do
+            t:assert(field(event, path),
+                "the event carries the record's " .. path .. ": " .. event.payload)
         end
 
         local view = vm:run("svctl --json job status " .. id)
