@@ -8,7 +8,8 @@
 -- object type list. The origin-class tests make one event of each class
 -- happen: the agent emits a userspace one, an out-of-range KMES setting
 -- makes KMES report itself, minting a token makes KACS report a logon
--- session, and `reg backup` makes LCS report the backup.
+-- session, `reg backup` makes LCS report the backup, and NTFE reports the
+-- policy it publishes at boot.
 
 local eventd = require("helpers.eventd")
 local peinit = require("helpers.peinit")
@@ -221,6 +222,14 @@ test("origin class 3 is LCS", {
     vm:run("reg backup '" .. key .. "' /tmp/pt-backup.bin"):assert_ok()
     local row = newest("lcs.audit.backup.started")
     t:assert_eq(row["emitter.class"], 3, "LCS's own report of a key backup: " .. json.encode(row))
+end)
+
+test("origin class 4 is NTFE", {
+    spec = "eventd *constant.origin-class-4-is-ntfe",
+}, function(t)
+    -- NTFE publishes its policy at boot, so the record is already there.
+    local row = newest("ntfe.policy.published")
+    t:assert_eq(row["emitter.class"], 4, "NTFE's report of a policy it published: " .. json.encode(row))
 end)
 
 test("the query language takes the origin class names for the numbers", {
