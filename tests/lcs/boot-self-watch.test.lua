@@ -35,6 +35,8 @@ local MACHINE_ROOT = lcs.guid()
 local KMES_PATH = "Machine\\System\\KMES"
 local NETWORK_PATH = "Machine\\System\\Network"
 local PORTS_PATH = NETWORK_PATH .. "\\TcpIp\\PortReservations"
+-- The event emission policy (KMES §2.8), the sixth key the kernel reads.
+local EVENTS_PATH = "Machine\\Generic\\Events"
 
 --- Run `fn(src, w)` against a Machine source seeded by `seed`, with a
 --- worker of its own, closing both however the case ends.
@@ -188,6 +190,7 @@ test("each internal target admits only the event types it cares about",
             s:key(lcs.LAYERS_PATH)
             s:key(KMES_PATH)
             s:key(PORTS_PATH)
+            s:key(EVENTS_PATH)
         end, function(src, w)
             local reg_guid = src:lookup(lcs.PARAMS_PATH)
             local reg = open(t, src, w, lcs.PARAMS_PATH)
@@ -384,6 +387,7 @@ local function seed_kernel_read_keys(s)
     s:key(lcs.LAYERS_PATH .. "\\base", { sd = lcs.permissive_sd() })
     s:key(KMES_PATH)
     s:key(PORTS_PATH)
+    s:key(EVENTS_PATH)
 end
 
 --- The self-reads of `guid` served since `mark`.
@@ -671,13 +675,23 @@ test("the same arming covers every key the kernel reads for itself",
             s:key(lcs.LAYERS_PATH)
             s:key(KMES_PATH)
             s:key(PORTS_PATH)
+            s:key(EVENTS_PATH)
         end, function(src, w)
             local walk = traffic(src)
             for _, name in ipairs({ "Registry", "Layers", "KMES", "Network",
-                                    "TcpIp", "PortReservations" }) do
+                                    "TcpIp", "PortReservations", "Generic",
+                                    "Events" }) do
                 t:assert(walk:match("LOOKUP%(" .. name .. "%)"),
                     name .. " is discovered in the same refresh: " .. walk)
             end
+            -- The emission policy's watch: Enabled on Events itself is
+            -- read back by the policy walk, after the write's own read.
+            local events = open(t, src, w, EVENTS_PATH)
+            local emark = src:mark()
+            lcs.set_value(src, w, events, "Enabled", lcs.TYPE.DWORD, lcs.dword(1))
+            t:assert(reads_of(src, emark, src:lookup(EVENTS_PATH)) >= 2,
+                "the emission policy watch is armed: " .. traffic(src, emark))
+            sys.close(w, events)
             -- And each got its own targeted watch.
             local kmes = open(t, src, w, KMES_PATH)
             local mark = src:mark()
@@ -694,7 +708,7 @@ test("the same arming covers every key the kernel reads for itself",
         end)
     end)
 
-test("the network policy watch is the one depth-unbounded, every-mutation watch",
+test("the network policy watch is depth-unbounded and takes every mutation",
     { spec = "PKM *self-watch.arming.policy-watch-is-depth-unbounded" },
     function(t)
         -- Rules are keys and exceptions are subkeys, so anything written
