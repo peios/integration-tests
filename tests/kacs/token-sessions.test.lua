@@ -101,6 +101,21 @@ test("freeing the last token destroys the session and emits kacs.session.destroy
         kmes.detach(ring)
     end)
 
+test("the session is gone at once, and its record follows from a kernel worker",
+    { spec = "PKM *token.session.destroyed-record-deferred" }, function(t)
+        local ring = assert(kmes.attach(vm, 0))
+        local fd, sid = assert(token.mint(vm, { logon_type = token.LOGON_TYPE.NETWORK }))
+        kmes.drain(ring)
+        sys.close(vm, fd)
+        local again, errno = token.create(vm, { auth_id = sid })
+        t:assert(not again, "the session no longer resolves straight after the close: "
+            .. sys.errname(errno or 0))
+        local ev = destroyed_for(settled(ring, sid), sid)
+        t:assert_eq(#ev, 1, "and its record arrives once the work item has run")
+        t:assert(ev[1].payload.object.session.id == sid, "naming the session")
+        kmes.detach(ring)
+    end)
+
 test("destroying an empty session requires SeTcbPrivilege and an empty session",
     { spec = "PKM *token.session.destroy-empty.gates" }, function(t)
         local sid = assert(token.create_logon_session(vm, {}))
