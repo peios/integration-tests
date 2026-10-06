@@ -1,4 +1,4 @@
--- PKM §5.4.4 — Audit: the seven events LCS emits through KMES, the
+-- PKM §5.4.4 — Audit: the seven non-write events LCS emits through KMES, the
 -- bounded caller summary they carry, what a key-open record says, the
 -- twelve source-validation classes, the self-configuration events, and
 -- the rule that an audit failure blocks an operation only where the
@@ -159,8 +159,10 @@ end
 
 -- The catalogue ----------------------------------------------------------
 
-test("seven audit events exist, and LCS emits every one of them through KMES",
-    { spec = "PKM *lcs-audit.seven-events-through-kmes" }, function(t)
+-- These seven are the records that are not registry writes;
+-- security-write-audit.test.lua covers the other eight.
+test("LCS emits its seven non-write audit events through KMES",
+    { spec = "PKM *lcs-audit.events-through-kmes" }, function(t)
         local seen = {}
         for _, e in ipairs(BOOT_EVENTS) do seen[e.type] = e end
 
@@ -183,7 +185,7 @@ test("seven audit events exist, and LCS emits every one of them through KMES",
             t:assert_eq(seen[kind].origin, kmes.ORIGIN.LCS,
                 "and carries the LCS origin class")
         end
-        t:assert_eq(#EVENT_TYPES, 7, "seven events, and no others")
+        t:assert_eq(#EVENT_TYPES, 7, "seven of the fifteen")
     end)
 
 test("every audit payload is a single MessagePack map with string keys",
