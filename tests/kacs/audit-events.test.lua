@@ -566,12 +566,18 @@ test("a kacs.session.destroyed with an invalid UTF-8 package drops silently",
 test("the two StrataFS records drop rather than failing the operation",
     { spec = "PKM *audit-events.best-effort-stratafs",
       covered_by = "kunit:pkm_kunit_misc",
-      skip = "the two drop conditions are an allocation failure and an " ..
-             "over-long operation string; the operation strings are " ..
-             "compile-time constants, and the stratafs test-hook points cannot " ..
-             "fail the emitter's allocation. Runs under " ..
-             "pkm_kunit_stratafs_audit_emission_is_best_effort for the over-long " ..
-             "operation and path; the allocation failure has no witness" },
+      skip = "the drop conditions are an over-long operation string or " ..
+             "path; the operation strings are compile-time constants and " ..
+             "no guest path reaches PATH_MAX here. Runs under " ..
+             "pkm_kunit_stratafs_audit_emission_is_best_effort" },
+    function(t) end)
+
+test("a StrataFS record whose allocation fails is written reduced, not lost",
+    { spec = "PKM *audit-events.stratafs-reduced-record",
+      covered_by = "kunit:pkm_kunit_misc",
+      skip = "a guest cannot fail the emitter's allocation on demand; " ..
+             "runs under pkm_kunit_stratafs_audit_reduced_record_on_alloc_failure, " ..
+             "which forces it through a KUnit hook" },
     function(t) end)
 
 test("a self-emitted payload that would overflow its buffer is dropped",
