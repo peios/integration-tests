@@ -155,6 +155,19 @@ local function unpack_value(b, at)
     end
     if tag >= 0x80 and tag <= 0x8f then return map(tag - 0x80, at + 1) end
     if tag == 0xde then return map(string.unpack(">I2", b, at + 1), at + 3) end
+    -- Arrays (policy.layers) decode to sequences.
+    local function array(n, from)
+        local out = {}
+        for i = 1, n do out[i], from = unpack_value(b, from) end
+        return out, from
+    end
+    if tag >= 0x90 and tag <= 0x9f then return array(tag - 0x90, at + 1) end
+    if tag == 0xdc then return array(string.unpack(">I2", b, at + 1), at + 3) end
+    -- Signed integers (outcome.errno).
+    if tag == 0xd0 then return string.unpack(">i1", b, at + 1), at + 2 end
+    if tag == 0xd1 then return string.unpack(">i2", b, at + 1), at + 3 end
+    if tag == 0xd2 then return string.unpack(">i4", b, at + 1), at + 5 end
+    if tag == 0xd3 then return string.unpack(">i8", b, at + 1), at + 9 end
     if tag >= 0xa0 and tag <= 0xbf then
         local n = tag - 0xa0
         return b:sub(at + 1, at + n), at + 1 + n
@@ -223,6 +236,24 @@ function M.recorder(vm)
         return out
     end
     return rec
+end
+
+M.PUBLISHED_TYPE = "ntfe.policy.published"
+M.REJECTED_TYPE = "ntfe.policy.rejected"
+
+--- The events of a drain of type `type`, payloads decoded (`payload`,
+--- or nil when it does not decode, and `keys`).
+function M.decoded(events, type)
+    local out = {}
+    for _, e in ipairs(events) do
+        if e.type == type then
+            local ok, map, keys = pcall(M.decode_payload, e.payload_bytes)
+            e.payload = ok and map or nil
+            e.keys = ok and keys or nil
+            out[#out + 1] = e
+        end
+    end
+    return out
 end
 
 --- The NTFE reports of a drain, payloads decoded (`report`, `keys`).
