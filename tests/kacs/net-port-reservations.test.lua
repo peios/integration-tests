@@ -482,6 +482,27 @@ test("a rejected load leaves the previous table in force and is audited",
             "and 7400 falls to the default reservation, not the new entry")
     end)
 
+test("a rejected load is recorded as kacs.config.value.rejected",
+    { spec = "PKM *net.port.rejected-load-recorded" }, function(t)
+        -- The key still holds values no load can accept, so the reload a
+        -- write triggers is refused again, and recorded.
+        local kmes = require("helpers.kmes")
+        local events = kmes.recording(t, vm, function()
+            write_reservation("tcp:7401", netobj.port_sd({ USER1 }))
+            -- The reload follows the write through the registry's watch.
+            sys.nanosleep(vm, 0, 200 * 1000 * 1000)
+        end)
+        local rec = kmes.of_type(events, "kacs.config.value.rejected")
+        t:assert(#rec >= 1, "the refused reload is recorded")
+        local p = rec[#rec].payload
+        t:assert_eq(p.config.key.path, "Machine\\System\\Network\\TcpIp\\PortReservations",
+            "naming the key")
+        t:assert(p.outcome.reason, "and why: " .. tostring(p.outcome.reason))
+        t:assert_eq(p.outcome.errno, -sys.E.INVAL, "with EINVAL")
+        t:assert_eq(p.policy["previous-retained"], true, "the table in force was kept")
+        t:assert_eq(p.policy.fallback, false, "and it is the last good registry table")
+    end)
+
 -- ---- before the registry ---------------------------------------------
 
 local fb = provium:vm("vportfb", "kernel-only"):boot()
