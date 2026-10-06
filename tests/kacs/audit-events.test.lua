@@ -572,3 +572,99 @@ test("a self-emitted payload that would overflow its buffer is dropped",
              "so the only overflow is an allocation failure, which a " ..
              "guest cannot provoke and no KUnit case injects" },
     function(t) end)
+
+-- kacs.audit.descriptor.changed ---------------------------------------------------
+
+local DESCRIPTOR_CHANGED = "kacs.audit.descriptor.changed"
+
+--- An audited descriptor: owner and group SYSTEM, a DACL granting `mask`
+--- to Everyone, and `sacl` (an ACL) when given.
+local function owned_sd(mask, sacl)
+    return access.sd({ owner = token.SID.LOCAL_SYSTEM, group = token.SID.LOCAL_SYSTEM,
+        dacl = access.acl({ access.ace(A.ALLOWED, mask, kacs.SID.EVERYONE) }),
+        sacl = sacl })
+end
+
+local function audit_sacl()
+    return access.acl({ access.ace(A.AUDIT, kacs.ALL_RIGHTS, kacs.SID.EVERYONE,
+        access.ACE_FLAG.SUCCESSFUL_ACCESS | access.ACE_FLAG.FAILED_ACCESS) })
+end
+
+test("removing a file's SACL is recorded as kacs.audit.descriptor.changed",
+    { spec = "PKM *audit-events.descriptor-changed-sacl-always" }, function(t)
+        local p = B .. "/sacl-removed"
+        vm:write_file(p, "watched")
+        local ALL = kacs.SI.OWNER | kacs.SI.GROUP | kacs.SI.DACL | kacs.SI.SACL
+        t:assert_eq(kacs.set_sd(vm, p, owned_sd(kacs.ALL_RIGHTS, audit_sacl()), ALL).ret, 0,
+            "the file is audited")
+        local events = recorded(t, function()
+            t:assert_eq(kacs.set_sd(vm, p, owned_sd(kacs.ALL_RIGHTS, access.acl({})),
+                kacs.SI.SACL).ret, 0, "its SACL is emptied")
+        end)
+        local rec = kmes.of_type(events, DESCRIPTOR_CHANGED)
+        t:assert_eq(#rec, 1, "and that change is recorded, though the new SACL audits nothing")
+        local p1 = rec[1].payload
+        t:assert_eq(p1.object.kind, "file", "about a file")
+        t:assert_eq(p1.object.sd.components & kacs.SI.SACL, kacs.SI.SACL, "a SACL change")
+        t:assert(p1.object.sd["digest-previous"] and p1.object.sd.digest,
+            "with the replaced and the written descriptor's digests")
+        t:assert(p1.object.sd["digest-previous"] ~= p1.object.sd.digest, "which differ")
+        t:assert_eq(#p1.object.sd.digest, 32, "SHA-256")
+        t:assert_eq(p1.object.sd.owner, token.SID.LOCAL_SYSTEM, "naming the owner")
+        t:assert_eq(p1.access.requested & STD.ACCESS_SYSTEM_SECURITY,
+            STD.ACCESS_SYSTEM_SECURITY, "the change needed ACCESS_SYSTEM_SECURITY")
+        t:assert_eq(p1.outcome.success, true, "and was made")
+        t:assert_eq(p1.subject.token.sid, token.SID.LOCAL_SYSTEM, "by SYSTEM")
+    end)
+
+test("a DACL change through a path, with no handle alarm mask, is not recorded",
+    { spec = "PKM *audit-events.descriptor-changed-dacl-by-handle-mask" }, function(t)
+        local p = B .. "/dacl-only"
+        vm:write_file(p, "plain")
+        t:assert_eq(kacs.set_sd(vm, p, owned_sd(kacs.ALL_RIGHTS), kacs.SI.OWNER | kacs.SI.GROUP
+            | kacs.SI.DACL).ret, 0, "a descriptor")
+        local events = recorded(t, function()
+            t:assert_eq(kacs.set_sd(vm, p, owned_sd(kacs.ALL_RIGHTS & ~kacs.RIGHT.DELETE_CHILD),
+                kacs.SI.DACL).ret, 0, "its DACL changes")
+        end)
+        t:assert_eq(#kmes.of_type(events, DESCRIPTOR_CHANGED), 0,
+            "with no SACL in the change and no alarm mask on a handle, nothing is recorded")
+    end)
+
+test("a SACL change to a token, a process or an IPC object is recorded too",
+    { spec = "PKM *audit-events.descriptor-changed-object-kinds" }, function(t)
+        local netobj = require("helpers.netobj")
+        local psb = require("helpers.psb")
+        local SI = kacs.SI.OWNER | kacs.SI.GROUP | kacs.SI.DACL | kacs.SI.SACL
+        local tfd = mint({})
+        local sem = assert(netobj.semget(vm, 0x5d0001, 1))
+        local child = vm:spawn_worker()
+        local pidfd = assert(psb.pidfd(vm, psb.pid(child)))
+        local events = recorded(t, function()
+            t:assert_eq(token.set_sd(vm, tfd, owned_sd(kacs.ALL_RIGHTS, audit_sacl()), SI).ret, 0,
+                "a token's SACL is set")
+            t:assert_eq(psb.set_sd(vm, pidfd, owned_sd(kacs.ALL_RIGHTS, audit_sacl()), SI).ret, 0,
+                "a process's")
+            t:assert_eq(netobj.ipc_set_sd(vm, netobj.SD_AT.SEM, sem,
+                owned_sd(kacs.ALL_RIGHTS, audit_sacl()), SI).ret, 0, "and a semaphore set's")
+        end)
+        local kinds = {}
+        for _, e in ipairs(kmes.of_type(events, DESCRIPTOR_CHANGED)) do
+            kinds[e.payload.object.kind] = e.payload
+        end
+        t:assert(kinds.token, "the token's change is recorded")
+        t:assert_eq(kinds.token.object.token.id, assert(token.statistics(vm, tfd)).token_id,
+            "naming the token")
+        t:assert(kinds.process, "the process's")
+        t:assert_eq(#kinds.process.object.process.guid, 16, "naming the process by GUID")
+        t:assert(kinds.ipc, "and the semaphore set's")
+        t:assert_eq(kinds.ipc.object.ipc.type, "sem", "a semaphore set")
+        t:assert_eq(kinds.ipc.object.ipc.id, sem, "by its identifier")
+        for kind, p in pairs(kinds) do
+            t:assert_eq(p.access.granted, nil, kind .. ": made without a handle mask")
+            t:assert(p.object.sd.digest, kind .. ": with the written descriptor's digest")
+        end
+        sys.close(vm, tfd); sys.close(vm, pidfd)
+        child:kill(); child:join()
+        vm:syscall(netobj.NR.semctl, sem, 0, 0, 0)
+    end)
