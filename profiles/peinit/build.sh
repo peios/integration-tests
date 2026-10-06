@@ -126,6 +126,17 @@ if [ ! -r "$overlay" ]; then
 fi
 overlay=$(readlink -f "$overlay")
 
+# An optional extra peiso layer, composed after this profile's own and
+# before the agent's: working-tree builds ([[file]] entries with absolute
+# src paths) laid over the published packages, to run the suite against a
+# build before it is published. The layer and every file it names are in
+# the fingerprint, so setting, changing or unsetting PT_LAYER recomposes.
+layer=${PT_LAYER:-}
+if [ -n "$layer" ]; then
+    [ -r "$layer" ] || { warn "PT_LAYER $layer is not readable"; exit 1; }
+    layer=$(readlink -f "$layer")
+fi
+
 # --- staleness -------------------------------------------------------------
 # Identity is name/size/mtime rather than content, as in the other
 # profiles: a rebuilt package always moves one of them, and hashing a
@@ -140,6 +151,10 @@ fingerprint() {
         ../../../pkgs/_repo2_/index/active.json \
         ../../../pkgs/_repo2_/index/active.json.sig 2>/dev/null || true
     ls -lL "$mkirf" "$overlay" 2>/dev/null || true
+    if [ -n "$layer" ]; then
+        cat "$layer"
+        sed -n 's/^src *= *"\(.*\)".*/\1/p' "$layer" | xargs -r ls -lL
+    fi
     if [ -n "$peiso_src" ]; then
         find "$peiso_src" -name '*.go' -o -name 'go.*' | sort | xargs ls -lL
     else
@@ -238,7 +253,7 @@ name = "10-provium-agent.sh"
 SPEC
 
 # --- the image --------------------------------------------------------------
-"$peiso" iso ../../peiso.toml peiso.toml "$agent_dir/agent.toml" --out "$image"
+"$peiso" iso ../../peiso.toml peiso.toml ${layer:+"$layer"} "$agent_dir/agent.toml" --out "$image"
 
 [ -d "$root/boot/initramfs" ] || {
     warn "the composed root has no boot/initramfs — no package landed in the initramfs root"
