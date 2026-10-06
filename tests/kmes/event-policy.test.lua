@@ -199,10 +199,17 @@ test("the watch passes on only what can change a kernel type",
             local events = open(t, src, w, EVENTS_PATH)
 
             -- A vendor key appearing under Events, and Enabled set on it.
+            -- Created a level at a time: a create does not make the
+            -- keys missing above it.
             local mark = src:mark()
+            local org = lcs.create_key(src, w, { parent_fd = events, path = "org" })
+            t:assert(org.ret >= 0, "a vendor's namespace key is created: "
+                .. sys.errname(org.errno or 0))
             local vendor = lcs.create_key(src, w,
-                { parent_fd = events, path = "org\\jellyfin" })
-            t:assert(vendor.ret >= 0, "a vendor key is created")
+                { parent_fd = org.ret, path = "jellyfin" })
+            t:assert(vendor.ret >= 0, "a vendor key is created: "
+                .. sys.errname(vendor.errno or 0))
+            sys.close(w, org.ret)
             t:assert_eq(lcs.set_value(src, w, vendor.ret, "Enabled",
                 lcs.TYPE.DWORD, lcs.dword(0)).ret, 0, "and switched off")
             t:assert_eq(reads_of(src, mark, events_guid), 0,
