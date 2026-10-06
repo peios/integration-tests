@@ -23,6 +23,11 @@ local sys = require("helpers.sys")
 peinit.claim(1)
 
 local vm = peinit.boot({})
+-- peinit reports phase 2 complete before the boot's own service starts
+-- have run. trustd's first composition is its baseline and records
+-- nothing, so a root added before trustd is up is in that baseline and
+-- is never recorded as added: the test must wait for it.
+peinit.settle(vm)
 
 local NAME = "pei617-test-root"
 local CN = "PEI-617 Test Root"

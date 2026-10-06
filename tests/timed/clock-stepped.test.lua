@@ -21,6 +21,10 @@ local sys = require("helpers.sys")
 peinit.claim(1)
 
 local vm = peinit.boot({})
+-- peinit reports phase 2 complete before the boot's own service starts
+-- have run, and on a loaded host timed can still be starting well after
+-- that. Until it is serving, `clock set` has no socket to reach.
+peinit.settle(vm)
 
 local TYPE = "timed.clock.stepped"
 -- S-1-5-18, the agent's user, in its binary form.
