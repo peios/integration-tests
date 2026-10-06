@@ -305,6 +305,14 @@ test("kacs.descriptor.rejected comes from a descriptor xattr that fails validati
              "pkm_kunit_file_sd_cache_population_corrupt_emits_once" },
     function(t) end)
 
+test("kacs.descriptor.rejected names the file by inode and device, its length and its reader",
+    { spec = "PKM *audit-events.corrupt-sd-identifies-file",
+      covered_by = "kunit:pkm_kunit_file",
+      skip = "a guest cannot author the corrupt stored descriptor this " ..
+             "record reports (see the case above); the payload runs under " ..
+             "pkm_kunit_file_sd_cache_population_corrupt_emits_once" },
+    function(t) end)
+
 test("stratafs.file.copied-up comes from the copy-up lifecycle",
     { spec = "PKM *audit-events.stratafs-copy-up-record" }, function(t)
         stratafs.with(vm, "auditev-copy-up", {
