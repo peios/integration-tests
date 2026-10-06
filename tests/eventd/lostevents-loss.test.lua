@@ -20,7 +20,7 @@ local function set_and_wait(name, value)
     eventd.set(vm, name, "dword:" .. value):assert_ok()
     eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago", function(rows)
         for _, r in ipairs(rows) do
-            if r.key == name and r.new_value == tostring(value) then return true end
+            if r["config.name"] == name and r["config.value"] == value then return true end
         end
         return false
     end, { desc = name .. " to apply" })
