@@ -97,6 +97,41 @@ test("self-configuration reports carry origin class 1",
         end
     end)
 
+test("a read that reaches the commit is recorded with its counts",
+    { spec = "PKM *config.applied-event" }, function(t)
+        -- The bootstrap read of the present-but-empty key: nothing
+        -- applied, all four kept as missing, and the defaults in force,
+        -- after the four rejection reports.
+        local applied = kmes.of_type(boot_events, "kmes.config.applied")
+        t:assert_eq(#applied, 1, "one record for the one read")
+        local e = applied[1]
+        t:assert(e and e.payload, "with a decodable payload")
+        t:assert_eq(e.origin, kmes.ORIGIN.KMES, "from KMES itself")
+        t:assert_eq(key_set(e.payload), "buffer,config,emission",
+            "three top-level maps")
+        local c = e.payload.config
+        t:assert_eq(key_set(c), "counts,key", "config holds the key and the counts")
+        t:assert_eq(c.key.path, "Machine\\System\\KMES", "the key path")
+        t:assert_eq(key_set(c.counts),
+            "applied,ignored-unknown,retained-invalid,retained-missing",
+            "four counts")
+        t:assert_eq(c.counts.applied, 0, "nothing applied")
+        t:assert_eq(c.counts["retained-missing"], 4, "all four missing")
+        t:assert_eq(c.counts["retained-invalid"], 0, "none invalid")
+        t:assert_eq(c.counts["ignored-unknown"], 0, "none unknown")
+        t:assert_eq(e.payload.buffer.capacity, kmes.DEFAULT.BUFFER_CAPACITY,
+            "the capacity in force")
+        t:assert_eq(e.payload.emission["rate-limit"], kmes.DEFAULT.MAX_EMIT_RATE,
+            "and the rate in force")
+        local last_rejected
+        for i, ev in ipairs(boot_events) do
+            if ev.type == "kmes.config.value.rejected" then last_rejected = i end
+            if ev == e then
+                t:assert(last_rejected, "the reports come first")
+            end
+        end
+    end)
+
 test("the full bootstrap sequence, observed end to end",
     { spec = "PKM *config.bootstrap-sequence" }, function(t)
         -- Steps 1-4 and 6 of §2.6: defaults from load (the boot ring

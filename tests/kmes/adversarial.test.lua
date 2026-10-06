@@ -364,6 +364,27 @@ test("a failed swap is not retried until the next configuration write",
         kmes.detach(ring)
     end)
 
+test("a read whose swap failed is still recorded as applied",
+    { spec = "PKM *config.applied-after-failed-swap" }, function(t)
+        -- Still 256 MiB in the registry. Another unrelated write re-reads
+        -- the key; the swap fails again, the other settings commit, and
+        -- the read is recorded as applied with the capacity kept. It is
+        -- not a failed read.
+        local ring = kmes.attach(vmem, 0)
+        t:assert_eq(set_value2("MaxEventSize", registry.TYPE.DWORD,
+            registry.dword(65536)).ret, 0, "an unrelated write lands")
+        local events = kmes.drain(ring)
+        t:assert_eq(#kmes.of_type(events, "kmes.buffer.swap.failed"), 1,
+            "the swap failed again")
+        local applied = kmes.of_type(events, "kmes.config.applied")
+        t:assert_eq(#applied, 1, "and the read is recorded as applied")
+        t:assert_eq(applied[1].payload.buffer.capacity, 4194304,
+            "with the capacity kept, not the one asked for")
+        t:assert_eq(#kmes.of_type(events, "kmes.config.refresh.failed"), 0,
+            "and no failed-read record")
+        kmes.detach(ring)
+    end)
+
 test("a failed swap rolls back the capacity and nothing else",
     { spec = "PKM *config.swap-failure-rolls-back-capacity-only" }, function(t)
         -- The registry still holds the unallocatable 256 MiB. A valid

@@ -995,7 +995,8 @@ M.Engine = Engine
 --- anything else the hive should hold.
 ---
 --- The hive also holds the other keys the kernel reads (the layer
---- table, KMES, the port reservations), so LCS arms a targeted watch on
+--- table, KMES, the port reservations, the event emission policy), so
+--- LCS arms a targeted watch on
 --- each. Without them it falls back to a watch on the hive root, and
 --- every key created anywhere re-runs the bootstrap refresh — an NTFE
 --- walk that publishes and is not a noted change — inside the creating
@@ -1020,6 +1021,7 @@ function M.engine(vm, policy, o)
         self.src:key("Machine\\System\\Registry\\Layers")
         self.src:key("Machine\\System\\KMES")
         self.src:key(M.NETWORK_KEY .. "\\TcpIp\\PortReservations")
+        self.src:key("Machine\\Generic\\Events")
     end
     if o.seed then o.seed(self.src) end
     assert(self.src:register())

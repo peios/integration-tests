@@ -4,10 +4,10 @@
 --
 -- `ntfe.engine()` alone serves a Machine hive with nothing but the
 -- Network key. Missing the other kernel-read keys (Registry, Layers,
--- KMES, PortReservations), LCS arms its machine-root fallback watch,
--- and every key created anywhere under Machine re-runs the whole
--- bootstrap refresh — an NTFE walk included, synchronously, inside the
--- creating syscall, uncounted. `M.engine()` here seeds those four keys,
+-- KMES, PortReservations, Generic\Events), LCS arms its machine-root
+-- fallback watch, and every key created anywhere under Machine re-runs
+-- the whole bootstrap refresh — an NTFE walk included, synchronously,
+-- inside the creating syscall, uncounted. `M.engine()` here seeds them,
 -- so the self-watch is targeted, as on a real machine, and the only
 -- walks are the debounced ones the Network watch schedules.
 --
@@ -52,6 +52,9 @@ function M.targeted_seed(src)
     src:key("Machine\\System\\Registry\\Layers")
     src:key("Machine\\System\\KMES")
     src:key(ntfe.NETWORK_KEY .. "\\TcpIp\\PortReservations")
+    -- The event emission policy (KMES §2.8): absent, it too keeps the
+    -- machine-root fallback armed.
+    src:key("Machine\\Generic\\Events")
 end
 
 --- `ntfe.engine` on a targeted hive (see above). `o.inventory = {
