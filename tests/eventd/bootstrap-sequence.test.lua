@@ -30,6 +30,16 @@ local function startups()
     return eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1h ago")
 end
 
+--- A startup record's coverage points, `{cpu_id, sequence}` each, from
+--- its parallel `store.resume.cpus` / `store.resume.sequences` arrays.
+local function resume_points(s)
+    local cpus, seqs = s["store.resume.cpus"], s["store.resume.sequences"]
+    local points = {}
+    if type(cpus) ~= "table" or type(seqs) ~= "table" then return points end
+    for i, cpu in ipairs(cpus) do points[#points + 1] = { cpu_id = cpu, sequence = seqs[i] } end
+    return points
+end
+
 local function count_prefix(list, prefix)
     local n = 0
     for _, v in ipairs(list) do
@@ -49,7 +59,7 @@ test("with StorageShards absent the default applies: one shard per attached KMES
         "the image sets no StorageShards")
     local first = startups()
     local s = first[#first]
-    t:assert_eq(s.shard_count, 2, "two vCPUs, two buffers, two shards: " .. json.encode(s))
+    t:assert_eq(s["store.shard-count"], 2, "two vCPUs, two buffers, two shards: " .. json.encode(s))
     t:assert_eq(#eventd.shards(vm), 2, "and two shard files")
     local fds = eventd.fd_listing(vm, eventd.pid(vm))
     local _, rings = fds:gsub("anon_inode:kmes%-cpu", "")
@@ -75,7 +85,7 @@ test("every slot is walked and given a dense ordinal: each CPU has coverage, a d
     local s = startups()
     s = s[#s]
     local seen = {}
-    for _, p in ipairs(s.resume_points or {}) do seen[#seen + 1] = p.cpu_id end
+    for _, p in ipairs(resume_points(s)) do seen[#seen + 1] = p.cpu_id end
     table.sort(seen)
     t:assert_eq(table.concat(seen, ","), "0,1", "the startup record names CPUs 0 and 1")
     local names = eventd.thread_names(vm, eventd.pid(vm))
@@ -118,16 +128,18 @@ test("the boot ID is read from the kernel and stored in PCDS GUID layout", {
         "stored as PCDS GUID bytes (first three groups little-endian)")
 end)
 
-test("the startup record carries the boot ID, the shard count and per-CPU coverage", {
-    spec = "eventd *bootstrap.a-synthetic-startup-event-records-boot-id-shard-count-and-per-cpu-coverage",
+test("the startup record carries whether it is a restart, the shard count and per-CPU coverage", {
+    spec = "eventd *bootstrap.an-eventd-daemon-started-event-records-restart-shard-count-and-per-cpu-coverage",
 }, function(t)
     local s = startups()
     s = s[#s]
-    t:assert_eq(s.boot_id, "{" .. boot_uuid .. "}", "boot ID, the payload's own field")
-    t:assert_eq(s["event.boot.guid"], s.boot_id, "naming the boot the record was stored under")
-    t:assert_eq(s.shard_count, 2, "shard count")
-    t:assert_eq(#(s.resume_points or {}), 2, "a coverage point for each CPU: " .. json.encode(s))
-    for _, p in ipairs(s.resume_points) do
+    t:assert_eq(s["event.boot.guid"], "{" .. boot_uuid .. "}", "stored under the boot it describes")
+    t:assert_eq(s.boot_id, nil, "which the payload no longer repeats")
+    t:assert_eq(type(s["store.restarted"]), "boolean", "whether this start is a restart")
+    t:assert_eq(s["store.shard-count"], 2, "shard count")
+    local points = resume_points(s)
+    t:assert_eq(#points, 2, "a coverage point for each CPU: " .. json.encode(s))
+    for _, p in ipairs(points) do
         t:assert(math.type(p.sequence) == "integer" and p.sequence >= 0,
             "CPU " .. tostring(p.cpu_id) .. " has a sequence coverage point")
     end
@@ -162,9 +174,9 @@ test("the boot's first start is told from a restart by what the store holds for 
     local all = startups()
     t:assert(#all >= 2, "at least the boot's start and one restart: " .. #all)
     table.sort(all, function(a, b) return a["event.time"] < b["event.time"] end)
-    t:assert_eq(all[1].restart, false, "the first start of this boot is not a restart")
+    t:assert_eq(all[1]["store.restarted"], false, "the first start of this boot is not a restart")
     for i = 2, #all do
-        t:assert_eq(all[i].restart, true, "every later start in the boot is a restart")
+        t:assert_eq(all[i]["store.restarted"], true, "every later start in the boot is a restart")
     end
 end)
 
@@ -216,12 +228,14 @@ test("the configuration watch is persistent: successive changes are each applied
         return eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago",
             function(rows)
                 for _, r in ipairs(rows) do
-                    if r.key == "LogRetentionDays" and r.new_value == value then return true end
+                    if r["config.name"] == "LogRetentionDays" and r["config.value"] == value then
+                        return true
+                    end
                 end
                 return false
             end, { desc = "a config change to LogRetentionDays=" .. value })
     end
-    for _, v in ipairs({ "21", "22", "23" }) do
+    for _, v in ipairs({ 21, 22, 23 }) do
         eventd.set(vm, "LogRetentionDays", "dword:" .. v):assert_ok()
         local _, ok = changes_to(v)
         t:assert(ok, "change to " .. v .. " applied")
@@ -238,7 +252,7 @@ test("a configured StorageShards is read at startup and the CPU-to-shard assignm
     eventd.restart(vm)
     local s = startups()
     table.sort(s, function(a, b) return a["event.time"] < b["event.time"] end)
-    t:assert_eq(s[#s].shard_count, 3, "the restart read StorageShards=3")
+    t:assert_eq(s[#s]["store.shard-count"], 3, "the restart read StorageShards=3")
     local shards = eventd.shards(vm)
     t:assert_eq(#shards, 3, "and created a third shard: " .. json.encode(shards))
     -- The new shard was created as an event shard in WAL mode. (The
@@ -290,7 +304,7 @@ test("historical shards are read for their receipts and their rows; an unreadabl
     local s = startups()
     table.sort(s, function(a, b) return a["event.time"] < b["event.time"] end)
     local cpu1
-    for _, p in ipairs(s[#s].resume_points) do if p.cpu_id == 1 then cpu1 = p.sequence end end
+    for _, p in ipairs(resume_points(s[#s])) do if p.cpu_id == 1 then cpu1 = p.sequence end end
     t:assert(cpu1 and cpu1 >= seq,
         "CPU 1's coverage comes from the now-historical shard's receipts: " .. tostring(cpu1)
         .. " >= " .. seq)
@@ -339,7 +353,9 @@ test("the sequence checkpoints are not used for recovery", {
     eventd.start(vm)
     local s = startups()
     table.sort(s, function(a, b) return a["event.time"] < b["event.time"] end)
-    for _, p in ipairs(s[#s].resume_points) do
+    local points = resume_points(s[#s])
+    t:assert(#points >= 1, "the start recorded its coverage: " .. json.encode(s[#s]))
+    for _, p in ipairs(points) do
         t:assert(p.sequence < 900000000, "CPU " .. p.cpu_id .. "'s coverage is from receipts, not the checkpoint")
     end
     local tag = eventd.marker("cp")

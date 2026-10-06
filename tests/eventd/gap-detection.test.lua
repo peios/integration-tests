@@ -1,5 +1,5 @@
 -- eventd TRM §2.5 — gap detection: a per-CPU sequence jump becomes a
--- `synthetic.gap` record saying what was lost, written through the normal
+-- `eventd.events.lost` record saying what was lost, written through the normal
 -- write path and accounted for by a receipt so a restart never repeats it.
 --
 -- One file-scope VM on one vCPU with the KMES ring seeded down to its
@@ -76,10 +76,11 @@ local function stored_marker(stem)
     return rows[1]
 end
 
---- Decode a gap payload: a MessagePack map of string keys to unsigned
---- integers or nil. Returns the map and its keys in wire order. Anything
---- else raises, which is the right outcome for a payload of the wrong
---- shape.
+--- Decode a gap payload: MessagePack maps nested by field path (PGSS
+--- §6.4), with string keys and unsigned-integer leaves. Returns the leaves
+--- keyed by dotted path (`out["loss.sequence"]`) and the paths in wire
+--- order. A nil, a non-integer leaf, or anything else raises, which is the
+--- right outcome for a payload of the wrong shape.
 local function decode_gap_payload(hex)
     local b = eventd.unhex(hex)
     local at = 1
@@ -93,25 +94,32 @@ local function decode_gap_payload(hex)
         at = at + n
         return s
     end
-    local function value()
-        local tag = b:byte(at)
-        if tag < 0x80 then at = at + 1; return tag end
-        if tag == 0xc0 then at = at + 1; return nil end
-        local fmt = ({ [0xcc] = ">I1", [0xcd] = ">I2", [0xce] = ">I4", [0xcf] = ">I8" })[tag]
-        assert(fmt, string.format("gap payload: value tag 0x%02x", tag))
-        local v, nxt = string.unpack(fmt, b, at + 1)
-        at = nxt
-        return v
-    end
-    local tag = b:byte(at)
-    assert(tag >= 0x80 and tag <= 0x8f, string.format("gap payload is not a fixmap: 0x%02x", tag))
-    at = at + 1
     local out, keys = {}, {}
-    for _ = 1, tag - 0x80 do
-        local k = str()
-        keys[#keys + 1] = k
-        out[k] = value()
+    local function map(prefix)
+        local tag = b:byte(at)
+        assert(tag >= 0x80 and tag <= 0x8f, string.format("gap payload: not a fixmap: 0x%02x", tag))
+        at = at + 1
+        for _ = 1, tag - 0x80 do
+            local path = prefix .. str()
+            local vt = b:byte(at)
+            if vt >= 0x80 and vt <= 0x8f then
+                map(path .. ".")
+            elseif vt < 0x80 then
+                at = at + 1
+                keys[#keys + 1] = path
+                out[path] = vt
+            else
+                assert(vt ~= 0xc0, "gap payload: " .. path .. " is nil")
+                local fmt = ({ [0xcc] = ">I1", [0xcd] = ">I2", [0xce] = ">I4", [0xcf] = ">I8" })[vt]
+                assert(fmt, string.format("gap payload: %s value tag 0x%02x", path, vt))
+                local v, nxt = string.unpack(fmt, b, at + 1)
+                at = nxt
+                keys[#keys + 1] = path
+                out[path] = v
+            end
+        end
     end
+    map("")
     assert(at == #b + 1, "gap payload has trailing bytes")
     return out, keys
 end
@@ -123,7 +131,7 @@ local function gap_rows()
         local rows = eventd.sql(vm, shard,
             "SELECT id, cpu_id, sequence, origin_class, effective_token_guid, " ..
             "true_token_guid, process_guid, hex(payload), timestamp " ..
-            "FROM events WHERE event_type = 'synthetic.gap' ORDER BY id")
+            "FROM events WHERE event_type = '" .. eventd.T.gap .. "' ORDER BY id")
         for _, r in ipairs(rows) do
             local p, keys = decode_gap_payload(r[8])
             out[#out + 1] = {
@@ -140,7 +148,7 @@ end
 --- The gap whose first missing sequence is at or beyond `after`.
 local function gap_after(after)
     for _, g in ipairs(gap_rows()) do
-        if g.payload.first_sequence >= after then return g end
+        if g.payload["loss.sequence"] >= after then return g end
     end
 end
 
@@ -212,9 +220,9 @@ test("an overrun ring becomes one gap record naming exactly the lost sequences",
         .. " eventd *gap.the-last-missing-sequence-is-the-revealing-events-minus-one"
         .. " eventd *gap.a-gap-record-carries-the-count-of-missing-events"
         .. " eventd *gap.a-gap-record-carries-the-last-processed-timestamp-where-known"
-        .. " eventd *gap.a-gap-record-carries-the-revealing-events-timestamp"
-        .. " eventd *synthetic.lost-events-on-a-cpu-emit-synthetic-gap"
-        .. " eventd *synthetic.the-timestamp-records-when-eventd-noticed-not-when-it-occurred",
+        .. " eventd *gap.a-gap-records-time-is-the-revealing-events-timestamp"
+        .. " eventd *synthetic.lost-events-on-a-cpu-emit-eventd-events-lost"
+        .. " eventd *synthetic.a-gap-records-timestamp-is-the-revealing-events-not-the-detection-time",
 }, function(t)
     local before = stored_marker("before")
     local flood_type = "pt.gap." .. eventd.marker("ovr")
@@ -230,38 +238,42 @@ test("an overrun ring becomes one gap record naming exactly the lost sequences",
 
     local g = wait_gap(before["event.sequence"] + 1)
     local p = g.payload
+    local first, last, count = p["loss.sequence"], p["loss.sequence-last"], p["loss.count"]
     t:assert_eq(g.cpu_id, 0, "the record names CPU 0, the only CPU")
-    t:assert_eq(p.cpu_id, 0, "in the payload too")
+    t:assert_eq(p["buffer.cpu"], 0, "in the payload too, as buffer.cpu")
 
     -- The last event eventd saw before the jump, and the one that revealed it.
-    local around = rows_by_sequence(p.first_sequence - 1, p.last_sequence + 1)
-    local last_seen = around[p.first_sequence - 1]
-    local revealing = around[p.last_sequence + 1]
+    local around = rows_by_sequence(first - 1, last + 1)
+    local last_seen = around[first - 1]
+    local revealing = around[last + 1]
     t:assert(last_seen, "the sequence before the gap was stored: it is the last one eventd saw")
     t:assert(revealing, "the sequence after the gap was stored: it is the event that revealed it")
-    t:assert(p.first_sequence >= before["event.sequence"] + 1,
+    t:assert(first >= before["event.sequence"] + 1,
         "the loss began after the marker eventd had already stored")
-    t:assert_eq(p.count, p.last_sequence - p.first_sequence + 1,
-        "count is the number of sequences in [first, last]: " .. json.encode(p))
-    t:assert(p.count > 0, "and something was lost")
-    for s = p.first_sequence, p.last_sequence do
+    t:assert_eq(count, last - first + 1,
+        "loss.count is the number of sequences in [first, last]: " .. json.encode(p))
+    t:assert(count > 0, "and something was lost")
+    for s = first, last do
         if around[s] then
             t:assert(false, "no row exists for lost sequence " .. s)
             break
         end
     end
-    t:assert_eq(p.last_seen_timestamp, last_seen.timestamp,
-        "last_seen_timestamp is the timestamp of the last event processed before the gap")
-    t:assert_eq(p.revealing_timestamp, revealing.timestamp,
-        "revealing_timestamp is the timestamp of the event that revealed it")
+    t:assert_eq(p["loss.preceding-time"], last_seen.timestamp,
+        "loss.preceding-time is the timestamp of the last event processed before the gap")
 
-    -- Stamped when eventd noticed: after every lost event was emitted, and
-    -- after even the newest event, which was emitted before eventd resumed.
-    t:assert(g.timestamp > p.revealing_timestamp,
-        "the record's timestamp is later than the revealing event's")
-    t:assert(g.timestamp > resume.timestamp,
-        "and later than the last event emitted before eventd was resumed: " ..
+    -- The record's own time is the revealing event's, not when eventd
+    -- noticed: eventd was frozen until long after the newest event was
+    -- emitted, and the record still sorts before it.
+    t:assert_eq(g.timestamp, revealing.timestamp,
+        "the record's timestamp is the revealing event's timestamp")
+    t:assert(g.timestamp <= resume.timestamp,
+        "not the detection time, which was after the last event emitted before eventd resumed: " ..
         g.timestamp .. " vs " .. resume.timestamp)
+    local q = eventd.rows(vm, string.format(
+        "EVENTS %s WHERE loss.sequence == %d SINCE 10m ago", eventd.T.gap, first))
+    t:assert_eq(#q, 1, "the record is found by its loss.sequence")
+    t:assert_eq(q[1]["event.time"], revealing.timestamp, "and a query shows that time as event.time")
 end)
 
 test("a lapped drain thread resumes at the oldest survivor and the lap is an ordinary gap", {
@@ -288,16 +300,16 @@ test("a lapped drain thread resumes at the oldest survivor and the lap is an ord
     local seen = kmes.drain(watch)
     kmes.detach(watch)
 
-    t:assert_eq(g.payload.last_sequence + 1, oldest.sequence,
+    t:assert_eq(g.payload["loss.sequence-last"] + 1, oldest.sequence,
         "the first event read after the lap is the oldest survivor at tail_pos")
     local stored = rows_by_sequence(oldest.sequence, oldest.sequence)[oldest.sequence]
     t:assert(stored, "and that survivor was stored")
-    t:assert_eq(g.payload.count, oldest.sequence - g.payload.first_sequence,
+    t:assert_eq(g.payload["loss.count"], oldest.sequence - g.payload["loss.sequence"],
         "the lap is recorded as one ordinary gap up to it")
 
     for _, e in ipairs(seen) do
-        t:assert(not e.type:find("^synthetic%."),
-            "eventd emitted no synthetic event into KMES: saw " .. e.type)
+        t:assert(e.type ~= eventd.T.gap,
+            "eventd emitted no gap record into KMES: saw " .. e.type)
     end
     t:assert(g.origin_class == nil and g.sequence == nil,
         "and the stored gap carries no KMES origin or sequence: it never passed through KMES")
@@ -320,10 +332,11 @@ test("a gap is stored like any event: same shard, same transaction, its own rece
     eventd.thaw(vm)
     local g = wait_gap(before["event.sequence"] + 1)
     local p = g.payload
+    local first, last = p["loss.sequence"], p["loss.sequence-last"]
 
     -- Normal write path: the gap row went into the shard holding CPU 0's
     -- events, inserted immediately before the event that revealed it.
-    local revealing = rows_by_sequence(p.last_sequence + 1, p.last_sequence + 1)[p.last_sequence + 1]
+    local revealing = rows_by_sequence(last + 1, last + 1)[last + 1]
     t:assert(revealing, "the revealing event is stored")
     t:assert_eq(g.shard, revealing.shard, "the gap is in the same shard as its CPU's events")
     t:assert_eq(revealing.id, g.id + 1,
@@ -333,27 +346,28 @@ test("a gap is stored like any event: same shard, same transaction, its own rece
     -- receipts are merged only within one transaction.
     local spanning
     for _, r in ipairs(receipts()) do
-        if r[1] <= p.first_sequence and r[2] >= p.last_sequence + 1 then spanning = r end
+        if r[1] <= first and r[2] >= last + 1 then spanning = r end
     end
-    t:assert(spanning, "a single receipt covers [first_sequence, revealing sequence]: " ..
+    t:assert(spanning, "a single receipt covers [loss.sequence, revealing sequence]: " ..
         json.encode(receipts()))
     t:assert_eq(spanning.shard, g.shard, "in the gap's own shard")
 
-    -- MessagePack in the payload column, saying what and never why.
-    t:assert_eq(json.encode(g.keys), json.encode({ "cpu_id", "first_sequence",
-        "last_sequence", "count", "last_seen_timestamp", "revealing_timestamp" }),
-        "the payload is a MessagePack map of exactly the six loss fields")
+    -- MessagePack in the payload column, saying what and never why. A
+    -- live gap always has a preceding event, so all five fields are there.
+    t:assert_eq(json.encode(g.keys), json.encode({ "buffer.cpu", "loss.sequence",
+        "loss.sequence-last", "loss.count", "loss.preceding-time" }),
+        "the payload is nested maps of exactly the five loss fields")
 
     -- Queryable like any event, by its payload fields.
     local rows = eventd.rows(vm, string.format(
-        "EVENTS %s WHERE first_sequence == %d SINCE 10m ago", eventd.T.gap, p.first_sequence))
+        "EVENTS %s WHERE loss.sequence == %d SINCE 10m ago", eventd.T.gap, first))
     t:assert_eq(#rows, 1, "the gap is found by a query on its payload field")
-    t:assert_eq(rows[1].last_sequence, p.last_sequence, "with its fields decoded")
+    t:assert_eq(rows[1]["loss.sequence-last"], last, "with its fields decoded")
     local by_cpu = eventd.rows(vm, string.format(
         "EVENTS %s WHERE event.cpu == 0 SINCE 10m ago TAKE 1000", eventd.T.gap))
     local found = false
     for _, r in ipairs(by_cpu) do
-        if r.first_sequence == p.first_sequence then found = true end
+        if r["loss.sequence"] == first then found = true end
     end
     t:assert(found, "and by event.cpu, like any event from that CPU")
 
@@ -361,8 +375,8 @@ test("a gap is stored like any event: same shard, same transaction, its own rece
     eventd.restart(vm)
     local again = 0
     for _, other in ipairs(gap_rows()) do
-        if other.payload.first_sequence <= p.last_sequence
-            and other.payload.last_sequence >= p.first_sequence then
+        if other.payload["loss.sequence"] <= last
+            and other.payload["loss.sequence-last"] >= first then
             again = again + 1
         end
     end
@@ -386,7 +400,8 @@ test("a gap row fills cpu_id and no other header column, unlike every other synt
         for _, r in ipairs(eventd.sql(vm, shard,
             "SELECT event_type, cpu_id, sequence, origin_class, effective_token_guid, " ..
             "true_token_guid, process_guid FROM events " ..
-            "WHERE event_type LIKE 'synthetic.%' AND event_type <> 'synthetic.gap'")) do
+            "WHERE event_type IN ('" .. eventd.T.startup .. "','" .. eventd.T.shutdown .. "','" ..
+            eventd.T.config_change .. "','" .. eventd.T.storage_error .. "')")) do
             others = others + 1
             for i = 2, 7 do
                 t:assert(r[i] == nil, r[1] .. " carries no KMES header column (column " .. i .. ")")
@@ -419,12 +434,14 @@ test("events lost while eventd was stopped become a restart gap, survivors are s
 
     t:assert(highest >= before["event.sequence"], "the marker was receipted before the stop")
     local g = wait_gap(highest + 1)
-    t:assert_eq(g.payload.first_sequence, highest + 1,
+    t:assert_eq(g.payload["loss.sequence"], highest + 1,
         "the gap begins right after the receipted sequences")
+    t:assert(g.payload["loss.preceding-time"] == nil and not g.keys[5],
+        "no event eventd saw precedes a restart gap, so loss.preceding-time is left out, not nil")
     -- The ring is full, so the events peinit emits for the start itself
     -- overwrite a few more of the oldest survivors before eventd attaches:
     -- the survivor eventd found is at or past the one read above.
-    local first_survivor = g.payload.last_sequence + 1
+    local first_survivor = g.payload["loss.sequence-last"] + 1
     t:assert(first_survivor >= oldest.sequence,
         "the gap stops at a ring survivor (" .. first_survivor .. ", oldest read while stopped " ..
         oldest.sequence .. ")")
@@ -437,7 +454,7 @@ test("events lost while eventd was stopped become a restart gap, survivors are s
     t:assert_eq(missing, 0, "every survivor from the downtime was ingested at restart")
     local overlapping = 0
     for _, other in ipairs(gap_rows()) do
-        if other.payload.last_sequence >= highest + 1 then overlapping = overlapping + 1 end
+        if other.payload["loss.sequence-last"] >= highest + 1 then overlapping = overlapping + 1 end
     end
     t:assert_eq(overlapping, 1, "and the downtime produced exactly one gap")
 end)
@@ -456,12 +473,12 @@ test("with no receipt for the CPU, an overwritten prefix is a gap from sequence 
     local g
     wait_until(function()
         for _, x in ipairs(gap_rows()) do
-            if x.payload.first_sequence == 1 then g = x end
+            if x.payload["loss.sequence"] == 1 then g = x end
         end
         return g ~= nil
     end, { timeout = 30, interval = 0.5, desc = "a gap from sequence 1" })
     -- As above, the start's own events may overwrite a few more survivors.
-    local first_survivor = g.payload.last_sequence + 1
+    local first_survivor = g.payload["loss.sequence-last"] + 1
     t:assert(first_survivor >= oldest.sequence,
         "it runs from sequence 1 up to a ring survivor: " .. first_survivor)
     t:assert(rows_by_sequence(first_survivor, first_survivor)[first_survivor],

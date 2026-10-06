@@ -71,17 +71,16 @@ M.DB = {
     meta = M.STORE.events .. "/eventd-meta.db",
 }
 
---- Every event type and payload key a test depends on, spelled once.
----
---- An event-naming pass (PEI-617) may rename the `synthetic.*` family; when
---- it lands this table is the only place the suite changes. Write
---- `eventd.T.startup`, never the literal.
+--- The five event types eventd writes about itself (TRM §2.6), spelled
+--- once. PEI-617 renamed the old `synthetic.*` family to these catalogue
+--- types; the keys keep their old names so no test had to change for the
+--- rename alone. Write `eventd.T.startup`, never the literal.
 M.T = {
-    startup = "synthetic.startup",
-    shutdown = "synthetic.shutdown",
-    gap = "synthetic.gap",
-    config_change = "synthetic.config_change",
-    storage_error = "synthetic.storage_error",
+    startup = "eventd.daemon.started",
+    shutdown = "eventd.daemon.stopped",
+    gap = "eventd.events.lost",
+    config_change = "eventd.config.changed",
+    storage_error = "eventd.store.quarantined",
 }
 
 -- ---------------------------------------------------------------------------
@@ -466,7 +465,7 @@ end
 
 --- Wait until eventd answers a query on its socket: the service has
 --- signalled readiness, which by §8.2 is after every store and socket is
---- open and `synthetic.startup` is durably committed.
+--- open and `eventd.daemon.started` is durably committed.
 ---
 --- The second argument is a timeout in seconds (default 90) or an opts
 --- table `{timeout = s, socket = path}`; `socket` probes a query socket

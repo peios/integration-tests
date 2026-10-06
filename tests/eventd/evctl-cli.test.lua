@@ -114,7 +114,7 @@ test("evctl takes PSPU query text and has no flag-based query language", {
         local r = evctl(args)
         t:assert_eq(r.exit_code, 2, table.concat(args, " ") .. " is a usage error: " .. r.stderr)
     end
-    local r = evctl({ "EVENTS synthetic.startup SINCE 1h ago TAKE 1" })
+    local r = evctl({ "EVENTS " .. eventd.T.startup .. " SINCE 1h ago TAKE 1" })
     t:assert_eq(r.exit_code, 0, "while the same request in PSPU syntax runs")
 end)
 
@@ -136,7 +136,8 @@ end)
 test("a first word of EVENTS, LOGS or METRIC, in any ASCII case, makes a query", {
     spec = "eventd *evctl.a-first-word-of-events-logs-or-metric-in-any-ascii-case-is-a-query",
 }, function(t)
-    for _, text in ipairs({ "events synthetic.startup since 1h ago take 1", "EvEnTs synthetic.startup TAKE 1",
+    for _, text in ipairs({ "events " .. eventd.T.startup .. " since 1h ago take 1",
+                            "EvEnTs " .. eventd.T.startup .. " TAKE 1",
                             "logs since 1h ago take 1", "LoGs SINCE 1h ago TAKE 1",
                             "metric pt.none since 1h ago", "Metric pt.none SINCE 1h ago" }) do
         local r = evctl({ text })
@@ -169,7 +170,7 @@ test("the default socket is /run/eventd/query.sock, and --socket names another",
     local moved = "/run/eventd/pt-moved.sock"
     vm:run("mv /run/eventd/query.sock " .. moved):assert_ok()
     local default = evctl({ "EVENTS TAKE 1" })
-    local chosen = evctl({ "--socket", moved, "EVENTS synthetic.startup SINCE 1h ago TAKE 1" })
+    local chosen = evctl({ "--socket", moved, "EVENTS " .. eventd.T.startup .. " SINCE 1h ago TAKE 1" })
     vm:run("mv " .. moved .. " /run/eventd/query.sock"):assert_ok()
     t:assert_eq(default.exit_code, 1, "with nothing at the default path, evctl fails")
     t:assert(default.stderr:find("/run/eventd/query.sock", 1, true),
@@ -417,7 +418,8 @@ test("closing evctl, with Ctrl-C too, closes the connection and ends the watch",
     -- one is accepted again.
     eventd.set(vm, "MaxStreamingQueries", "dword:1"):assert_ok()
     eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change ..
-        ' WHERE key == "MaxStreamingQueries" AND new_value == "1" SINCE 1h ago', function(rs) return #rs >= 1 end)
+        ' WHERE config.name == "MaxStreamingQueries" AND config.value == 1 SINCE 1h ago',
+        function(rs) return #rs >= 1 end)
     local function second_refused()
         local p = vm:run_async("/usr/bin/evctl", { args = { "LOGS FROM " .. eventd.marker("x") .. " STREAM" } })
         local r = p:wait("3s")

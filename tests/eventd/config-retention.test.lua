@@ -4,7 +4,7 @@
 -- A VM of its own, because the effect half of each test sets a limit of one
 -- byte, and eventd then deletes everything it may from that store. The
 -- default and range half works the way config-keys does: eventd records a
--- `synthetic.config_change` for every change it applies and nothing for one
+-- `eventd.config.changed` for every change it applies and nothing for one
 -- it ignores, and an absence is only asserted behind a barrier change to
 -- `CrossTypeMaxLookbackSeconds`, which eventd records last (config.rs:819).
 --
@@ -24,7 +24,7 @@ local CC = eventd.T.config_change
 local function q(s) return '"' .. s .. '"' end
 
 local function changes(key)
-    return eventd.rows(vm, "EVENTS " .. CC .. " WHERE key == " .. q(key) .. " SINCE 1h ago")
+    return eventd.rows(vm, "EVENTS " .. CC .. " WHERE config.name == " .. q(key) .. " SINCE 1h ago")
 end
 
 local barrier_seq = 0
@@ -32,8 +32,8 @@ local function barrier()
     barrier_seq = barrier_seq + 1
     local v = 300000 + barrier_seq
     eventd.set(vm, "CrossTypeMaxLookbackSeconds", "dword:" .. v):assert_ok()
-    eventd.wait_rows(vm, "EVENTS " .. CC .. ' WHERE key == "CrossTypeMaxLookbackSeconds" AND new_value == ' ..
-        q(tostring(v)) .. " SINCE 1h ago", function(rs) return #rs >= 1 end)
+    eventd.wait_rows(vm, "EVENTS " .. CC .. ' WHERE config.name == "CrossTypeMaxLookbackSeconds" AND config.value == ' ..
+        v .. " SINCE 1h ago", function(rs) return #rs >= 1 end)
 end
 
 local function ignored(t, key, value, why)
@@ -45,8 +45,9 @@ end
 
 local function applied(t, key, value, rendered, why)
     eventd.set(vm, key, value):assert_ok()
-    local _, ok = eventd.wait_rows(vm, "EVENTS " .. CC .. " WHERE key == " .. q(key) ..
-        " AND new_value == " .. q(rendered) .. " SINCE 1h ago",
+    -- `rendered` is the integer eventd records, compared as a number.
+    local _, ok = eventd.wait_rows(vm, "EVENTS " .. CC .. " WHERE config.name == " .. q(key) ..
+        " AND config.value == " .. rendered .. " SINCE 1h ago",
         function(rs) return #rs >= 1 end, { timeout = 10, desc = key .. "=" .. rendered })
     t:assert(ok, why .. " — " .. key .. "=" .. value .. " was recorded as applied")
 end

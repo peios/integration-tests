@@ -34,7 +34,10 @@ local function set_and_wait(name, value)
     eventd.set(vm, name, "dword:" .. value):assert_ok()
     eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago", function(rows)
         for _, r in ipairs(rows) do
-            if r["event.time"] >= since and r.key == name and r.new_value == tostring(value) then return true end
+            if r["event.time"] >= since and r["config.name"] == name
+                and r["config.value"] == tonumber(value) then
+                return true
+            end
         end
         return false
     end, { desc = name .. " to apply" })
@@ -75,7 +78,7 @@ test("an OOM kill is recovered exactly like a crash", {
     local starts = eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 10m ago")
     local s
     for _, r in ipairs(starts) do if r["event.time"] >= since then s = r end end
-    t:assert(s and s.restart == true, "and the new start knew itself a restart")
+    t:assert(s and s["store.restarted"] == true, "and the new start knew itself a restart")
     local gaps = 0
     for _, g in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.gap .. " SINCE 10m ago")) do
         if g["event.time"] >= since then gaps = gaps + 1 end

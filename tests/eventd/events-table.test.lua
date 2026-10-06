@@ -75,6 +75,10 @@ local function stored_row(v, event_type, sequence)
     return out
 end
 
+--- The five types eventd writes itself (TRM §2.6), as an SQL list.
+local OWN = "('" .. table.concat({ eventd.T.startup, eventd.T.shutdown, eventd.T.gap,
+    eventd.T.config_change, eventd.T.storage_error }, "','") .. "')"
+
 --- The columns of a synthetic row of `event_type` (the newest), with the
 --- SQL type of each nullable column.
 local function synthetic_row(v, event_type)
@@ -149,6 +153,8 @@ test("boot_id is the current boot as a 16-byte PCDS-layout GUID", {
         "a synthetic row carries the same boot ID")
 end)
 
+-- The third case, a gap row stamped with the revealing event's timestamp,
+-- is gap-detection.test.lua's (gap.a-gap-records-time-is-the-revealing-events-timestamp).
 test("timestamp is epoch nanoseconds: the emission time for a real event, eventd's clock for a synthetic one", {
     spec = "eventd *events.timestamp-is-epoch-nanoseconds-from-the-header-or-eventds-clock",
 }, function(t)
@@ -208,7 +214,7 @@ test("origin_class is the header's origin, 0 for a userspace emitter, and null f
     local r = emit_stored(vm, vm, "pt.ev.origin", { tag = tag }, tag)
     t:assert_eq(stored_row(vm, "pt.ev.origin", r["event.sequence"]).origin_class, 0, "kmes_emit from userspace is class 0")
     local classes = eventd.sql(vm, SHARD0,
-        "SELECT DISTINCT origin_class FROM events WHERE event_type NOT LIKE 'synthetic.%'")
+        "SELECT DISTINCT origin_class FROM events WHERE event_type NOT IN " .. OWN)
     for _, c in ipairs(classes) do
         t:assert(c[1] == 0 or c[1] == 1 or c[1] == 2 or c[1] == 3,
             "every real row is one of the four classes: " .. json.encode(classes))
@@ -216,8 +222,8 @@ test("origin_class is the header's origin, 0 for a userspace emitter, and null f
     t:assert_eq(synthetic_row(vm, eventd.T.startup).origin_class, "null", "a synthetic record has none")
 end)
 
-test("event_type is the header's type exactly, or a synthetic.-prefixed string", {
-    spec = "eventd *events.event-type-is-the-header-type-or-a-synthetic-prefixed-string",
+test("event_type is the header's type exactly, or one of the five types eventd writes itself", {
+    spec = "eventd *events.event-type-is-the-header-type-or-one-of-the-five-eventd-types",
 }, function(t)
     local decl = column_decl(vm, SHARD0, "events")
     t:assert_eq(decl.event_type.type, "TEXT", "event_type is TEXT")
@@ -225,12 +231,14 @@ test("event_type is the header's type exactly, or a synthetic.-prefixed string",
     local tag = eventd.marker("ty")
     local r = emit_stored(vm, vm, "pt.Ev.MixedCase", { tag = tag }, tag)
     local rows = eventd.sql(vm, SHARD0, "SELECT event_type FROM events WHERE sequence = " .. r["event.sequence"] ..
-        " AND event_type NOT LIKE 'synthetic.%'")
+        " AND event_type NOT IN " .. OWN)
     t:assert_eq(rows[1][1], "pt.Ev.MixedCase", "stored byte for byte, case kept")
     local null_seq = eventd.sql(vm, SHARD0,
         "SELECT DISTINCT event_type FROM events WHERE sequence IS NULL")
+    t:assert(#null_seq >= 1, "daemon records exist to check")
     for _, n in ipairs(null_seq) do
-        t:assert(n[1]:sub(1, 10) == "synthetic.", "each daemon record's type is synthetic.-prefixed: " .. n[1])
+        t:assert(OWN:find("'" .. n[1] .. "'", 1, true),
+            "each daemon record's type is one of eventd's five: " .. n[1])
     end
 end)
 
@@ -318,25 +326,33 @@ end)
 
 test("a userspace emitter cannot make a record that event_type alone reads as synthetic", {
     spec = "eventd *events.event-type-alone-distinguishes-real-from-synthetic-records"
-        .. " eventd *events.a-kmes-event-typed-in-the-synthetic-namespace-is-counted-and-not-stored",
+        .. " eventd *events.a-kmes-event-typed-as-one-of-the-five-eventd-types-is-counted-and-not-stored",
 }, function(t)
     local cols = column_decl(vm, SHARD0, "events")
     local n = 0
     for _ in pairs(cols) do n = n + 1 end
     t:assert_eq(n, 11, "the eleven documented columns and no record-type column")
-    local gaps = "SELECT count(*) FROM events WHERE event_type = 'synthetic.gap'"
+    local gaps = "SELECT count(*) FROM events WHERE event_type = '" .. eventd.T.gap .. "'"
     local gaps_before = eventd.sql(vm, SHARD0, gaps)[1][1]
     local tag = eventd.marker("spoof")
-    local spoof = "synthetic.pt" .. tag
+    -- A real event claiming to be eventd's own startup record, beside an
+    -- event of another eventd.* type, which nothing reserves.
+    local spoof = eventd.T.startup
+    local free = "eventd.pt." .. tag
+    local spoofs = "SELECT count(*) FROM events WHERE event_type = '" .. spoof .. "' AND sequence IS NOT NULL"
     local r = eventd.emit(vm, spoof, { tag = tag })
+    local r2 = eventd.emit(vm, free, { tag = tag })
+    t:assert_eq(r2.ret, 0, "emitted " .. free)
     -- A later event from the same CPU, once stored, means the spoof has
     -- been through the writer too.
     local mine = eventd.marker("after")
     emit_stored(vm, vm, "pt.ev.after", { tag = mine }, mine)
-    local stored = eventd.sql(vm, SHARD0, "SELECT count(*) FROM events WHERE event_type = '" .. spoof .. "'")
+    local stored = eventd.sql(vm, SHARD0, spoofs)
     t:assert(r.ret ~= 0 or stored[1][1] == 0,
         "a real event typed " .. spoof .. " is refused or not stored as such (emit ret " .. tostring(r.ret) ..
         ", stored rows " .. stored[1][1] .. ")")
+    t:assert_eq(eventd.sql(vm, SHARD0, "SELECT count(*) FROM events WHERE event_type = '" .. free .. "'")[1][1], 1,
+        "while " .. free .. ", outside the five, is stored like any event")
     -- Its sequence is receipted, so the next event leaves no hole behind it.
     t:assert_eq(eventd.sql(vm, SHARD0, gaps)[1][1], gaps_before, "and no gap is written in its place")
 end)
@@ -449,9 +465,9 @@ end)
 test("identity absent twice over: a synthetic record's effective_token_guid is null", {
     spec = "eventd *events.a-null-effective-token-guid-means-a-synthetic-record",
 }, function(t)
-    t:assert_eq(synthetic_row(vm, eventd.T.startup).effective, "null", "synthetic.startup: SQL NULL")
+    t:assert_eq(synthetic_row(vm, eventd.T.startup).effective, "null", eventd.T.startup .. ": SQL NULL")
     local real_nulls = eventd.sql(vm, SHARD0,
-        "SELECT count(*) FROM events WHERE effective_token_guid IS NULL AND event_type NOT LIKE 'synthetic.%'")
+        "SELECT count(*) FROM events WHERE effective_token_guid IS NULL AND event_type NOT IN " .. OWN)
     t:assert_eq(real_nulls[1][1], 0, "no real event has a NULL effective token")
 end)
 
@@ -543,10 +559,10 @@ test("a known type adds no catalogue statement to an insert, real or synthetic",
     emit_stored(craft, craft, ty, { tag = a }, a)
     emit_stored(craft, craft, ty, { tag = b }, b)
     t:assert_eq(catlog(craft, ty), 1, "two real events of one type, in two batches: one statement")
-    -- synthetic.startup was catalogued before the trigger existed, so the
-    -- startup record committed by the restart was a known-type insert.
+    -- eventd.daemon.started was catalogued before the trigger existed, so
+    -- the startup record committed by the restart was a known-type insert.
     t:assert_eq(catlog(craft, eventd.T.startup), 0,
-        "the restart's synthetic.startup (a known type) issued no catalogue statement")
+        "the restart's eventd.daemon.started (a known type) issued no catalogue statement")
 end)
 
 test("a new type is catalogued once with its first event, however many of it share the batch", {
@@ -681,7 +697,7 @@ test("cpu_id is null on a daemon-wide synthetic record and set on a gap record",
     local g = synthetic_row(craft, eventd.T.gap)
     t:assert_eq(g.cpu_id, "integer", "a gap record's cpu_id is set")
     t:assert_eq(g.cpu_value, 0, "to the CPU of the gap")
-    t:assert_eq(synthetic_row(craft, eventd.T.startup).cpu_id, "null", "synthetic.startup has none")
+    t:assert_eq(synthetic_row(craft, eventd.T.startup).cpu_id, "null", eventd.T.startup .. " has none")
 end)
 
 test("a receipt accounts for every stored event and every gap it commits with", {
@@ -698,9 +714,10 @@ test("a receipt accounts for every stored event and every gap it commits with", 
     t:assert(#gaps >= 1, "there is a gap record")
     for _, g in ipairs(gaps) do
         local cover = eventd.sql(craft, SHARD0, "SELECT count(*) FROM receipt_ranges WHERE hex(boot_id) = '" ..
-            boot .. "' AND cpu_id = " .. g["event.cpu"] .. " AND first_sequence <= " .. g.first_sequence ..
-            " AND last_sequence >= " .. g.last_sequence)
-        t:assert_eq(cover[1][1], 1, "the gap " .. g.first_sequence .. "-" .. g.last_sequence .. " is receipted")
+            boot .. "' AND cpu_id = " .. g["event.cpu"] .. " AND first_sequence <= " .. g["loss.sequence"] ..
+            " AND last_sequence >= " .. g["loss.sequence-last"])
+        t:assert_eq(cover[1][1], 1,
+            "the gap " .. g["loss.sequence"] .. "-" .. g["loss.sequence-last"] .. " is receipted")
     end
 end)
 
@@ -846,8 +863,8 @@ test("startup merges overlapping and adjacent receipts across every readable sha
         { to = eventd.STORE.events .. "/shard-0006.db" })
     eventd.start(craft)
     local rows = eventd.rows(craft, "EVENTS " .. eventd.T.startup .. " TAKE 1")
-    local rp = rows[1].resume_points
-    t:assert_eq(rp[1].cpu_id, 0, "CPU 0's resume point")
-    t:assert(rp[1].sequence >= s + 5000,
-        "is contiguous from 1 through the other shard's range: " .. rp[1].sequence .. " (active ended at " .. s .. ")")
+    local cpus, seqs = rows[1]["store.resume.cpus"], rows[1]["store.resume.sequences"]
+    t:assert_eq(cpus[1], 0, "CPU 0's resume point")
+    t:assert(seqs[1] >= s + 5000,
+        "is contiguous from 1 through the other shard's range: " .. seqs[1] .. " (active ended at " .. s .. ")")
 end)

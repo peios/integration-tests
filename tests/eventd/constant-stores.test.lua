@@ -1,4 +1,5 @@
--- eventd TRM Appendix B — Constants: the synthetic event types, the metric
+-- eventd TRM Appendix B — Constants: the five event types eventd writes
+-- about itself (eventd.daemon.started and the rest), the metric
 -- types, log severity, series hashing and the schema versions.
 --
 -- One file-scope VM, whose boot seed adds a one-shot service, `pt-sev`,
@@ -53,8 +54,8 @@ end
 
 local function count(text) return #eventd.rows(vm, text) end
 
-test("synthetic.startup is written when eventd starts and attaches to KMES", {
-    spec = "eventd *constant.synthetic-startup-is-emitted-when-eventd-starts-and-attaches-to-kmes",
+test("eventd.daemon.started is written when eventd starts and attaches to KMES", {
+    spec = "eventd *constant.eventd-daemon-started-is-emitted-when-eventd-starts-and-attaches-to-kmes",
 }, function(t)
     local before = count("EVENTS " .. eventd.T.startup .. " SINCE 1h ago")
     eventd.restart(vm)
@@ -62,11 +63,12 @@ test("synthetic.startup is written when eventd starts and attaches to KMES", {
     t:assert_eq(#rows, before + 1, "one more startup record after a restart")
     local fds = eventd.fd_listing(vm, eventd.pid(vm))
     t:assert(fds:find("anon_inode:kmes-cpu", 1, true), "the new eventd holds a KMES buffer")
-    t:assert_eq(#rows[1].resume_points, 1, "and the record names the one CPU it attached: " .. json.encode(rows[1]))
+    t:assert_eq(#(rows[1]["store.resume.cpus"] or {}), 1,
+        "and the record names the one CPU it attached: " .. json.encode(rows[1]))
 end)
 
-test("synthetic.shutdown is written when a graceful shutdown begins", {
-    spec = "eventd *constant.synthetic-shutdown-is-emitted-when-graceful-shutdown-begins",
+test("eventd.daemon.stopped is written on a graceful shutdown", {
+    spec = "eventd *constant.eventd-daemon-stopped-is-emitted-on-graceful-shutdown",
 }, function(t)
     local before = count("EVENTS " .. eventd.T.shutdown .. " SINCE 1h ago")
     local stopping_at = eventd.guest_ns(vm)
@@ -78,8 +80,8 @@ test("synthetic.shutdown is written when a graceful shutdown begins", {
         "written after the stop was asked for and before the next start")
 end)
 
-test("synthetic.gap is written when a CPU's sequence has a gap, naming the CPU and the lost sequences", {
-    spec = "eventd *constant.synthetic-gap-is-emitted-when-a-cpu-sequence-gap-is-detected"
+test("eventd.events.lost is written when a CPU's sequence has a gap, naming the CPU and the lost sequences", {
+    spec = "eventd *constant.eventd-events-lost-is-emitted-when-a-cpu-sequence-gap-is-detected"
         .. " eventd *term.a-gap-record-names-the-cpu-and-the-missing-sequence-numbers",
 }, function(t)
     -- With eventd stopped, overrun the 4 MiB ring on CPU 0 (the only one):
@@ -95,30 +97,32 @@ test("synthetic.gap is written when a CPU's sequence has a gap, naming the CPU a
         function(rs) return #rs > before end)
     t:assert_eq(#gaps, before + 1, "one gap record")
     local g = gaps[1]
-    t:assert_eq(g.cpu_id, 0, "naming CPU 0: " .. json.encode(g))
+    t:assert_eq(g["buffer.cpu"], 0, "naming CPU 0: " .. json.encode(g))
     t:assert_eq(g["event.cpu"], 0, "the CPU it is stored under too")
-    t:assert(math.type(g.first_sequence) == "integer" and g.last_sequence >= g.first_sequence,
+    local first, last = g["loss.sequence"], g["loss.sequence-last"]
+    t:assert(math.type(first) == "integer" and math.type(last) == "integer" and last >= first,
         "and the range of sequence numbers lost")
     local survivors = eventd.rows(vm, "EVENTS " .. flood .. " SINCE 1h ago")
     local lowest = math.huge
     for _, r in ipairs(survivors) do lowest = math.min(lowest, r["event.sequence"]) end
-    t:assert_eq(g.last_sequence, lowest - 1, "ending just before the oldest surviving event")
+    t:assert_eq(last, lowest - 1, "ending just before the oldest surviving event")
     t:assert(#survivors < 120, "which is fewer than were emitted: " .. #survivors)
 end)
 
-test("synthetic.config_change is written when a value is applied at runtime", {
-    spec = "eventd *constant.synthetic-config-change-is-emitted-when-a-value-is-applied-at-runtime",
+test("eventd.config.changed is written when a value is applied at runtime", {
+    spec = "eventd *constant.eventd-config-changed-is-emitted-when-a-value-is-applied-at-runtime",
 }, function(t)
     eventd.set(vm, "LogRetentionDays", "dword:21"):assert_ok()
     local rows, ok = eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change ..
-        ' WHERE key == "LogRetentionDays" AND new_value == "21" SINCE 1h ago', function(rs) return #rs == 1 end)
+        ' WHERE config.name == "LogRetentionDays" AND config.value == 21 SINCE 1h ago',
+        function(rs) return #rs == 1 end)
     eventd.unset(vm, "LogRetentionDays")
     t:assert(ok, "applying LogRetentionDays=21 is recorded")
-    t:assert_eq(rows[1] and rows[1]["event.type"], eventd.T.config_change, "as synthetic.config_change")
+    t:assert_eq(rows[1] and rows[1]["event.type"], eventd.T.config_change, "as eventd.config.changed")
 end)
 
-test("synthetic.storage_error is written when a store is found corrupt, not when it is full", {
-    spec = "eventd *constant.synthetic-storage-error-is-emitted-when-a-store-is-found-corrupt-and-quarantined",
+test("eventd.store.quarantined is written when a store is found corrupt, not when it is full", {
+    spec = "eventd *constant.eventd-store-quarantined-is-emitted-when-a-store-is-found-corrupt-and-quarantined",
 }, function(t)
     -- First the log store is found corrupt at start: garbage in logs.db.
     -- Then it is put on a 256 KiB tmpfs of its own, so that its writes fail
@@ -127,7 +131,7 @@ test("synthetic.storage_error is written when a store is found corrupt, not when
     local function log_errors()
         local n = 0
         for _, r in ipairs(eventd.rows(fvm, "EVENTS " .. eventd.T.storage_error .. " SINCE 1h ago")) do
-            if r.store == "log" then n = n + 1 end
+            if r["store.kind"] == "log" then n = n + 1 end
         end
         return n
     end
@@ -135,9 +139,9 @@ test("synthetic.storage_error is written when a store is found corrupt, not when
     fvm:write_file(eventd.DB.logs, string.rep("this is not a database. ", 400))
     fvm:run("rm -f " .. eventd.DB.logs .. "-wal " .. eventd.DB.logs .. "-shm"):assert_ok()
     eventd.start(fvm)
-    local _, corrupt = eventd.wait_rows(fvm, "EVENTS " .. eventd.T.storage_error .. ' WHERE store == "log" SINCE 1h ago',
-        function(rs) return #rs >= 1 end, { timeout = 20 })
-    t:assert(corrupt, "the corrupt log store is recorded as a storage_error naming the log store")
+    local _, corrupt = eventd.wait_rows(fvm, "EVENTS " .. eventd.T.storage_error
+        .. ' WHERE store.kind == "log" SINCE 1h ago', function(rs) return #rs >= 1 end, { timeout = 20 })
+    t:assert(corrupt, "the corrupt log store is recorded as a quarantine naming the log store")
     local after_corrupt = log_errors()
 
     eventd.stop(fvm)
@@ -156,7 +160,7 @@ test("synthetic.storage_error is written when a store is found corrupt, not when
     local kept = #eventd.rows(fvm, "LOGS FROM " .. origin .. " SINCE 10m ago")
     t:assert(kept < 600, "the full store refused some of the writes: " .. kept .. " of 600 kept; " .. full)
     fvm:run("sleep 2")
-    t:assert_eq(log_errors(), after_corrupt, "no storage_error records the writes refused for space; the store: " .. full)
+    t:assert_eq(log_errors(), after_corrupt, "no quarantine record for the writes refused for space; the store: " .. full)
 end)
 
 -- ---------------------------------------------------------------------------
