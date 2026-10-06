@@ -132,8 +132,9 @@ local function stop_service()
     wait_until(function() return rpid() == nil end, { timeout = 30, interval = 0.25, desc = "resolvd stopped" })
 end
 
---- Start the service; any socket left behind is removed first (the
---- service cannot, PEI-1373).
+--- Start the service; any socket left behind is removed first. The
+--- service removes its own (PEI-1373), but not one a resolvd run by hand
+--- as SYSTEM left, whose DACL names SYSTEM where the service's names it.
 local function start_service()
     sut:run("rm -f " .. SOCK)
     sut:run("svctl reset resolvd")
@@ -251,7 +252,7 @@ test("the native socket's mode is 0666", { spec = "resolvd *sockets.socket-mode-
     t:assert_eq(st.perm, 438, "mode 0666")
 end)
 
-test("the directory and the socket carry the DACL SYSTEM:GENERIC_ALL, Everyone:GENERIC_READ|WRITE|EXECUTE",
+test("the directory and the socket carry the DACL SYSTEM:GENERIC_ALL, resolvd:GENERIC_ALL, Everyone:GENERIC_READ|WRITE|EXECUTE",
     { spec = "resolvd *sockets.directory-and-socket-dacl" }, function(t)
         for _, path in ipairs({ DIR, SOCK }) do
             local d = descriptor(path, kacs.SI.DACL)
@@ -261,11 +262,13 @@ test("the directory and the socket carry the DACL SYSTEM:GENERIC_ALL, Everyone:G
                 text[#text + 1] = string.format("type %d flags %02x mask %08x %s", a.type, a.flags, a.mask, token.sid_string(a.sid))
             end
             t:log(path .. " DACL:\n" .. table.concat(text, "\n"))
-            t:assert_eq(#aces, 2, path .. ": two entries")
+            t:assert_eq(#aces, 3, path .. ": three entries")
             t:assert(aces[1] and aces[1].type == 0 and aces[1].mask == 0x10000000
                 and token.sid_string(aces[1].sid) == "S-1-5-18", path .. ": SYSTEM is allowed GENERIC_ALL")
-            t:assert(aces[2] and aces[2].type == 0 and aces[2].mask == 0xE0000000
-                and token.sid_string(aces[2].sid) == "S-1-1-0", path .. ": Everyone is allowed GENERIC_READ|WRITE|EXECUTE")
+            t:assert(aces[2] and aces[2].type == 0 and aces[2].mask == 0x10000000
+                and token.sid_string(aces[2].sid) == SID, path .. ": resolvd's service SID is allowed GENERIC_ALL")
+            t:assert(aces[3] and aces[3].type == 0 and aces[3].mask == 0xE0000000
+                and token.sid_string(aces[3].sid) == "S-1-1-0", path .. ": Everyone is allowed GENERIC_READ|WRITE|EXECUTE")
         end
     end)
 
@@ -282,69 +285,52 @@ test("only the DACL is written: the directory keeps peinit's owner, SYSTEM, and 
         t:assert_eq(dir, "S-1-5-18", "the directory is owned by SYSTEM")
     end)
 
-test("the service cannot remove a socket a previous run left: it exits on EACCES and restarts in a loop until the file is removed, and a SYSTEM resolvd removes it and logs the removal",
-    { spec = "resolvd *sockets.stale-socket-is-fatal-to-the-service" }, function(t)
-        -- PEI-1373: under its service account resolvd cannot remove the
-        -- socket its previous run left. Startup step 1 fails with
-        -- `native socket: Permission denied (os error 13)` and peinit's
-        -- restart policy loops on it (backoff/process_crash) until the
-        -- file is removed by someone with rights over it; removing the
-        -- socket alone (the directory stays) lets the next start succeed.
-        -- Asserted as it is today; when PEI-1373 is fixed this test and
-        -- resolvd §2.4 change together.
+test("a start after a stop, svctl restart, and a restart after SIGKILL each remove the socket the previous run left and answer on a new one",
+    { spec = "resolvd *sockets.stale-socket-removed-on-restart" }, function(t)
+        -- PEI-1373: the DACL resolvd writes keeps its own account's full
+        -- access, so the next run, under the same account, may delete the
+        -- socket its predecessor left. Before the fix the removal failed
+        -- with EACCES and the service crash-looped until a reboot.
         local FATAL = "resolvd: error: native socket: Permission denied (os error 13)"
-        stop_service()
-        local st = sut:stat(SOCK)
-        t:assert_eq(st.entry_type, "socket", "the stopped resolvd left its socket behind")
-        local mark = guest_ns()
-        sut:run("svctl start resolvd")
-        -- Two failed runs: the restart policy started it again, and the
-        -- second failed the same way.
-        local lines, causes, by_policy = nil, {}, false
-        local looped = pcall(wait_until, function()
-            local s = json.decode(sut:run("svctl --json status resolvd").stdout) or {}
-            local c = tostring(s.state) .. "/" .. tostring(s.cause)
-            if causes[#causes] ~= c then causes[#causes + 1] = c end
-            if c:find("restart_policy", 1, true) or c:find("process_crash", 1, true) then by_policy = true end
-            lines = log_since(mark)
-            local n = 0
-            for _, l in ipairs(lines) do if l == FATAL then n = n + 1 end end
-            return n >= 2
-        end, { timeout = 30, interval = 0.25, desc = "two runs failing at the native socket" })
-        t:log("log:\n" .. table.concat(lines or {}, "\n") .. "\npeinit states seen: " .. table.concat(causes, " "))
-        local answered = rcall({ query = "status" }, 300)
-        local still = pcall(function() return sut:stat(SOCK) end)
+        local REMOVED = "resolvd: warn: removed a stale /run/resolvd/resolv.sock"
+        local function check(t, how, old, mark)
+            local ok, pid = pcall(answering, old)
+            local lines = log_since(mark)
+            t:log(how .. ": pid " .. tostring(old) .. " -> " .. tostring(pid) .. "\n" .. table.concat(lines, "\n"))
+            t:assert(ok, how .. ": a new resolvd answers on " .. SOCK)
+            local fatal, removed = false, false
+            for _, l in ipairs(lines) do
+                if l == FATAL then fatal = true end
+                if l == REMOVED then removed = true end
+            end
+            t:assert(not fatal, how .. ": no run failed at the native socket")
+            t:assert(removed, how .. ": the new run removed the stale socket and logged it at warn")
+            return pid
+        end
 
-        -- The file removed, and nothing else: the next start succeeds.
-        sut:run("svctl stop resolvd")
-        local ok_after = pcall(start_service)
-        t:log("after rm -f " .. SOCK .. ": " .. (ok_after and "answering" or "not answering"))
+        local ok, err = pcall(function()
+            local before = rpid()
+            stop_service()
+            t:assert_eq(sut:stat(SOCK).entry_type, "socket", "the stopped resolvd left its socket behind")
+            local mark = guest_ns()
+            sut:run("svctl start resolvd"):assert_ok()
+            local p1 = check(t, "svctl stop; svctl start", before, mark)
 
-        t:assert(looped, "the restarted service exits on the native socket, and is started and fails again")
-        t:assert_eq((lines or {})[1], FATAL, "its first line is the fatal native socket error")
-        t:assert(by_policy, "peinit restarts it under its policy (process_crash / restart_policy)")
-        t:assert(answered == nil, "nothing answers on the native socket meanwhile")
-        t:assert(still, "and the stale socket file is still there")
-        t:assert(ok_after, "with the file removed, the next start answers")
+            mark = guest_ns()
+            sut:run("svctl restart resolvd"):assert_ok()
+            local p2 = check(t, "svctl restart", p1, mark)
 
-        -- resolvd with rights over the file (by hand, as SYSTEM) removes
-        -- it itself and logs the removal at warn.
-        stop_service()
-        t:assert_eq(sut:stat(SOCK).entry_type, "socket", "the service's socket is left behind again")
-        local p = sut:run_async("sh", { args = { "-c", "exec /usr/sbin/resolvd 2>" .. ERR } })
-        pcall(wait_until, function()
-            return p:status() == "exited" or rcall({ query = "status" }, 300) ~= nil
-        end, { timeout = 20, interval = 0.1, desc = "the hand-run resolvd" })
-        local up = p:status() ~= "exited" and rcall({ query = "status" }, 1000) ~= nil
-        local err = sut:read_file(ERR)
-        local first = err:match("^([^\n]*)")
-        if p:status() ~= "exited" then p:kill("kill"); p:wait(10) end
-        sut:run("rm -f " .. SOCK) -- the hand-run (SYSTEM) socket
-        start_service()
-        t:log("hand-run stderr:\n" .. err)
-        t:assert(up, "the hand-run resolvd started")
-        t:assert_eq(first, "resolvd: warn: removed a stale /run/resolvd/resolv.sock",
-            "its first line is the removal, at warn")
+            mark = guest_ns()
+            peinit.signal(sut, p2, "KILL")
+            check(t, "SIGKILL and the restart policy", p2, mark)
+        end)
+        if not ok then
+            -- Leave a resolvd answering for the tests after this one.
+            sut:run("svctl stop resolvd")
+            sut:run("rm -rf " .. DIR)
+            pcall(start_service)
+            error(err, 0)
+        end
     end)
 
 -- ---------------------------------------------------------------------------
