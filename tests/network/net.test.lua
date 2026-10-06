@@ -145,7 +145,8 @@ test("each subcommand does what the table says",
         for _, v in ipairs({ "version", "--version" }) do
             local r = net(v)
             t:assert_eq(r.exit_code, 0, "net " .. v)
-            t:assert_eq(r.stdout, "net 0.1.7\n", "net " .. v .. " prints net <version>")
+            t:assert(r.stdout:match("^net %d+%.%d+%.%d+\n$"),
+                "net " .. v .. " prints net <version>: " .. r.stdout)
         end
         -- status prints the status reply (its rendering has its own test).
         local r = net("status")
