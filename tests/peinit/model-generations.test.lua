@@ -130,7 +130,8 @@ daemon("pt-env", {})
 
 local vm = peinit.boot({
     name = "generations",
-    files = peinit.merge(FILES, peinit.seed("pt-generations", SERVICES)),
+    files = peinit.merge(FILES, peinit.seed("pt-generations", SERVICES),
+        peinit.seed("pt-events-verbose", peinit.verbose_events_keys())),
 })
 
 local function status(service_name)
@@ -205,20 +206,23 @@ test("a registry write during the boot window is coalesced into one reload after
             "than the one written during the boot window: " .. at_boot)
 
         -- The second half: the write was deferred, not dropped. After
-        -- the plan drains peinit records a `config.reload_coalesced`
-        -- event (and says so on the console, though by then login-console
-        -- owns it and the line is dropped), and the one reload it then
-        -- runs is what puts the new arguments into the model. eventd is
-        -- where the event is durable, so that is where it is read.
+        -- the plan drains peinit records a `peinit.config.reload.applied`
+        -- naming the deferred services in `graph.services` (and says so on
+        -- the console, though by then login-console owns it and the line
+        -- is dropped), and the one reload it then runs is what puts the
+        -- new arguments into the model. eventd is where the event is
+        -- durable, so that is where it is read.
         local events = wait_until(function()
             local out = vm:run(
-                "evctl 'EVENTS config.reload_coalesced TAKE 10' --format jsonl").stdout
+                "evctl 'EVENTS peinit.config.reload.applied TAKE 10' --format jsonl").stdout
             return out:find("pt-late", 1, true) and out or nil
         end, { timeout = 90, interval = 1,
                desc = "the coalesced reload after the boot plan drained" })
         t:assert(events, "peinit ran one reload once the boot plan had drained: " .. events)
+        -- `peinit.config.reload.deferred` is verbose; the seed switches
+        -- it on.
         local deferred = vm:run(
-            "evctl 'EVENTS config.reload_deferred TAKE 10' --format jsonl").stdout
+            "evctl 'EVENTS peinit.config.reload.deferred TAKE 10' --format jsonl").stdout
         t:assert(deferred:find("pt-late", 1, true),
             "having recorded at the time that pt-late's write was deferred: " .. deferred)
 

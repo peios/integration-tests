@@ -8,7 +8,9 @@
 -- The exceptions are the states a caller never gets an identifier for —
 -- Merged, whose record is stored under an identifier the merging caller
 -- is deliberately not told (§8.6) — and those are read out of the KMES
--- ring instead, where `operation.merged` names both halves.
+-- ring instead, where `peinit.operation.merged` names both halves. That
+-- event, and `peinit.operation.started`, are verbose, so the seed switches
+-- every `peinit.*` event on in the emission policy.
 --
 -- Two things about the seeds below. `Readiness = 0` is notify readiness,
 -- and a service that never sends `READY=1` therefore sits in Starting
@@ -20,6 +22,7 @@
 -- ever running, which is what the queue-time claim needs.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 -- One VM for the file: each test works on a service of its own, so
 -- nothing here needs a boot to itself.
 peinit.claim(1)
@@ -99,7 +102,13 @@ local function definitions()
     }
 end
 
-local vm = peinit.boot({ name = "opsop", files = peinit.seed("pt-op", definitions()) })
+local function seed_keys()
+    local keys = definitions()
+    for _, key in ipairs(peinit.verbose_events_keys()) do keys[#keys + 1] = key end
+    return keys
+end
+
+local vm = peinit.boot({ name = "opsop", files = peinit.seed("pt-op", seed_keys()) })
 
 --- `svctl <command>` as JSON, with the fields a lifecycle answer
 --- carries pulled out. `no_wait` is opt-in because svctl refuses it on
@@ -138,31 +147,18 @@ local function settle(id, seconds)
     return operation(id)
 end
 
---- Pretty-printed KMES events of the given types, oldest first. The
---- default line form caps the payload, so `--pretty` is what a test
---- reads a named field out of.
+--- Pretty-printed KMES events of the given types, oldest first, with
+--- their payloads read back into dotted catalogue paths (see
+--- helpers/revstrm).
 local function events(globs)
-    local flags = ""
-    for _, glob in ipairs(globs) do flags = flags .. " --type '" .. glob .. "'" end
-    local r = vm:run("revstrm --snapshot --pretty" .. flags, { timeout = 60 })
-    r:assert_ok()
-    local out, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        local kind = line:match("^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+([%w_]+%.[%w_]+)%s*$")
-        if kind then
-            current = { type = kind, payload = "" }
-            out[#out + 1] = current
-        elseif current and line:match("^%s") then
-            current.payload = current.payload .. line .. "\n"
-        end
-    end
-    return out
+    return revstrm.snapshot(vm, globs)
 end
 
-local function field(event, name)
-    local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
-    if not value then return nil end
-    return (value:gsub('^"', ""):gsub('"$', ""))
+local field = revstrm.field
+
+--- The operation an event is about, as the text svctl names it by.
+local function operation_of(event)
+    return revstrm.guid(field(event, "object.operation.guid"))
 end
 
 test("a lifecycle command creates an operation rather than changing state directly",
@@ -189,7 +185,7 @@ test("the states an operation can be in",
         -- from one superseded while it was running; Merged from one that
         -- never became a second piece of work at all. Merged is the only
         -- one whose identifier no caller is given, so it is taken out of
-        -- the ring — `operation.merged` names the merged operation and
+        -- the ring — `peinit.operation.merged` names the merged operation and
         -- the one it merged into, and peinit will describe the merged
         -- one when asked by that identifier.
         local completed = settle(send("start pt-oneshot", true).operation)
@@ -212,15 +208,18 @@ test("the states an operation can be in",
         t:assert_eq(second.operation, first.operation,
             "the second caller was given the first operation")
 
-        local merged_id
-        for _, event in ipairs(events({ "operation.merged" })) do
-            if field(event, "service") == "pt-hangs" then
-                merged_id = field(event, "operation_id")
+        local merged_id, merged_into
+        for _, event in ipairs(events({ "peinit.operation.merged" })) do
+            if field(event, "object.service.name") == "pt-hangs" then
+                merged_id = operation_of(event)
+                merged_into = revstrm.guid(field(event, "object.operation.merged-into.guid"))
             end
         end
         t:assert(merged_id, "a merge was recorded for pt-hangs")
-        t:assert(merged_id ~= first.operation,
+        t:assert(merged_id ~= first.operation:lower(),
             "under an identifier of its own, which the caller was not given")
+        t:assert_eq(merged_into, first.operation:lower(),
+            "and the event names the operation it merged into")
 
         local merged = operation(merged_id)
         t:assert_eq(merged.state, "merged", "and that operation is Merged: " .. merged.raw)
@@ -232,20 +231,24 @@ test("an operation records why peinit created it",
     { spec = "peinit *op.the-operation-sources" },
     function(t)
         -- The source is the reason, not the caller. A control client's
-        -- command is `admin` and carries the caller's token; the Phase 2
-        -- plan's starts are `boot` and carry no caller at all, because
+        -- command is `admin` and names the client who sent it; the Phase 2
+        -- plan's starts are `boot` and have no subject at all, because
         -- nobody asked for them.
         local admin = operation(send("start pt-oneshot", true).operation)
         t:assert_eq(admin.source, "admin", "a control command's operation: " .. admin.raw)
 
         local boot_starts, admin_starts = 0, 0
-        for _, event in ipairs(events({ "operation.requested", "operation.started" })) do
-            if field(event, "source") == "boot" then
+        for _, event in ipairs(events({ "peinit.operation.requested",
+                                        "peinit.operation.started" })) do
+            local source = field(event, "object.operation.source")
+            if source == "boot" then
                 boot_starts = boot_starts + 1
-                t:assert_eq(field(event, "caller"), "nil",
-                    "a boot operation has no caller: " .. event.payload)
-            elseif field(event, "source") == "admin" then
+                t:assert(not revstrm.has(event, "subject"),
+                    "a boot operation has no subject: " .. event.payload)
+            elseif source == "admin" then
                 admin_starts = admin_starts + 1
+                t:assert(field(event, "subject.token.sid"),
+                    "an admin operation names its client: " .. event.payload)
             end
         end
         t:assert(boot_starts > 0, "the boot plan's operations carry the boot source")
@@ -308,15 +311,17 @@ test("a restart is one operation across both of its legs, and stays a restart",
             .. " -> " .. tostring(after))
 
         local types = {}
-        for _, event in ipairs(events({ "operation.requested", "operation.started",
-                                        "operation.completed" })) do
-            if field(event, "operation_id") == restart.operation then
-                types[#types + 1] = event.type .. "/" .. tostring(field(event, "type"))
+        for _, event in ipairs(events({ "peinit.operation.requested", "peinit.operation.started",
+                                        "peinit.operation.ended" })) do
+            if operation_of(event) == restart.operation:lower() then
+                types[#types + 1] = event.type .. "/"
+                    .. tostring(field(event, "object.operation.type")) .. "/"
+                    .. tostring(field(event, "object.operation.state"))
             end
         end
         t:assert_eq(table.concat(types, " "),
-            "operation.requested/restart operation.started/restart " ..
-            "operation.completed/restart",
+            "peinit.operation.requested/restart/pending peinit.operation.started/restart/running " ..
+            "peinit.operation.ended/restart/completed",
             "one operation, typed restart at every step")
     end)
 
@@ -430,11 +435,13 @@ test("a restart whose definition is withdrawn during its stop leg is aborted",
         -- query checks a right on a service that no longer exists
         -- (PEI-1076, and the test after this one).
         local aborted = wait_until(function()
-            for _, event in ipairs(events({ "operation.aborted" })) do
-                if field(event, "operation_id") == id then return event end
+            for _, event in ipairs(events({ "peinit.operation.ended" })) do
+                if operation_of(event) == id:lower() then return event end
             end
-        end, { timeout = 40, interval = 1, desc = "the restart's operation.aborted event" })
-        t:assert_eq(field(aborted, "reason"), "definition_removed_during_restart_stop_leg",
+        end, { timeout = 40, interval = 1, desc = "the restart's peinit.operation.ended event" })
+        t:assert_eq(field(aborted, "object.operation.state"), "aborted",
+            "the restart ended aborted: " .. aborted.payload)
+        t:assert_eq(field(aborted, "outcome.detail"), "definition_removed_during_restart_stop_leg",
             "the restart was aborted because its definition went away during the stop leg: "
             .. aborted.payload)
         t:assert(vm:run("svctl --json status pt-withdrawn").stdout:find("UNKNOWN_SERVICE", 1, true),

@@ -26,14 +26,15 @@
 --
 -- The escaped pt-notify sends READY=1 every second throughout. Once the
 -- generation has advanced, its datagram meets the generation check
--- (execution/notify/auth.rs) and is published as notify.rejected with the
--- job's generation against the service's.
+-- (execution/notify/auth.rs) and is published as peinit.notify.rejected
+-- with `outcome.reason` `generation-mismatch` and the sender's pid.
 --
 -- Every wait is bounded and every background process has its stdio sent
 -- to /dev/null: one that inherits the agent's pipes holds vm:run open for
 -- as long as it lives, and the keeper's children live for minutes.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local CGROUP = "/sys/fs/cgroup/peinit/"
@@ -119,20 +120,9 @@ local function procs(path)
     return peinit.lines(text)
 end
 
---- notify.rejected events still in the ring, as raw payload text.
+--- peinit.notify.rejected events still in the ring, parsed by revstrm.lua.
 local function rejections()
-    local out = run("revstrm --snapshot --pretty --type 'notify.rejected'", 60)
-    out:assert_ok()
-    local events, current = {}, nil
-    for line in out.stdout:gmatch("[^\r\n]+") do
-        if line:match("notify%.rejected%s*$") then
-            current = ""
-            events[#events + 1] = { payload = current, ref = #events + 1 }
-        elseif current and line:match("^%s") then
-            events[#events].payload = events[#events].payload .. line .. "\n"
-        end
-    end
-    return events
+    return (revstrm.snapshot(vm, { "peinit.notify.rejected" }))
 end
 
 test("a datagram carrying a stale activation generation is rejected",
@@ -186,11 +176,14 @@ test("a datagram carrying a stale activation generation is rejected",
             "\nPT_JSON_EOF\nreg apply /tmp/pt-sg.json"):assert_ok()
         run("svctl --json reload-config"):assert_ok()
 
+        -- A refusal of the apply step carries no attribution -- peinit
+        -- cannot vouch for the sender it is refusing -- so the escaped
+        -- process is found by its pid.
         local function mismatches()
             local out = {}
             for _, event in ipairs(rejections()) do
-                if event.payload:find("GenerationMismatch", 1, true)
-                    and event.payload:find(NAME, 1, true) then
+                if revstrm.field(event, "outcome.reason") == "generation-mismatch"
+                    and revstrm.field(event, "subject.process.pid") == pid then
                     out[#out + 1] = event.payload
                 end
             end
@@ -209,9 +202,9 @@ test("a datagram carrying a stale activation generation is rejected",
         end, { timeout = 20, interval = 1,
                desc = "a READY=1 from the previous incarnation to be rejected" })
 
-        t:assert(reason:find("job_generation: 1", 1, true)
-            and reason:find("runtime_generation: 2", 1, true),
-            "the rejection names the stale generation against the current one: " .. reason)
+        -- The record names the reason and the process; which generations
+        -- disagreed is not on it, and the mismatch is the claim.
+        t:assert(reason, "the escaped process's datagram was rejected as a generation mismatch")
 
         -- And it changed nothing: a READY=1 from the previous incarnation
         -- cannot mark the replacement ready. The service is still Starting.

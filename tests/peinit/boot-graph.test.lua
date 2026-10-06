@@ -277,7 +277,7 @@ test("a validation warning is logged",
         local events = ""
         for _ = 1, 20 do
             events = vm:run(
-                "evctl 'EVENTS graph.validation_warning SINCE 1h ago TAKE 50' --format jsonl"
+                "evctl 'EVENTS peinit.graph.validation.warned SINCE 1h ago TAKE 50' --format jsonl"
             ).stdout
             if events:find("pt-vw-alive", 1, true) then break end
             vm:clock():sleep("1s")
@@ -291,6 +291,7 @@ test("a validation warning is logged",
         -- ordinary "service pt-vw-alive started" line.
         local console = vm:console():read_log()
         t:assert(events:find("pt-vw-alive", 1, true)
+            or console:find("alive-readiness", 1, true)
             or console:find("alive_readiness", 1, true)
             or console:find("Alive readiness", 1, true),
             "the boot recorded the Alive-readiness warning somewhere: events=" .. events)

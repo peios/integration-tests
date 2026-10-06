@@ -134,11 +134,11 @@ test("a finding on the reload path rejects the whole reload and is recorded unde
         -- consumer filter catches both regimes and can tell them apart.
         local events = wait_until(function()
             local out = clean:run(
-                "evctl 'EVENTS graph.validation_error SINCE 1h ago TAKE 400' --format jsonl").stdout
-            return out:find("reload_config") and out or nil
-        end, { timeout = 60, interval = 1, desc = "a reload_config finding" })
-        t:assert(events:find('"phase":"reload_config"', 1, true),
-            "the reload findings carry phase reload_config")
+                "evctl 'EVENTS peinit.graph.validation.failed SINCE 1h ago TAKE 400' --format jsonl").stdout
+            return out:find("reload%-config") and out or nil
+        end, { timeout = 60, interval = 1, desc = "a reload-config finding" })
+        t:assert(events:find('"graph.phase":"reload-config"', 1, true),
+            "the reload findings carry phase reload-config")
         t:assert(events:find("pt%-v%-r1") or events:find("pt%-v%-r2"),
             "and name the definitions that caused it: " .. events)
     end)

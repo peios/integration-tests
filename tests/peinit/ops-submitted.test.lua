@@ -28,6 +28,7 @@ local peinit = require("helpers.peinit")
 local token = require("helpers.token")
 local us = require("helpers.unixsock")
 local f = require("helpers.peinit_client")
+local revstrm = require("helpers.revstrm")
 -- One VM for the file: the quota probe runs once at boot and the rest
 -- is submissions, which need no boot of their own.
 peinit.claim(1)
@@ -88,9 +89,19 @@ end
 -- the file: a submitted job speaks the notification socket like a
 -- service, and nothing in the image can be a job's main process and
 -- write a datagram with credentials.
+--
+-- The seed also switches every `peinit.*` event on in the emission
+-- policy: `peinit.job.created` and `peinit.job.status.reported`, which
+-- tests below count, are verbose and off by default.
+local function seed_keys()
+    local keys = definitions()
+    for _, key in ipairs(peinit.verbose_events_keys()) do keys[#keys + 1] = key end
+    return keys
+end
+
 local vm = peinit.boot({
     name = "opssub",
-    files = peinit.merge(peinit.tool("pt-notify"), peinit.seed("pt-sub", definitions())),
+    files = peinit.merge(peinit.tool("pt-notify"), peinit.seed("pt-sub", seed_keys())),
 })
 
 --- Submit a job and return its identifier and the view the submit
@@ -123,22 +134,15 @@ local function status(id)
              cause = r.stdout:match('"cause":"([^"]+)"') }
 end
 
+--- Every event of the given types in the ring, oldest first (see
+--- helpers/revstrm).
 local function events(globs)
-    local flags = ""
-    for _, glob in ipairs(globs) do flags = flags .. " --type '" .. glob .. "'" end
-    local r = vm:run("revstrm --snapshot --pretty" .. flags, { timeout = 60 })
-    r:assert_ok()
-    local out, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        local kind = line:match("^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+([%w_]+%.[%w_]+)%s*$")
-        if kind then
-            current = { type = kind, payload = "" }
-            out[#out + 1] = current
-        elseif current and line:match("^%s") then
-            current.payload = current.payload .. line .. "\n"
-        end
-    end
-    return out
+    return revstrm.snapshot(vm, globs)
+end
+
+--- Whether `event` is about the job `id`, by its `object.job.guid`.
+local function about_job(event, id)
+    return revstrm.guid(revstrm.field(event, "object.job.guid")) == id:lower()
 end
 
 local SYSTEM_SID = "S-1-5-18"
@@ -258,10 +262,11 @@ test("a malformed definition is refused before anything is created",
         -- Validation is the first step, so a definition that does not
         -- parse is refused before an identity is established, before the
         -- quota is touched and before a record exists. The evidence that
-        -- nothing was created is that the ring gained no `job.created`
-        -- across the refusal and the job list is the same length.
+        -- nothing was created is that the ring gained no
+        -- `peinit.job.created` across the refusal and the job list is the
+        -- same length.
         local function job_creations()
-            return #events({ "job.created" })
+            return #events({ "peinit.job.created" })
         end
         local function listed()
             local r = vm:run("svctl --json job list")
@@ -590,7 +595,7 @@ test("a submitted job's notifications set what §8.5 says, and nothing else",
             .. stopped)
     end)
 
-test("job.status is emitted at most once per job per second, and the view stays current",
+test("peinit.job.status.reported is emitted at most once per job per second, and the view stays current",
     { spec = "peinit *emit.job-status-is-emitted-at-most-once-per-job-per-second" },
     function(t)
         -- Twenty status updates, sent back to back — far more than one a
@@ -612,10 +617,10 @@ test("job.status is emitted at most once per job per second, and the view stays 
         -- second, then count.
         vm:run("sleep 2")
         local count = 0
-        for _, event in ipairs(events({ "job.status" })) do
-            if event.payload:find(id, 1, true) then count = count + 1 end
+        for _, event in ipairs(events({ "peinit.job.status.reported" })) do
+            if about_job(event, id) then count = count + 1 end
         end
-        t:assert(count >= 1, "the burst produced a job.status event")
+        t:assert(count >= 1, "the burst produced a peinit.job.status.reported event")
         t:assert(count <= 2,
             "and at most one a second — twenty updates inside one second gave " .. count)
 
@@ -681,8 +686,8 @@ test("arguments and environment together are refused past 2 MiB",
         -- One byte over is refused cleanly, which is what this asserts.
         -- The other side of the boundary — a definition *at* 2 MiB, which
         -- the article says is accepted — cannot be exercised here: peinit
-        -- accepts it, runs it, and then cannot emit its `job.ended` KMES
-        -- event, whose payload carries the whole ~2 MiB `arguments`
+        -- accepts it, runs it, and then could not emit its
+        -- `peinit.job.ended` KMES event, whose payload carries the whole ~2 MiB `arguments`
         -- array. `kmes_emit` fails with ENOSPC and that ends the runtime
         -- loop, taking PID 1 to recovery. A definition that fills one
         -- default 64 KiB record already does it (PEI-1082). So this file
@@ -757,15 +762,16 @@ test("arguments and environment together are refused past 2 MiB",
             "peinit still serves the jobs socket after the refusal")
     end)
 
-test("a job whose arguments outgrow job.ended is recorded with a cut, and the cut is announced",
+test("a job whose arguments outgrow peinit.job.ended is recorded with a cut that says so",
     { spec = "peinit *emit.job-ended-cuts-its-arguments-and-says-so" },
     function(t)
         -- A 100 KiB argument, well inside this boot's raised
-        -- MaxJobMessageSize and the 2 MiB bound. Its `job.ended` cannot
-        -- carry it whole: the event keeps 32 KiB of whole arguments, says
-        -- so, and an `event.oversized` records the cut beside it. Before
-        -- PEI-1082 the oversized event was refused by the ring and the
-        -- refusal ended the runtime loop.
+        -- MaxJobMessageSize and the 2 MiB bound. Its `peinit.job.ended`
+        -- cannot carry it whole: the event keeps 32 KiB of whole
+        -- arguments and says so itself, in
+        -- `object.job.arguments-truncated` and `-count`; no separate
+        -- notice follows it. Before PEI-1082 the oversized event was
+        -- refused by the ring and the refusal ended the runtime loop.
         local big = string.rep("a", 100000)
         local record = '{"command":"submit","image_path":"/bin/true","arguments":["' ..
             big .. '"]}'
@@ -787,32 +793,26 @@ test("a job whose arguments outgrow job.ended is recorded with a cut, and the cu
         t:assert(waited:ok() and waited.stdout:match('"state":"([^"]+)"') == "completed",
             "the job ran to completion: " .. waited.stdout .. tostring(waited.stderr))
         t:assert(vm:run("svctl --json job submit /bin/true"):ok(),
-            "and peinit still serves the jobs socket after its job.ended")
+            "and peinit still serves the jobs socket after its peinit.job.ended")
 
-        local function field(event, name)
-            local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
-            if not value then return nil end
-            return (value:gsub('^"', ""):gsub('"$', ""))
-        end
-        local ended, cut
-        for _, event in ipairs(events({ "job.ended", "event.oversized" })) do
-            if event.payload:find(id, 1, true) then
-                if event.type == "job.ended" then ended = event end
-                if event.type == "event.oversized" then cut = event end
+        local field = revstrm.field
+        local ended, dropped
+        for _, event in ipairs(events({ "peinit.job.ended", "peinit.event.dropped" })) do
+            if about_job(event, id) then
+                if event.type == "peinit.job.ended" then ended = event end
+                if event.type == "peinit.event.dropped" then dropped = event end
             end
         end
-        t:assert(ended, "the job's job.ended reached the ring")
-        t:assert_eq(field(ended, "arguments_truncated"), "true",
+        t:assert(ended, "the job's peinit.job.ended reached the ring")
+        t:assert_eq(field(ended, "object.job.arguments-truncated"), "true",
             "and says its arguments were cut: " .. ended.payload)
-        t:assert_eq(field(ended, "arguments_total"), "1",
+        t:assert_eq(field(ended, "object.job.arguments-count"), "1",
             "naming how many there were: " .. ended.payload)
+        t:assert_eq(field(ended, "object.job.arguments"), "[]",
+            "keeping only the whole arguments that fit, here none: " .. ended.payload)
         t:assert(not ended.payload:find(big, 1, true),
             "the 100 KiB argument itself is not in it")
-        t:assert(cut, "an event.oversized records the cut beside it")
-        t:assert_eq(field(cut, "action"), "truncated",
-            "as a truncation, not a drop: " .. cut.payload)
-        t:assert_eq(field(cut, "event"), "job.ended",
-            "naming the event that was cut: " .. cut.payload)
+        t:assert(not dropped, "and nothing about the job was dropped")
     end)
 
 -- A stop on a job still queued for launch cancels it before it runs. No

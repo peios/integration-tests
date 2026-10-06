@@ -43,11 +43,16 @@
 -- generation increment. It is a VM test in nf-stale-generation.test.lua.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 -- One VM: every test here is a service definition written into a running
 -- peinit, and one peinit can hold all of them.
 peinit.claim(1)
 
-local vm = peinit.boot({ name = "nfnotify", files = peinit.tool("pt-notify") })
+-- `peinit.notify.status.reported` is a verbose type, off unless the
+-- emission policy turns it on, and several tests here read it.
+local vm = peinit.boot({ name = "nfnotify", files = peinit.merge(
+    peinit.tool("pt-notify"),
+    peinit.seed("pt-nf-events", peinit.verbose_events_keys())) })
 
 local SOCKET = "/run/services/peinit/notify.sock"
 
@@ -179,39 +184,22 @@ local function held_fds(path)
 end
 
 --- Every event of the given types still in the KMES ring, oldest first,
---- as `{type, payload}` with the payload in revstrm's pretty form.
+--- as revstrm.lua parses them: `{type, payload, fields}`, the fields
+--- keyed by dotted catalogue path.
 ---
 --- The ring has a consumer and `--snapshot` prints only what is still
 --- buffered, so every read below is of events this file has just made.
 local function events(globs)
-    local flags = ""
-    for _, glob in ipairs(globs) do flags = flags .. " --type '" .. glob .. "'" end
-    local r = vm:run("revstrm --snapshot --pretty" .. flags, { timeout = 60 })
-    r:assert_ok()
-    local out, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        local kind = line:match("^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+([%w_]+%.[%w_]+)%s*$")
-        if kind then
-            current = { type = kind, payload = "" }
-            out[#out + 1] = current
-        elseif current and line:match("^%s") then
-            current.payload = current.payload .. line .. "\n"
-        end
-    end
-    return out, r.stdout
+    return revstrm.snapshot(vm, globs)
 end
 
-local function field(event, name)
-    local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
-    if not value then return nil end
-    return (value:gsub('^"', ""):gsub('"$', ""))
-end
+local field = revstrm.field
 
---- Every event of `kind` attributed to `service`.
+--- Every event of `kind` whose sender is `service`.
 local function events_for(list, kind, service)
     local out = {}
     for _, event in ipairs(list) do
-        if event.type == kind and field(event, "service") == service then
+        if event.type == kind and field(event, "subject.service.name") == service then
             out[#out + 1] = event
         end
     end
@@ -255,29 +243,30 @@ test("every line of a datagram is applied, and three of the fields emit events",
         t:assert_eq(view.status_text, "serving",
             "STATUS= is stored on the runtime state and answered as status_text")
 
-        local ring = events({ "notify.*" })
-        local statuses = events_for(ring, "notify.status", "pt-nf-lines")
-        local errnos = events_for(ring, "notify.errno", "pt-nf-lines")
-        local exits = events_for(ring, "notify.exit_status", "pt-nf-lines")
+        local ring = events({ "peinit.notify.*" })
+        local statuses = events_for(ring, "peinit.notify.status.reported", "pt-nf-lines")
+        local errnos = events_for(ring, "peinit.notify.errno.reported", "pt-nf-lines")
+        local exits = events_for(ring, "peinit.notify.exit-status.reported", "pt-nf-lines")
 
-        t:assert_eq(#statuses, 1, "one notify.status for the one STATUS= line")
-        t:assert_eq(#errnos, 1, "one notify.errno for the one ERRNO= line")
-        t:assert_eq(#exits, 1, "one notify.exit_status for the one EXIT_STATUS= line")
+        t:assert_eq(#statuses, 1, "one peinit.notify.status.reported for the one STATUS= line")
+        t:assert_eq(#errnos, 1, "one peinit.notify.errno.reported for the one ERRNO= line")
+        t:assert_eq(#exits, 1,
+            "one peinit.notify.exit-status.reported for the one EXIT_STATUS= line")
 
-        t:assert_eq(field(statuses[1], "status"), "serving",
+        t:assert_eq(field(statuses[1], "notify.status"), "serving",
             "the status event carries the value")
-        t:assert_eq(field(errnos[1], "errno"), "13",
-            "the errno event carries the value")
-        t:assert_eq(field(exits[1], "exit_status"), "7",
-            "the exit_status event carries the value")
+        -- ERRNO= is sent positive and carried negated, as every errno is;
+        -- revstrm prints an int.errno as `-13 (its text)`.
+        t:assert((field(errnos[1], "notify.errno") or ""):match("^%-13%f[%D]"),
+            "the errno event carries the value, negated: " .. errnos[1].payload)
+        t:assert_eq(field(exits[1], "notify.exit-status"), "7",
+            "the exit-status event carries the value")
 
-        -- The attribution the article names: service, job, operation and
-        -- activation generation, on each of the three.
+        -- The attribution the article names: service, job and activation
+        -- generation, on each of the three.
         for _, event in ipairs({ statuses[1], errnos[1], exits[1] }) do
-            t:assert(field(event, "job_id"), event.type .. " names the job")
-            t:assert(field(event, "operation_id"),
-                event.type .. " names the operation")
-            t:assert(field(event, "generation"),
+            t:assert(field(event, "subject.job.guid"), event.type .. " names the job")
+            t:assert(field(event, "subject.job.activation-generation"),
                 event.type .. " names the activation generation")
         end
     end)
@@ -296,10 +285,10 @@ test("ERRNO= and EXIT_STATUS= are emitted and not retained",
         t:assert_eq(view.status_text, "kept",
             "a datagram of ERRNO= and EXIT_STATUS= left status_text alone")
 
-        local ring = events({ "notify.*" })
-        t:assert_eq(#events_for(ring, "notify.errno", "pt-nf-unstored"), 1,
+        local ring = events({ "peinit.notify.*" })
+        t:assert_eq(#events_for(ring, "peinit.notify.errno.reported", "pt-nf-unstored"), 1,
             "the ERRNO= was received rather than dropped")
-        t:assert_eq(#events_for(ring, "notify.exit_status", "pt-nf-unstored"), 1,
+        t:assert_eq(#events_for(ring, "peinit.notify.exit-status.reported", "pt-nf-unstored"), 1,
             "and so was the EXIT_STATUS=")
     end)
 
@@ -323,24 +312,21 @@ test("one malformed line voids the whole datagram, and the rejection is recorded
         t:assert_eq(view.status_text, "before",
             "the well-formed STATUS= in the voided datagram was not applied")
 
-        local ring = events({ "notify.*" })
-        t:assert_eq(#events_for(ring, "notify.errno", "pt-nf-malformed"), 0,
+        local ring = events({ "peinit.notify.*" })
+        t:assert_eq(#events_for(ring, "peinit.notify.errno.reported", "pt-nf-malformed"), 0,
             "nor the well-formed ERRNO= after the malformed line")
 
-        local rejected = events_for(ring, "notify.rejected", "pt-nf-malformed")
+        local rejected = events_for(ring, "peinit.notify.rejected", "pt-nf-malformed")
         t:assert_eq(#rejected, 1, "the datagram was recorded as rejected")
-        t:assert_eq(field(rejected[1], "reason"),
-            "parse: MalformedLine { line_index: 1 }",
-            "naming the line that voided it: " .. rejected[1].payload)
+        t:assert_eq(field(rejected[1], "outcome.reason"), "malformed-line",
+            "as a malformed line: " .. rejected[1].payload)
         -- Attribution is what makes the record useful: parsing fails
         -- before application, but the sender is authenticated anyway so
         -- the event can say whose datagram it was.
-        t:assert(field(rejected[1], "job_id"), "the rejection names the job")
-        t:assert(field(rejected[1], "operation_id"),
-            "and the operation")
-        t:assert(field(rejected[1], "generation"),
+        t:assert(field(rejected[1], "subject.job.guid"), "the rejection names the job")
+        t:assert(field(rejected[1], "subject.job.activation-generation"),
             "and the activation generation")
-        t:assert(field(rejected[1], "sender_pid"),
+        t:assert(field(rejected[1], "subject.process.pid"),
             "and the pid the datagram came from")
     end)
 
@@ -367,25 +353,24 @@ test("a datagram from a pid that is no service's main job is dropped and recorde
         t:assert(log:match("step=send%-cred rc=(%d+)"),
             "the send itself succeeded, so the refusal is peinit's: " .. log)
 
-        local ring = events({ "notify.rejected" })
+        local ring = events({ "peinit.notify.rejected" })
         local found = nil
         for _, event in ipairs(ring) do
-            if field(event, "sender_pid") == "1" then found = event end
+            if field(event, "subject.process.pid") == "1" then found = event end
         end
         t:assert(found, "peinit recorded a rejection for the forged sender")
-        t:assert_eq(field(found, "reason"),
-            "apply: UnauthenticatedSender { pid: 1 }",
+        t:assert_eq(field(found, "outcome.reason"), "unauthenticated-sender",
             "as an unauthenticated sender: " .. found.payload)
         -- A rejection is recorded after authentication so that it can
         -- name the service where one could be established. Here none
-        -- could, so every attribution field is nil -- and in particular
+        -- could, so there is no attribution at all -- and in particular
         -- the record is not attributed to pt-nf-unauth, which is the
         -- service that actually wrote the bytes.
-        t:assert_eq(field(found, "service"), "nil",
+        t:assert(not revstrm.has(found, "subject.service"),
             "with no service named, because none could be established: " ..
             found.payload)
-        t:assert_eq(field(found, "generation"), "nil",
-            "and no generation either")
+        t:assert(not revstrm.has(found, "subject.job"),
+            "and no job or generation either")
     end)
 
 test("the credential UID and GID are not policy inputs",
@@ -411,11 +396,11 @@ test("the credential UID and GID are not policy inputs",
 
         -- And attributed to the service the pid identifies, not to the
         -- one that actually wrote the bytes.
-        local ring = events({ "notify.status" })
-        local mine = events_for(ring, "notify.status", "pt-nf-subject")
+        local ring = events({ "peinit.notify.status.reported" })
+        local mine = events_for(ring, "peinit.notify.status.reported", "pt-nf-subject")
         local last = mine[#mine]
         t:assert(last, "the status event was attributed to the pid's service")
-        t:assert_eq(field(last, "status"),
+        t:assert_eq(field(last, "notify.status"),
             "from a uid peinit has never heard of",
             "carrying the forged datagram's value")
     end)
@@ -433,17 +418,17 @@ test("READY=1 and RELOADING=1 emit no event of their own",
         t:assert_eq(view.status_text, "the only event here",
             "the datagram was applied")
 
-        local ring = events({ "notify.*" })
+        local ring = events({ "peinit.notify.*" })
         local mine = {}
         for _, event in ipairs(ring) do
-            if field(event, "service") == "pt-nf-quiet" then
+            if field(event, "subject.service.name") == "pt-nf-quiet" then
                 mine[#mine + 1] = event.type
             end
         end
         t:assert_eq(#mine, 1,
-            "exactly one notify.* event for the whole datagram: " ..
+            "exactly one peinit.notify.* event for the whole datagram: " ..
             table.concat(mine, ", "))
-        t:assert_eq(mine[1], "notify.status",
+        t:assert_eq(mine[1], "peinit.notify.status.reported",
             "and it is the STATUS=, not the READY= or the RELOADING=")
     end)
 
@@ -454,15 +439,15 @@ test("STOPPING=1 emits an event, because its only effect is an absence",
         t:assert_eq(view.state, "active",
             "the service is still running: STOPPING= is a claim, not a stop")
 
-        local stopping = events_for(events({ "notify.stopping" }),
-            "notify.stopping", "pt-nf-stopping")
-        t:assert_eq(#stopping, 1, "STOPPING=1 emitted notify.stopping")
-        t:assert(field(stopping[1], "job_id"), "with the same attribution")
-        t:assert(field(stopping[1], "generation"),
+        local stopping = events_for(events({ "peinit.notify.stopping.reported" }),
+            "peinit.notify.stopping.reported", "pt-nf-stopping")
+        t:assert_eq(#stopping, 1, "STOPPING=1 emitted peinit.notify.stopping.reported")
+        t:assert(field(stopping[1], "subject.job.guid"), "with the same attribution")
+        t:assert(field(stopping[1], "subject.job.activation-generation"),
             "including the activation generation")
         -- No value: the field has none, and the event is the record that
         -- the suppression of SIGTERM later on was asked for.
-        t:assert(not field(stopping[1], "status"),
+        t:assert(not revstrm.has(stopping[1], "notify"),
             "and no value, because STOPPING= carries none")
     end)
 
@@ -525,18 +510,18 @@ test("a datagram larger than the receive buffer is refused as truncated",
         t:assert(log:match("step=send%-pad rc=70000"),
             "the guest did send 70 000 bytes: " .. log)
 
-        local truncations = {}
-        for _, event in ipairs(events({ "notify.rejected" })) do
-            local reason = field(event, "reason") or ""
-            if reason:find("truncated: payload=true", 1, true) then
-                truncations[#truncations + 1] = reason
+        -- The record names the reason, `truncated`, and not which part of
+        -- the datagram overran: the receive buffer's bound is what the
+        -- 70 000 bytes against 64 KiB establish, and the unchanged
+        -- status_text above is that nothing of it was applied.
+        local truncations = 0
+        for _, event in ipairs(events({ "peinit.notify.rejected" })) do
+            if field(event, "outcome.reason") == "truncated" then
+                truncations = truncations + 1
             end
         end
-        t:assert(#truncations >= 1,
-            "and peinit recorded it as a truncated payload rather than acting on it")
-        t:assert(truncations[#truncations]:find("control=false", 1, true),
-            "the control message was intact; it was the payload that overran: " ..
-            truncations[#truncations])
+        t:assert(truncations >= 1,
+            "and peinit recorded it as truncated rather than acting on it")
     end)
 
 test("sixty-four descriptors fit and sixty-five is refused as truncated",
@@ -557,18 +542,16 @@ test("sixty-four descriptors fit and sixty-five is refused as truncated",
         t:assert_eq(held_fds("/run/pt-nf-bound.marker"), 64,
             "peinit holds the 64 from the accepted send and none from the 65")
 
-        local truncations = {}
-        for _, event in ipairs(events({ "notify.rejected" })) do
-            local reason = field(event, "reason") or ""
-            if reason:find("control=true", 1, true) then
-                truncations[#truncations + 1] = reason
+        -- The record says `truncated`, not which part overran; that it was
+        -- the descriptors is what the 64 held, and none of the 65, show.
+        local truncations = 0
+        for _, event in ipairs(events({ "peinit.notify.rejected" })) do
+            if field(event, "outcome.reason") == "truncated" then
+                truncations = truncations + 1
             end
         end
-        t:assert(#truncations >= 1,
-            "the 65-descriptor send was recorded as a truncated control message")
-        t:assert(truncations[#truncations]:find("payload=false", 1, true),
-            "with the payload intact -- it was the descriptors that overran: " ..
-            truncations[#truncations])
+        t:assert(truncations >= 1,
+            "the 65-descriptor send was recorded as truncated")
     end)
 
 test("MAINPID= and BUSERROR= are accepted as lines and do nothing",
@@ -603,8 +586,8 @@ test("MAINPID= and BUSERROR= are accepted as lines and do nothing",
         -- And neither produced an event of its own, the way an
         -- unsupported-but-noticed field would.
         local mine = {}
-        for _, event in ipairs(events({ "notify.*" })) do
-            if field(event, "service") == "pt-nf-compat" then
+        for _, event in ipairs(events({ "peinit.notify.*" })) do
+            if field(event, "subject.service.name") == "pt-nf-compat" then
                 mine[#mine + 1] = event.type
             end
         end

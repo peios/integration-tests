@@ -44,6 +44,7 @@
 -- is nf-stale-generation.test.lua.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local vm = peinit.boot({ name = "nfreload", files = peinit.tool("pt-notify") })
@@ -171,20 +172,20 @@ test("a reload announced and never finished is reported on the console and audit
         -- (runtime/console/mod.rs) -- and this image runs a console
         -- login, so from Phase 2 onwards peinit's own console messages
         -- are gated off. Stopping `login-console` does not bring them
-        -- back either. What can be asserted is that the report was made,
-        -- and it carries the same sentence the console line does.
+        -- back either. What can be asserted is that the report was made:
+        -- its type says what happened, and it names the service.
         local record = wait_until(function()
-            local out = vm:run(
-                "revstrm --snapshot --pretty --type 'service.reload_unconfirmed'",
-                { timeout = 60 })
-            return out.stdout:find("pt%-rl%-unconfirmed") and out.stdout or nil
+            for _, event in ipairs(revstrm.snapshot(vm, { "peinit.service.reload.timed-out" })) do
+                if revstrm.field(event, "object.service.name") == "pt-rl-unconfirmed" then
+                    return event
+                end
+            end
+            return nil
         end, { timeout = 90, interval = 0.5,
-               desc = "a service.reload_unconfirmed event for the service" })
-        t:assert(record:find(
-            "service pt-rl-unconfirmed signalled RELOADING=1 but never " ..
-            "completed reload", 1, true),
+               desc = "a peinit.service.reload.timed-out event for the service" })
+        t:assert_eq(record.type, "peinit.service.reload.timed-out",
             "the audited record says what happened rather than only that " ..
-            "something did: " .. record)
+            "something did: " .. record.payload)
 
         -- A failed reload never takes a running service out of Active,
         -- and an unconfirmed one is no exception.

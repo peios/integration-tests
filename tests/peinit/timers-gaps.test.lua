@@ -430,9 +430,9 @@ test("a firing for a service that has been discarded does nothing, and is not an
         pause(10)
         t:assert(vm:run("svctl --json list").stdout:find('"services"', 1, true),
             "peinit is still answering its control socket, not in recovery")
-        local recovery = vm:run("revstrm --snapshot --pretty --type 'recovery.entered'",
+        local recovery = vm:run("revstrm --snapshot --pretty --type 'peinit.recovery.entered'",
             { timeout = 60 })
-        t:assert(not recovery.stdout:find("recovery.entered", 1, true),
+        t:assert(not recovery.stdout:find("peinit.recovery.entered", 1, true),
             "and never entered recovery: " .. recovery.stdout)
         t:assert(vm:run("svctl --json status pt-t-draining").stdout:find("UNKNOWN_SERVICE", 1, true),
             "the service is still gone: nothing started it again")

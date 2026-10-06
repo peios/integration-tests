@@ -17,13 +17,14 @@
 -- the submitted store and stays; it is held off and retried, and an
 -- identical repeat is not announced again.
 --
--- The ring is the oracle — `service.internal_error` is emitted for every
+-- The ring is the oracle — `peinit.internal-error.contained` is emitted for every
 -- containment, job or service, and does not depend on who owns the
 -- console. The console line is checked too, under `peios.quiet=0`.
 
 local peinit = require("helpers.peinit")
 local kacs = require("helpers.kacs")
 local sys = require("helpers.sys")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local vm = peinit.boot({
@@ -68,26 +69,19 @@ local function refused(dir)
     return err == sys.E.ACCES, sys.errname(err or 0)
 end
 
---- The `service.internal_error` events on the ring whose payload names
---- `subject`, oldest first.
+--- The `peinit.internal-error.contained` events on the ring about
+--- `subject` — a service by name, or a job by its identifier — oldest
+--- first.
 local function internal_errors(subject)
-    local r = vm:run("revstrm --snapshot --pretty --type 'service.internal_error'",
-        { timeout = 60 })
-    r:assert_ok()
-    local all, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        if line:match("service%.internal_error%s*$") then
-            current = { payload = "" }
-            all[#all + 1] = current
-        elseif current and line:match("^%s") then
-            current.payload = current.payload .. line .. "\n"
-        end
-    end
+    local all, raw = revstrm.snapshot(vm, { "peinit.internal-error.contained" })
     local out = {}
     for _, e in ipairs(all) do
-        if e.payload:find(subject, 1, true) then out[#out + 1] = e end
+        if revstrm.field(e, "object.service.name") == subject
+            or revstrm.guid(revstrm.field(e, "object.job.guid")) == subject:lower() then
+            out[#out + 1] = e
+        end
     end
-    return out, r.stdout
+    return out, raw
 end
 
 local function count(haystack, needle)

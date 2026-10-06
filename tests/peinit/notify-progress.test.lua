@@ -15,9 +15,14 @@
 -- `N`, and `unit` is the last accepted PROGRESS_UNIT or null.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
-local vm = peinit.boot({ name = "notify-progress", files = peinit.tool("pt-notify") })
+-- `peinit.notify.progress.reported` and `peinit.notify.status.reported`
+-- are verbose types, off unless the emission policy turns them on.
+local vm = peinit.boot({ name = "notify-progress", files = peinit.merge(
+    peinit.tool("pt-notify"),
+    peinit.seed("pt-np-events", peinit.verbose_events_keys())) })
 
 local function apply(keys)
     local batch = peinit.encode_json({ keys = keys })
@@ -84,37 +89,23 @@ local function main_pid(name)
     return view.current_job.pid
 end
 
---- Every event of the given types still in the KMES ring, oldest first.
+--- Every event of the given types still in the KMES ring, oldest first,
+--- with the header's time of day as `seconds`.
 local function events(globs)
-    local flags = ""
-    for _, glob in ipairs(globs) do flags = flags .. " --type '" .. glob .. "'" end
-    local r = vm:run("revstrm --snapshot --pretty" .. flags, { timeout = 60 })
-    r:assert_ok()
-    local out, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        local h, m, s, kind = line:match(
-            "^(%d%d):(%d%d):(%d%d[%.%d]*)%s+cpu.-#%d+%s+%u+%s+([%w_]+%.[%w_]+)%s*$")
-        if kind then
-            current = { type = kind, payload = "",
-                        seconds = tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s) }
-            out[#out + 1] = current
-        elseif current and line:match("^%s") then
-            current.payload = current.payload .. line .. "\n"
-        end
+    local out = revstrm.snapshot(vm, globs)
+    for _, event in ipairs(out) do
+        local h, m, s = event.header:match("^(%d%d):(%d%d):(%d%d[%.%d]*)")
+        event.seconds = tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
     end
     return out
 end
 
-local function field(event, name)
-    local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
-    if not value then return nil end
-    return (value:gsub('^"', ""):gsub('"$', ""))
-end
+local field = revstrm.field
 
 local function events_for(kind, service)
     local out = {}
     for _, event in ipairs(events({ kind })) do
-        if event.type == kind and field(event, "service") == service then
+        if event.type == kind and field(event, "subject.service.name") == service then
             out[#out + 1] = event
         end
     end
@@ -161,7 +152,8 @@ test("progress is shown as {current, total, bounded, unit}, null until a PROGRES
 
         -- A value outside the forms is dropped, never repaired, and the
         -- rest of its datagram is applied: each bad datagram carries a
-        -- STATUS= of its own, which becomes a notify.status event.
+        -- STATUS= of its own, which becomes a
+        -- peinit.notify.status.reported event.
         local bad = launch("pt-np-bad", {
             "send", "PROGRESS=1/4\\nPROGRESS_UNIT=percent",
             "send", "PROGRESS=5/0\\nSTATUS=a zero total",
@@ -172,8 +164,8 @@ test("progress is shown as {current, total, bounded, unit}, null until a PROGRES
         t:assert_eq(shape(bad.progress), "current=1 total=4 bounded=true unit=percent",
             "none of the four bad values replaced or clamped what was retained")
         local said = {}
-        for _, event in ipairs(events_for("notify.status", "pt-np-bad")) do
-            said[#said + 1] = tostring(field(event, "status"))
+        for _, event in ipairs(events_for("peinit.notify.status.reported", "pt-np-bad")) do
+            said[#said + 1] = tostring(field(event, "notify.status"))
         end
         t:assert_eq(table.concat(said, " | "),
             "a zero total | N above T | not a number | an unknown unit",
@@ -203,7 +195,7 @@ test("progress becomes an event at most once a second, carrying what is retained
         t:assert_eq(shape(view.progress), "current=21 total=100 bounded=true unit=items",
             "the status query reports the latest progress")
 
-        local emitted = events_for("notify.progress", "pt-np-rate")
+        local emitted = events_for("peinit.notify.progress.reported", "pt-np-rate")
         t:assert(#emitted >= 2 and #emitted < 21,
             "twenty-one datagrams made at least two events, and not one per datagram: "
             .. #emitted)
@@ -217,14 +209,16 @@ test("progress becomes an event at most once a second, carrying what is retained
         -- The first datagram carried two lines and is one event, carrying
         -- the progress as retained after it, with the attribution.
         local first, last = emitted[1], emitted[#emitted]
-        t:assert_eq(field(first, "progress_current"), "1",
+        t:assert_eq(field(first, "notify.progress.current"), "1",
             "the first event is the first datagram's: " .. first.payload)
-        t:assert_eq(field(first, "progress_total"), "100", "with its total")
-        t:assert_eq(field(first, "progress_bounded"), "true", "bounded")
-        t:assert_eq(field(first, "progress_unit"), "items", "and the unit from the same datagram")
-        t:assert(field(first, "job_id") and field(first, "generation"),
+        t:assert_eq(field(first, "notify.progress.total"), "100", "with its total")
+        t:assert_eq(field(first, "notify.progress.bounded"), "true", "bounded")
+        t:assert_eq(field(first, "notify.progress.unit"), "items",
+            "and the unit from the same datagram")
+        t:assert(field(first, "subject.job.guid")
+                and field(first, "subject.job.activation-generation"),
             "attributed to the job and the activation generation: " .. first.payload)
-        t:assert_eq(field(last, "progress_current"), "21",
+        t:assert_eq(field(last, "notify.progress.current"), "21",
             "and the datagram after the pause made an event of its own: " .. last.payload)
     end)
 

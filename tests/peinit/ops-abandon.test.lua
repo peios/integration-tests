@@ -22,6 +22,7 @@
 -- job it has given up on.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local ESCAPE = "/sys/fs/cgroup/pt-jobescape"
@@ -115,13 +116,21 @@ test("a submitted job that survives SIGKILL is abandoned as process_unkillable",
             "the job cgroup was still populated when the post-kill deadline fired")
 
         -- Supervision stopped and the cgroup is leaked, reported as a
-        -- cgroup.leaked event carrying the job's tree.
-        local leaked = vm:run("revstrm --snapshot --pretty --type 'cgroup.leaked'",
-            { timeout = 60 })
-        leaked:assert_ok()
-        t:assert(leaked.stdout:find(id, 1, true) or leaked.stdout:find("jobs/" .. id, 1, true)
-            or leaked.stdout:find(CGROUP, 1, true),
-            "peinit recorded the job's cgroup as leaked: " .. leaked.stdout:sub(-800))
+        -- peinit.cgroup.leaked event naming the job, which belongs to no
+        -- service, and carrying its tree.
+        local events, raw = revstrm.snapshot(vm, { "peinit.cgroup.leaked" })
+        local mine
+        for _, event in ipairs(events) do
+            if revstrm.guid(revstrm.field(event, "object.job.guid")) == id:lower() then
+                mine = event
+            end
+        end
+        t:assert(mine, "peinit recorded the job's cgroup as leaked: " .. raw:sub(-800))
+        local path = revstrm.field(mine, "object.cgroup.path") or ""
+        t:assert(path:sub(-#("jobs/" .. id)) == "jobs/" .. id,
+            "naming the job's own tree, " .. CGROUP .. ": " .. mine.payload)
+        t:assert(not revstrm.has(mine, "object.service"),
+            "and no service, because a submitted job has none: " .. mine.payload)
     end)
 
 test("an abandoned job keeps its pid, and its exit fields stay null",

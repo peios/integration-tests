@@ -104,6 +104,25 @@ function M.seed(name, keys)
     }
 end
 
+--- Seed keys that switch every `peinit.*` event type on in the emission
+--- policy (PGSS §6.9): `Machine\Generic\Events\peinit` with `Enabled = 1`.
+---
+--- peinit asks the policy before it builds any event that is not
+--- essential, and with nothing set a `verbose` type is off: `job.created`,
+--- `job.status.reported`, `operation.started`, `operation.merged`,
+--- `graph.operation.ended`, `config.reload.deferred`,
+--- `notify.status.reported` and `notify.progress.reported` are never
+--- written. A test that reads one of them adds these keys to its seed.
+function M.verbose_events_keys()
+    return {
+        { path = [[Machine\Generic]] },
+        { path = [[Machine\Generic\Events]] },
+        { path = [[Machine\Generic\Events\peinit]], values = {
+            { name = "Enabled", type = "dword", data = 1 },
+        } },
+    }
+end
+
 --- Minimal JSON encoder — the guest's `reg apply` reads JSON and Lua has
 --- no encoder in its standard library. Handles what a seed file needs:
 --- strings, numbers, booleans, arrays and objects. An array is a table

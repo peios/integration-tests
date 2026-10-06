@@ -406,13 +406,38 @@ test("a reload with an undecodable key names the key, the field and what was wro
 
         -- The same finding is on the audit trail under the reload phase,
         -- and on the console as the service's failure.
-        local events = wait_until(function()
-            local out = vm:run(
-                "evctl 'EVENTS graph.validation_error SINCE 1h ago TAKE 400' --format jsonl").stdout
-            return out:find("pt%-broken") and out or nil
-        end, { timeout = 60, interval = 1, desc = "a reload_config finding for pt-broken" })
-        t:assert(events and events:find('"phase":"reload_config"', 1, true),
-            "the finding is recorded under phase reload_config: " .. tostring(events))
+        local function rows(query)
+            local out = {}
+            local text = vm:run("evctl '" .. query .. "' --format jsonl").stdout
+            for line in text:gmatch("[^\n]+") do
+                local ok, row = pcall(json.decode, line)
+                if ok and type(row) == "table" then out[#out + 1] = row end
+            end
+            return out
+        end
+        local finding = wait_until(function()
+            for _, row in ipairs(rows("EVENTS peinit.graph.validation.failed SINCE 1h ago TAKE 400")) do
+                if row["object.service.name"] == "pt-broken" then return row end
+            end
+            return nil
+        end, { timeout = 60, interval = 1, desc = "a reload-config finding for pt-broken" })
+        t:assert_eq(finding["graph.phase"], "reload-config",
+            "the finding is recorded under phase reload-config: " .. json.encode(finding))
+        t:assert_eq(finding["outcome.reason"], "validation-error",
+            "as a definition that failed validation: " .. json.encode(finding))
+
+        -- And the explicit reload records that it applied: an undecodable
+        -- key fails its service, not the reload, and it is counted.
+        local applied = wait_until(function()
+            for _, row in ipairs(rows("EVENTS peinit.config.reload.applied SINCE 1h ago TAKE 50")) do
+                if row["outcome.success"] == true and row["graph.services"] == nil
+                    and (tonumber(row["graph.counts.undecodable"]) or 0) >= 1 then
+                    return row
+                end
+            end
+            return nil
+        end, { timeout = 60, interval = 1, desc = "the explicit reload's applied record" })
+        t:assert(applied, "the explicit reload-config wrote peinit.config.reload.applied")
         t:assert(vm:console():read_log():find("peinit: service pt-broken failed: ValidationError", 1, true),
             "and the console reports the service failed on it")
     end)

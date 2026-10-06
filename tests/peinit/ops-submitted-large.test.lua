@@ -7,8 +7,9 @@
 --
 -- The record is exactly MaxJobMessageSize, left at its default, and the
 -- definition in it is a sixtieth of the 2 MiB argument bound — peinit
--- accepts it on both counts. The job's `job.ended` event then carries
--- the `arguments` array, which is the record's content plus the event's
+-- accepts it on both counts. The job's `peinit.job.ended` event then
+-- carries the `object.job.arguments` array, which is the record's
+-- content plus the event's
 -- own fields. With the old 64 KiB default that event was over KMES's own
 -- 64 KiB MaxEventSize, the ring refused it with ENOSPC, and peinit
 -- treated the refusal as fatal. Now the default is half the ring's
@@ -34,7 +35,7 @@ test("a job submitted in a record at MaxJobMessageSize runs to completion and pe
             "peinit *jobs.max-job-message-size",
             "peinit *submit.arguments-and-environment-are-bounded-at-two-mib",
         },
-        -- PEI-1082: `job.ended` embeds the job's `arguments`
+        -- PEI-1082: `job.ended` (now `peinit.job.ended`) embeds the job's `arguments`
         -- (kmes/encode/job.rs), so a definition near the record limit
         -- makes an event over KMES's MaxEventSize; `kmes_emit` fails
         -- ENOSPC, the runtime loop ends, and PID 1 enters recovery with

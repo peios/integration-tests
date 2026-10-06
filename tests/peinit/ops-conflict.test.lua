@@ -39,6 +39,7 @@
 -- what the test below asserts.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 -- Two: the shared VM the reachable rows run on, plus the one the test
 -- in hand boots for a row that ends peinit.
 peinit.claim(2)
@@ -167,7 +168,15 @@ local function definitions()
     return keys
 end
 
-local SEED = peinit.seed("pt-conflict", definitions())
+--- The definitions, and every `peinit.*` event switched on in the
+--- emission policy: `peinit.operation.started`, read below, is verbose.
+local function seed_keys()
+    local keys = definitions()
+    for _, key in ipairs(peinit.verbose_events_keys()) do keys[#keys + 1] = key end
+    return keys
+end
+
+local SEED = peinit.seed("pt-conflict", seed_keys())
 
 local function boot(name)
     return peinit.boot({ name = name, files = SEED })
@@ -223,29 +232,13 @@ local function recovery_line(vm)
     return tostring(vm:console():read_log()):match("entering recovery: [^\r\n]*")
 end
 
+--- The events of the given types on `vm`'s ring, oldest first, with their
+--- payloads read back into dotted catalogue paths (helpers/revstrm).
 local function events(vm, globs)
-    local flags = ""
-    for _, glob in ipairs(globs) do flags = flags .. " --type '" .. glob .. "'" end
-    local r = vm:run("revstrm --snapshot --pretty" .. flags, { timeout = 60 })
-    r:assert_ok()
-    local out, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        local kind = line:match("^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+([%w_]+%.[%w_]+)%s*$")
-        if kind then
-            current = { type = kind, payload = "" }
-            out[#out + 1] = current
-        elseif current and line:match("^%s") then
-            current.payload = current.payload .. line .. "\n"
-        end
-    end
-    return out
+    return revstrm.snapshot(vm, globs)
 end
 
-local function field(event, name)
-    local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
-    if not value then return nil end
-    return (value:gsub('^"', ""):gsub('"$', ""))
-end
+local field = revstrm.field
 
 test("an operation of the same type merges, and the new caller gets the existing identifier",
     { spec = "peinit *conflict.an-operation-of-the-same-type-merges" },
@@ -489,13 +482,13 @@ test("a start operation is created for each unsatisfied dependency",
             "and the service came up")
 
         local sources = {}
-        for _, event in ipairs(events(shared, { "operation.requested" })) do
-            local service = field(event, "service")
+        for _, event in ipairs(events(shared, { "peinit.operation.requested" })) do
+            local service = field(event, "object.service.name")
             if service == "pt-dep-bad" or service == "pt-dep-bad2" then
-                sources[field(event, "source")] = true
+                sources[field(event, "object.operation.source")] = true
             end
         end
-        t:assert(sources.dependency_propagation,
+        t:assert(sources["dependency-propagation"],
             "and each dependency's start says a dependency asked for it")
     end)
 
@@ -504,19 +497,19 @@ test("a restart-eligible failure creates a start with the RestartPolicy source",
     function(t)
         -- The restart policy does not reach into the state machine: it
         -- asks for a start like anything else, and the operation it
-        -- creates carries `restart_policy` as its reason. pt-flaps
+        -- creates carries `restart-policy` as its source. pt-flaps
         -- crashes on start and is always restarted, so a few seconds of
         -- boot is enough to produce several.
         shared:run("sleep 6", { timeout = 30 })
         local found = false
-        for _, event in ipairs(events(shared, { "operation.requested" })) do
-            if field(event, "service") == "pt-flaps"
-                and field(event, "source") == "restart_policy" then
+        for _, event in ipairs(events(shared, { "peinit.operation.requested" })) do
+            if field(event, "object.service.name") == "pt-flaps"
+                and field(event, "object.operation.source") == "restart-policy" then
                 found = true
-                t:assert_eq(field(event, "type"), "start",
+                t:assert_eq(field(event, "object.operation.type"), "start",
                     "the restart policy asked for a start: " .. event.payload)
-                t:assert_eq(field(event, "caller"), "nil",
-                    "with no caller, because nobody asked: " .. event.payload)
+                t:assert(not revstrm.has(event, "subject"),
+                    "with no subject, because nobody asked: " .. event.payload)
             end
         end
         t:assert(found, "a restart-policy start was requested for the crashing service")
@@ -579,20 +572,20 @@ test("a timer firing creates an operation from the current state, labelled Timer
         -- that the operation a firing does create is attributed to the
         -- timer path.
         local found = wait_until(function()
-            for _, event in ipairs(events(shared, { "operation.requested",
-                                                    "operation.started" })) do
-                if field(event, "service") == "pt-timerfire"
-                    and field(event, "source") == "timer" then
+            for _, event in ipairs(events(shared, { "peinit.operation.requested",
+                                                    "peinit.operation.started" })) do
+                if field(event, "object.service.name") == "pt-timerfire"
+                    and field(event, "object.operation.source") == "timer" then
                     return event
                 end
             end
         end, { timeout = 30, interval = 1,
                desc = "a timer-sourced start operation for pt-timerfire" })
 
-        t:assert_eq(field(found, "type"), "start",
+        t:assert_eq(field(found, "object.operation.type"), "start",
             "the firing created a start operation: " .. found.payload)
-        t:assert_eq(field(found, "caller"), "nil",
-            "with no caller, because a timer is not a principal: " .. found.payload)
+        t:assert(not revstrm.has(found, "subject"),
+            "with no subject, because a timer is not a principal: " .. found.payload)
     end)
 
 test("the boot plan's starts carry the Boot source",
@@ -602,12 +595,12 @@ test("the boot plan's starts carry the Boot source",
         -- "boot operation" to observe. What it leaves behind is a start
         -- per service, each labelled with the mode that generated it.
         local boot_services = {}
-        for _, event in ipairs(events(shared, { "operation.requested",
-                                                "operation.started" })) do
-            if field(event, "source") == "boot" then
-                t:assert_eq(field(event, "type"), "start",
+        for _, event in ipairs(events(shared, { "peinit.operation.requested",
+                                                "peinit.operation.started" })) do
+            if field(event, "object.operation.source") == "boot" then
+                t:assert_eq(field(event, "object.operation.type"), "start",
                     "a boot-generated operation is a start: " .. event.payload)
-                boot_services[field(event, "service")] = true
+                boot_services[field(event, "object.service.name")] = true
             end
         end
         t:assert(boot_services["pt-stub1"] or boot_services["pt-rel1"],

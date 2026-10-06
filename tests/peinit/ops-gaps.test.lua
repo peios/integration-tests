@@ -5,7 +5,7 @@
 --
 -- The holds are read two ways. On the boot path, where the graph holds a
 -- dependent of a target that crashed into Backoff, the record is the
--- `operation.completed` event: a start that completed, as itself, after
+-- `peinit.operation.ended` event: a start that completed, as itself, after
 -- several times its own `StartTimeout`, was held without a clock and got
 -- one from its release. On the on-demand path the instrument is
 -- `svctl operation-status`, as in ops-operations.test.lua: a held start
@@ -16,9 +16,10 @@
 -- what a stale deadline did (PEI-1267) was fail the *next* start of the
 -- same service, and that is what a test can watch for: the next start
 -- running past the moment the stale deadline would have come due,
--- untouched, with no `service.internal_error` on the ring.
+-- untouched, with no `peinit.internal-error.contained` on the ring.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local function service(name, values)
@@ -159,11 +160,11 @@ local function pause(seconds)
         { timeout = seconds, interval = 0.25, desc = "a fixed pause" })
 end
 
---- How many times `name` appears in the `service.internal_error` events on
---- the ring. The snapshot is filtered to that one type, so any mention of
---- the service is an event about it.
+--- How many times `name` appears in the `peinit.internal-error.contained`
+--- events on the ring. The snapshot is filtered to that one type, so any
+--- mention of the service is an event about it.
 local function internal_errors_for(name)
-    local r = vm:run("revstrm --snapshot --pretty --type 'service.internal_error'",
+    local r = vm:run("revstrm --snapshot --pretty --type 'peinit.internal-error.contained'",
         { timeout = 60 })
     r:assert_ok()
     local n = 0
@@ -188,40 +189,36 @@ local function epoch(text)
     return days * 86400 + tonumber(h) * 3600 + tonumber(mi) * 60 + tonumber(s)
 end
 
---- The `operation.*` events on the ring for `service`, oldest first, each
---- a table of its scalar fields.
+--- The `peinit.operation.*` events on the ring for `service`, oldest
+--- first, each with the fields this file reads: the event type, the
+--- operation's source and state, its duration in nanoseconds and its
+--- result.
 local function operation_events(service)
-    local r = vm:run("revstrm --snapshot --pretty --type 'operation.*'", { timeout = 60 })
-    r:assert_ok()
-    local all, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        local kind = line:match("%s(operation%.[%w_]+)%s*$")
-        if kind and not line:match("^%s") then
-            -- `event`, not `type`: the payload has a `type` of its own,
-            -- the operation's.
-            current = { event = kind, raw = "" }
-            all[#all + 1] = current
-        elseif current then
-            current.raw = current.raw .. line .. "\n"
-            local k, v = line:match("^    ([%w_]+)%s+(.*)$")
-            if k then current[k] = (v:gsub('^"', ""):gsub('"$', "")) end
-        end
-    end
     local out = {}
-    for _, e in ipairs(all) do
-        if e.service == service then out[#out + 1] = e end
+    for _, e in ipairs(revstrm.snapshot(vm, { "peinit.operation.*" })) do
+        if revstrm.field(e, "object.service.name") == service then
+            local duration = revstrm.field(e, "object.operation.duration")
+            out[#out + 1] = {
+                event = e.type,
+                raw = e.payload,
+                source = revstrm.field(e, "object.operation.source"),
+                state = revstrm.field(e, "object.operation.state"),
+                duration_ns = duration and duration:match("^(%d+)ns"),
+                result = revstrm.field(e, "outcome.detail"),
+            }
+        end
     end
     return out
 end
 
 --- The boot start of `name`, from its terminal event on the ring: the
---- event (completed, failed …) and a one-line summary of every event seen.
+--- event, whose `state` says how it ended, and a one-line summary of every
+--- event seen.
 local function boot_start(name)
     local terminal, seen = nil, {}
     for _, e in ipairs(operation_events(name)) do
         seen[#seen + 1] = e.event .. " " .. (e.raw:gsub("%s+", " "))
-        if e.source == "boot" and e.event ~= "operation.requested"
-            and e.event ~= "operation.started" then
+        if e.source == "boot" and e.event == "peinit.operation.ended" then
             terminal = e
         end
     end
@@ -262,7 +259,7 @@ test("a start the boot graph holds on a target in Backoff has no lifetime, and g
         assert_target_backed_off(t)
         boot_settled("pt-held")
         local terminal, seen = boot_start("pt-held")
-        t:assert(terminal and terminal.event == "operation.completed",
+        t:assert(terminal and terminal.state == "completed",
             "pt-held's boot start completed rather than failing: " .. seen)
         local held_for = tonumber(terminal and terminal.duration_ns or 0) / 1e9
         -- A clock run from creation would have failed it at three seconds
@@ -293,7 +290,7 @@ test("a start held on a dependent that is itself held only on a clockless fact h
         assert_target_backed_off(t)
         boot_settled("pt-held-twice")
         local terminal, seen = boot_start("pt-held-twice")
-        t:assert(terminal and terminal.event == "operation.completed",
+        t:assert(terminal and terminal.state == "completed",
             "pt-held-twice's boot start completed rather than failing: " .. seen)
         t:assert_eq(state_of("pt-held-twice"), "active",
             "and pt-held-twice is up, behind pt-held")

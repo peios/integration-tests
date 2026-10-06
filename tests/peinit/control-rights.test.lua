@@ -28,6 +28,8 @@
 -- implements that trick and carries both anchors.
 
 local peinit = require("helpers.peinit")
+local eventd = require("helpers.eventd")
+local revstrm = require("helpers.revstrm")
 -- Two: the main machine, and one more for the shutdown-gate race, which
 -- ends in a poweroff and so cannot be run on the machine every other
 -- test in the file is using.
@@ -375,84 +377,114 @@ test("job-list is filtered per job by JOB_QUERY, independently of what else the 
         vm:run("svctl --json job stop " .. visible, { timeout = 60 })
     end)
 
---- Every event of the named kinds currently in the ring, newest last.
-local function events(kind)
-    local r = vm:run("revstrm --snapshot --pretty --type '" .. kind .. "'", { timeout = 60 })
-    r:assert_ok()
-    local out, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        local name = line:match("^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+([%w_]+%.[%w_]+)%s*$")
-        if name then
-            current = { type = name, payload = "" }
-            out[#out + 1] = current
-        elseif current and line:match("^%s") then
-            current.payload = current.payload .. line .. "\n"
-        end
-    end
-    return out
+--- `peinit.system_descriptor_hex`'s descriptor — owner and group SYSTEM,
+--- one allow-ACE granting SYSTEM `mask` — with a SACL of one failure-audit
+--- ACE for Everyone over every service right, as the built-in default
+--- carries: `O:SYG:SYD:(A;;<mask>;;;SY)S:(AU;FA;0xf;;;WD)`.
+---
+--- A descriptor written to the registry is used as given, so a test that
+--- wants KACS to record a refusal under its own descriptor has to ask for
+--- it in the SACL, as an administrator would.
+local function audited_descriptor_hex(mask)
+    local system = string.pack("BB", 1, 1) .. string.pack(">I2>I4", 0, 5)
+        .. string.pack("<I4", 18)
+    local everyone = string.pack("BB", 1, 1) .. string.pack(">I2>I4", 0, 1)
+        .. string.pack("<I4", 0)
+    -- SYSTEM_AUDIT_ACE_TYPE (2), FAILED_ACCESS_ACE_FLAG (0x80).
+    local audit = string.pack("<BBI2I4", 2, 0x80, 8 + #everyone, 0xf) .. everyone
+    local sacl = string.pack("<BBI2I2I2", 2, 0, 8 + #audit, 1, 0) .. audit
+    local allow = string.pack("<BBI2I4", 0, 0, 8 + #system, mask) .. system
+    local dacl = string.pack("<BBI2I2I2", 2, 0, 8 + #allow, 1, 0) .. allow
+    -- SACL_PRESENT | DACL_PRESENT | SELF_RELATIVE.
+    local sacl_at = 20 + 2 * #system
+    local header = string.pack("<BBI2I4I4I4I4", 1, 0, 0x8014,
+        20, 20 + #system, sacl_at, sacl_at + #sacl)
+    return ((header .. system .. system .. sacl .. dacl):gsub(".",
+        function(byte) return string.format("%02x", byte:byte()) end))
 end
 
-local function field(event, name)
-    local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
-    if not value then return nil end
-    return (value:gsub('^"', ""):gsub('"$', ""))
+--- `kacs.audit.access.checked` records of a refused check on an object of
+--- `kind` that `match(row)` picks out, polled until one is there.
+local function refusal_record(kind, match, desc)
+    local query = 'EVENTS kacs.audit.access.checked WHERE object.kind == "' .. kind
+        .. '" SINCE 1h ago TAKE 1000'
+    local rows = eventd.wait_rows(vm, query, function(rs)
+        for _, row in ipairs(rs) do
+            if match(row) then return true end
+        end
+        return false
+    end, { timeout = 30, desc = desc })
+    local found
+    for _, row in ipairs(rows) do
+        if match(row) then found = row end
+    end
+    return found
 end
 
 test("a denial is answered and audited, by the kind of thing that was refused",
-    { spec = "peinit *dispatch.a-denial-is-answered-and-audited" },
+    {
+        spec = {
+            "peinit *dispatch.a-denial-is-answered-and-audited",
+            "peinit *emit.a-refused-command-is-recorded-by-kacs",
+        },
+    },
     function(t)
         -- Silent denial is not acceptable, so each refusal leaves a
-        -- record carrying who asked, what they asked about, the right by
-        -- name, and both masks. The event kind follows the target: a
-        -- service denial is `access.denied`, a job denial is
-        -- `job.access_denied`.
-        set_descriptor(TARGET, 0x0001, "allowed")
-        t:assert_eq(run("start"), "denied", "the service command was refused")
-
-        local service_denial
-        for _ = 1, 20 do
-            for _, event in ipairs(events("access.denied")) do
-                if field(event, "target") == "pt-rights"
-                    and field(event, "requested_right") == "SERVICE_START" then
-                    service_denial = event
-                end
-            end
-            if service_denial then break end
+        -- record carrying who asked, what they asked about and both
+        -- masks. The record is KACS's -- `kacs.audit.access.checked`,
+        -- written because the descriptor's SACL audits the refusal --
+        -- and peinit's check names its object in the audit context, so
+        -- `object.kind` follows the target: `service` for a service,
+        -- `job` for a job. peinit writes no event of its own.
+        eventd.ready(vm)
+        vm:run("reg set '" .. TARGET .. "' ServiceSecurity hex:"
+            .. audited_descriptor_hex(0x0001)):assert_ok()
+        for _ = 1, 40 do
+            if run("status") == "allowed" and run("start") == "denied" then break end
             vm:run("sleep 1")
         end
-        t:assert(service_denial, "and recorded as access.denied, named by the right it asked for")
-        t:assert_eq(field(service_denial, "caller_sid"), "S-1-5-18",
-            "naming the caller: " .. service_denial.payload)
-        t:assert_eq(field(service_denial, "target_type"), "service",
-            "and the kind of target: " .. service_denial.payload)
-        t:assert_eq(field(service_denial, "requested_access_bits"), "2",
-            "with the bits requested: " .. service_denial.payload)
-        t:assert(field(service_denial, "granted_access_bits"),
-            "and the bits granted: " .. service_denial.payload)
+        t:assert_eq(run("start"), "denied", "the service command was refused")
+
+        local service_denial = refusal_record("service", function(row)
+            return row["object.service.name"] == "pt-rights"
+                and row["access.requested"] == 0x2
+        end, "the refused SERVICE_START's record")
+        t:assert(service_denial, "and recorded by KACS against the service, by the right asked for")
+        t:assert_eq(revstrm.sid(service_denial["subject.token.sid"]), "S-1-5-18",
+            "naming the caller: " .. json.encode(service_denial))
+        t:assert_eq(service_denial["fields.attestation.userspace"], true,
+            "the service's name is peinit's claim: " .. json.encode(service_denial))
+        t:assert(service_denial["access.granted"] ~= nil,
+            "and the bits granted: " .. json.encode(service_denial))
+        t:assert_eq(service_denial["outcome.success"], false,
+            "as a refusal: " .. json.encode(service_denial))
         clear_descriptors()
 
         -- The same refusal against a job, which is the other half of the
-        -- rule: same fields, different event.
-        local id = submit_granting(t, 0x0001)
+        -- rule: the same record, another kind of object. The submitter's
+        -- descriptor is used as given, so it carries the SACL itself.
+        local sddl = "O:SYG:SYD:(A;;0x00000001;;;SY)S:(AU;FA;0x7;;;WD)"
+        local r = vm:run("svctl --json job submit --security-descriptor '" .. sddl
+            .. "' /bin/sleep 120", { timeout = 120 })
+        r:assert_ok()
+        local id = r.stdout:match('"id":"([^"]+)"')
+        t:assert(id, "the submission was accepted: " .. r.stdout)
         t:assert_eq(job_verdict(vm:run("svctl --json job stop " .. id, { timeout = 60 })),
             "denied", "the job command was refused")
 
-        local job_denial
-        for _ = 1, 20 do
-            for _, event in ipairs(events("job.access_denied")) do
-                if field(event, "target") == id
-                    and field(event, "requested_right") == "JOB_STOP" then
-                    job_denial = event
-                end
-            end
-            if job_denial then break end
-            vm:run("sleep 1")
-        end
-        t:assert(job_denial, "and recorded as job.access_denied rather than access.denied")
-        t:assert_eq(field(job_denial, "target_type"), "job",
-            "naming the kind of target: " .. job_denial.payload)
-        t:assert_eq(field(job_denial, "requested_access_bits"), "2",
-            "with the bits requested: " .. job_denial.payload)
+        local job_denial = refusal_record("job", function(row)
+            return revstrm.guid(row["object.job.guid"]) == id:lower()
+                and row["access.requested"] == 0x2
+        end, "the refused JOB_STOP's record")
+        t:assert(job_denial, "and recorded by KACS against the job, by the right asked for")
+        t:assert_eq(revstrm.sid(job_denial["subject.token.sid"]), "S-1-5-18",
+            "naming the caller: " .. json.encode(job_denial))
+
+        -- No event of peinit's own names the refusal.
+        local ours = vm:run("revstrm --snapshot --pretty --type 'peinit.*'", { timeout = 60 })
+        t:assert(not ours.stdout:find("access.denied", 1, true)
+            and not ours.stdout:find("access_denied", 1, true),
+            "peinit wrote no denial event of its own")
 
         vm:run("svctl --json job stop " .. id, { timeout = 60 })
     end)

@@ -13,12 +13,14 @@
 --
 -- Nothing drains the ring in this boot: eventd is a Phase 2 service and
 -- Phase 2 never ran, so the record is still buffered when the snapshot is
--- taken.
+-- taken. `peinit.recovery.entered` is essential, so no emission policy
+-- can have kept it out.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
-test("entering recovery emits a recovery.entered audit event naming the reason",
+test("entering recovery emits a peinit.recovery.entered audit event naming the reason",
     { spec = "peinit *recovery.the-reason-is-audited" },
     function(t)
         local vm = peinit.boot({
@@ -36,36 +38,21 @@ test("entering recovery emits a recovery.entered audit event naming the reason",
         t:assert(log:find("peinit: entering recovery: Infrastructure", 1, true),
             "the boot went to recovery from the infrastructure step: " .. log:sub(-600))
 
-        -- The ring, as the agent sees it. `--pretty` prints the msgpack
-        -- payload as indented `key   value` rows under a header line
-        -- that ends in the event type.
-        local snapshot = vm:run("revstrm --snapshot --pretty --type 'recovery.*'",
-            { timeout = 60 })
-        snapshot:assert_ok()
-        local events, current = {}, nil
-        for line in snapshot.stdout:gmatch("[^\r\n]+") do
-            local kind = line:match(
-                "^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+([%w_]+%.[%w_]+)%s*$")
-            if kind then
-                current = { type = kind, payload = "" }
-                events[#events + 1] = current
-            elseif current and line:match("^%s") then
-                current.payload = current.payload .. line .. "\n"
-            end
-        end
-        t:assert_eq(#events, 1,
-            "exactly one recovery event is in the ring: " .. snapshot.stdout)
+        -- The ring, as the agent sees it, each payload read back into the
+        -- dotted paths the catalogue names.
+        local events, raw = revstrm.snapshot(vm, { "peinit.recovery.*" })
+        t:assert_eq(#events, 1, "exactly one recovery event is in the ring: " .. raw)
         local event = events[1]
-        t:assert_eq(event.type, "recovery.entered", "and it is the entry record")
+        t:assert_eq(event.type, "peinit.recovery.entered", "and it is the entry record")
 
-        local function field(name)
-            local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
-            return value and (value:gsub('^"', ""):gsub('"$', ""))
-        end
         -- The reason is recorded twice over: as a stable label a consumer
-        -- can switch on, and as the full detail a person can read.
-        t:assert_eq(field("reason"), "infrastructure",
+        -- can switch on, and as the error's own words a person can read
+        -- (never Rust Debug output).
+        t:assert_eq(revstrm.field(event, "outcome.reason"), "infrastructure",
             "the reason label names the step that failed: " .. event.payload)
-        t:assert(tostring(field("detail")):find("bind control socket", 1, true),
+        local detail = tostring(revstrm.field(event, "outcome.detail"))
+        t:assert(detail:find("bind control socket", 1, true),
             "and the detail carries the failure itself: " .. event.payload)
+        t:assert(not detail:find("Infrastructure(", 1, true),
+            "in its own words, not as a Debug rendering: " .. detail)
     end)

@@ -8,8 +8,10 @@
 --     carries the *primary* cause and nothing else;
 --   * `svctl status`, which carries the same primary cause as the
 --     service's recorded Failed cause;
---   * `graph.validation_error` KMES events, one per finding, which are
---     the only place the retained lower-precedence findings appear.
+--   * `peinit.graph.validation.failed` KMES events, one per finding,
+--     which are the only place the retained lower-precedence findings
+--     appear. Each names its finding in `outcome.reason` and the
+--     services in the fields the catalogue gives them.
 --
 -- Those events are emitted while the Phase 2 plan is being built —
 -- before any service has started, and long before eventd is Active —
@@ -109,18 +111,49 @@ local vm = peinit.boot({
     }),
 })
 
---- Every `graph.validation_error` record eventd holds, as text, polled
---- until `needle` appears in it.
+--- Every `peinit.graph.validation.failed` record eventd holds, polled
+--- until `needle` appears in one, as decoded rows keyed by dotted path,
+--- and the raw text for a failure message.
 ---
 --- Polled because the findings were emitted into the KMES ring before
 --- eventd existed; eventd collects them when it attaches, which is some
 --- seconds after the boot mark this file waited for.
 local function findings(machine, needle)
-    return wait_until(function()
-        local out = machine:run(
-            "evctl 'EVENTS graph.validation_error SINCE 1h ago TAKE 400' --format jsonl").stdout
-        return out:find(needle) and out or nil
-    end, { timeout = 60, interval = 1, desc = "graph.validation_error containing " .. needle })
+    local out = wait_until(function()
+        local text = machine:run(
+            "evctl 'EVENTS peinit.graph.validation.failed SINCE 1h ago TAKE 400' --format jsonl").stdout
+        return text:find(needle) and text or nil
+    end, { timeout = 60, interval = 1, desc = "peinit.graph.validation.failed containing " .. needle })
+    local rows = {}
+    for line in out:gmatch("[^\r\n]+") do
+        local ok, row = pcall(json.decode, line)
+        if ok and type(row) == "table" then rows[#rows + 1] = row end
+    end
+    return rows, out
+end
+
+--- Whether `list` (a decoded string array, or nil) holds `name`.
+local function holds(list, name)
+    for _, item in ipairs(list or {}) do
+        if item == name then return true end
+    end
+    return false
+end
+
+--- The first row satisfying `predicate`, or nil.
+local function finding(rows, predicate)
+    for _, row in ipairs(rows) do
+        if predicate(row) then return row end
+    end
+    return nil
+end
+
+--- The `cycle` finding naming both `a` and `b`, if there is one.
+local function cycle_of(rows, a, b)
+    return finding(rows, function(row)
+        return row["outcome.reason"] == "cycle"
+            and holds(row["graph.services"], a) and holds(row["graph.services"], b)
+    end)
 end
 
 local function status(machine, name)
@@ -145,13 +178,10 @@ test("every cycle is reported, not only the first, and every member is failed wi
         -- Two disjoint cycles: the second exists only because detection
         -- removes a cycle's members and searches the rest of the graph
         -- again rather than stopping at the first.
-        local events = findings(vm, "pt%-v%-d")
-        t:assert(events:find('"message":"dependency cycle: pt-v-a -> pt-v-b"', 1, true)
-            or events:find('"message":"dependency cycle: pt-v-b -> pt-v-a"', 1, true),
-            "the first cycle's path is logged: " .. events)
-        t:assert(events:find('"message":"dependency cycle: pt-v-d -> pt-v-e"', 1, true)
-            or events:find('"message":"dependency cycle: pt-v-e -> pt-v-d"', 1, true),
-            "and so is the second's")
+        local rows, events = findings(vm, "pt%-v%-d")
+        t:assert(cycle_of(rows, "pt-v-a", "pt-v-b"),
+            "the first cycle is recorded, naming its members in graph.services: " .. events)
+        t:assert(cycle_of(rows, "pt-v-d", "pt-v-e"), "and so is the second")
 
         -- The rest of the boot was unaffected.
         wait_for_line(vm, "peinit: service pt-v-fine started")
@@ -166,14 +196,17 @@ test("a service blocked because its dependency is blocked says so, rather than c
             "and its recorded cause is a dependency failure")
 
         -- The distinction the finding value draws: pt-v-a exists. A
-        -- finding of missing_hard_dependency here would say it does
+        -- finding of missing-hard-dependency here would say it does
         -- not.
-        local events = findings(vm, "pt%-v%-c")
-        t:assert(events:find('"finding":"hard_dependency_blocked"', 1, true),
-            "the finding names the block rather than a missing target: " .. events)
-        t:assert(events:find(
-            '"message":"service pt-v-c is blocked because hard dependency pt-v-a is blocked"',
-            1, true), "naming both ends of it")
+        local rows, events = findings(vm, "pt%-v%-c")
+        local blocked = finding(rows, function(row)
+            return row["object.service.name"] == "pt-v-c"
+        end)
+        t:assert(blocked, "pt-v-c has a finding: " .. events)
+        t:assert_eq(blocked["outcome.reason"], "hard-dependency-blocked",
+            "the finding names the block rather than a missing target")
+        t:assert_eq(blocked["object.service.dependency.name"], "pt-v-a",
+            "naming the other end of it")
     end)
 
 test("a service with several findings records the highest-precedence one and keeps the rest",
@@ -197,20 +230,23 @@ test("a service with several findings records the highest-precedence one and kee
         -- and demoted what was already there rather than replacing it.
         -- Breaking the cycle and rebooting should not be what it takes
         -- to discover the second fault.
-        local events = findings(vm, "pt%-v%-absent")
-        t:assert(events:find(
-            '"message":"service pt-v-a has missing hard dependency pt-v-absent"', 1, true),
-            "the demoted finding is emitted too: " .. events)
+        local rows, events = findings(vm, "pt%-v%-absent")
+        t:assert(finding(rows, function(row)
+            return row["outcome.reason"] == "missing-hard-dependency"
+                and row["object.service.name"] == "pt-v-a"
+                and row["object.service.dependency.name"] == "pt-v-absent"
+        end), "the demoted finding is emitted too: " .. events)
     end)
 
-test("each finding is its own graph.validation_error event, recorded as having happened at boot",
-    { spec = "peinit *validate.each-finding-is-its-own-graph-validation-error-event-at-boot" },
+test("each finding is its own peinit.graph.validation.failed event, recorded as having happened at boot",
+    { spec = "peinit *validate.each-finding-is-its-own-validation-failed-event-at-boot" },
     function(t)
-        local events = findings(vm, "pt%-v%-absent")
+        local rows = findings(vm, "pt%-v%-absent")
         local at_boot = 0
-        for line in events:gmatch("[^\r\n]+") do
+        for _, row in ipairs(rows) do
+            local line = json.encode(row)
             if line:find("pt-v-", 1, true) then
-                t:assert(line:find('"phase":"boot"', 1, true),
+                t:assert_eq(row["graph.phase"], "boot",
                     "a boot finding is recorded under phase boot: " .. line)
                 at_boot = at_boot + 1
             end
@@ -238,9 +274,10 @@ test("two boot-triggered services that conflict are both failed with ValidationE
                 name .. " was failed as a validation error")
         end
         -- pt-v-confb declares nothing, and is failed anyway.
-        local events = findings(vm, "pt%-v%-confb")
-        t:assert(events:find('"finding":"conflicting_boot_services"', 1, true),
-            "the finding names the conflict: " .. events)
+        local rows, events = findings(vm, "pt%-v%-confb")
+        t:assert(finding(rows, function(row)
+            return row["outcome.reason"] == "conflicting-boot-services"
+        end), "the finding names the conflict: " .. events)
         t:assert(not vm:console():read_log():find("peinit: service pt%-v%-conf. started"),
             "neither of them was started")
     end)
@@ -255,10 +292,16 @@ test("an invalid timer expression is a finding even on a service in no graph",
         t:assert_eq(entry.state, "failed", "the definition outside the graph was still failed")
         t:assert_eq(entry.cause, "validation_error", "as a validation error")
         -- The boot path records every validation error under the one
-        -- `validation_error` finding value and puts the specifics in the
-        -- message, so the message is what says which check fired.
-        local events = findings(vm, "pt%-v%-badtimer")
-        t:assert(events:find('Timer schedule \\"not a calendar expression\\" is invalid', 1, true),
+        -- `validation-error` reason and puts the specifics in
+        -- `outcome.detail`, so the detail is what says which check fired.
+        local rows, events = findings(vm, "pt%-v%-badtimer")
+        local timer = finding(rows, function(row)
+            return row["object.service.name"] == "pt-v-badtimer"
+        end)
+        t:assert(timer, "pt-v-badtimer has a finding: " .. events)
+        t:assert_eq(timer["outcome.reason"], "validation-error", "under validation-error")
+        t:assert(tostring(timer["outcome.detail"]):find(
+            'Timer schedule "not a calendar expression" is invalid', 1, true),
             "and it is the calendar expression that was rejected: " .. events)
     end)
 
@@ -387,10 +430,13 @@ test("a missing target fails a hard dependent and is dropped from a soft one",
                 name .. " is failed with DependencyFailure")
         end
         -- "Detected at graph validation": the finding is a
-        -- graph.validation_error, not something the start stumbled on.
-        local events = findings(other, "pt%-v%-m%-requires")
-        t:assert(events:find("pt-v-absent", 1, true),
-            "and the finding names the missing target: " .. events)
+        -- peinit.graph.validation.failed, not something the start
+        -- stumbled on.
+        local rows, events = findings(other, "pt%-v%-m%-requires")
+        t:assert(finding(rows, function(row)
+            return row["object.service.name"] == "pt-v-m-requires"
+                and row["object.service.dependency.name"] == "pt-v-absent"
+        end), "and the finding names the missing target: " .. events)
 
         for _, name in ipairs({ "pt-v-m-wants", "pt-v-m-conflicts" }) do
             local entry = status(other, name)

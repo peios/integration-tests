@@ -353,7 +353,7 @@ test("a READY=1 carrying a stale generation is rejected",
         -- Starting — the generation increment — without a main job of
         -- its own to displace it. pt-ab-ghost's process sends READY=1
         -- every second throughout.
-        local _, keeper_pid = abandon(vm, "pt-ab-ghost")
+        local ghost_pid, keeper_pid = abandon(vm, "pt-ab-ghost")
         run(vm, "kill " .. keeper_pid)
         run(vm, "svctl reset pt-ab-ghost"):assert_ok()
         t:assert_eq(status(vm, "pt-ab-ghost").state, "inactive", "the reset cleared it")
@@ -369,32 +369,40 @@ test("a READY=1 carrying a stale generation is rejected",
             "\nPT_JSON_EOF\nreg apply /tmp/pt-ab.json"):assert_ok()
         run(vm, "svctl --json reload-config"):assert_ok()
 
-        local before = run(vm,
-            "evctl 'EVENTS notify.rejected SINCE 1h ago TAKE 2000' --format jsonl").stdout
-        local seen_before = select(2, before:gsub("GenerationMismatch", ""))
+        -- The ghost's generation-mismatch rejections, as
+        -- `peinit.notify.rejected` records them: `outcome.reason`
+        -- generation-mismatch, from the sending process in
+        -- `subject.process.pid`. A rejection at the apply step is not
+        -- attributed to a service, so the sender's pid is what ties it to
+        -- the ghost.
+        local function ghost_mismatches()
+            local out = run(vm,
+                "evctl 'EVENTS peinit.notify.rejected SINCE 1h ago TAKE 2000' --format jsonl").stdout
+            local found = {}
+            for _, line in ipairs(peinit.lines(out)) do
+                local ok, row = pcall(json.decode, line)
+                if ok and type(row) == "table"
+                    and row["outcome.reason"] == "generation-mismatch"
+                    and tostring(row["subject.process.pid"]) == tostring(ghost_pid) then
+                    found[#found + 1] = line
+                end
+            end
+            return found
+        end
+        local seen_before = #ghost_mismatches()
 
         run(vm, "svctl --no-wait start pt-ab-ghost"):assert_ok()
         settle(vm, "pt-ab-ghost", "starting", 30)
 
+        -- Rejected for its generation: the job's, from the first start,
+        -- is stale against the service's, from this one.
         local event = wait_until(function()
-            local out = run(vm,
-                "evctl 'EVENTS notify.rejected SINCE 1h ago TAKE 2000' --format jsonl").stdout
-            if select(2, out:gsub("GenerationMismatch", "")) <= seen_before then return nil end
-            for _, line in ipairs(peinit.lines(out)) do
-                if line:find("GenerationMismatch", 1, true)
-                    and line:find("pt-ab-ghost", 1, true) then
-                    return line
-                end
-            end
-            return nil
+            local found = ghost_mismatches()
+            return #found > seen_before and found[#found] or nil
         end, { timeout = 15, interval = 1,
                desc = "a READY=1 from the previous incarnation to be rejected" })
-
-        -- Rejected for its generation, naming both: the job's, from the
-        -- first start, and the service's, from this one.
-        t:assert(event:find("job_generation: 1", 1, true)
-            and event:find("runtime_generation: 2", 1, true),
-            "the rejection names the stale generation against the current one: " .. event)
+        t:assert(event:find("generation-mismatch", 1, true),
+            "the rejection says the generation was stale: " .. event)
 
         -- And it changed nothing: the service is still Starting, not
         -- satisfied by a readiness report that was not about this start.

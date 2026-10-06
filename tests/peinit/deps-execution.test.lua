@@ -1,9 +1,10 @@
 -- peinit TRM §7.3 — graph execution: starting everything whose
 -- dependencies are satisfied, again and again, until nothing is left.
 --
--- The oracle for most of this is `graph.operation_terminal`, the KMES
--- event peinit emits when a member of an execution context reaches a
--- terminal outcome. It carries the context the event was dispatched
+-- The oracle for most of this is `peinit.graph.operation.ended`, the
+-- KMES event peinit emits when a member of an execution context reaches
+-- a terminal outcome. It is verbose, so the seed switches it on in the
+-- emission policy. It carries the context the event was dispatched
 -- through, which is the only place a *context* is visible from the
 -- guest at all: `svctl` has no vocabulary for one. That is what makes
 -- "one boot context and one per explicit start", and "one event per
@@ -67,7 +68,7 @@ local function wants(...) return { name = "Wants", type = "multi", data = { ... 
 local vm = peinit.boot({
     memory = "800M",
     name = "exec",
-    files = peinit.seed("zz-pt-exec", {
+    files = peinit.merge(peinit.seed("zz-pt-exec", {
         { path = [[Machine\System]] },
         { path = [[Machine\System\Services]] },
 
@@ -114,6 +115,9 @@ local vm = peinit.boot({
         oneshot("pt-x-skipped", { BOOT, requires("pt-x-dormant"),
             { name = "Conditions", type = "multi", data = { "path:/pt-not-here" } } }),
     }),
+    -- `peinit.graph.operation.ended` is verbose, so off until the
+    -- emission policy turns it on.
+    peinit.seed("pt-events-verbose", peinit.verbose_events_keys())),
 })
 
 local function status(name)
@@ -127,20 +131,25 @@ local function wait_for_state(name, state, why)
     end, { timeout = 60, interval = 0.4, desc = why or (name .. " to reach " .. state) })
 end
 
---- Every `graph.operation_terminal` record, as a list of
---- {service, context_id, operation_id, outcome}.
+--- Every `peinit.graph.operation.ended` record, as a list of
+--- {service, context_id, operation_id, satisfied}, read from the
+--- record's `object.service.name`, `graph.context`,
+--- `object.operation.guid` and `outcome.success`.
 local function terminals()
     local out = vm:run(
-        "evctl 'EVENTS graph.operation_terminal SINCE 1h ago TAKE 600' --format jsonl").stdout
+        "evctl 'EVENTS peinit.graph.operation.ended SINCE 1h ago TAKE 600' --format jsonl").stdout
     local records = {}
     for line in out:gmatch("[^\r\n]+") do
-        local service_name = line:match('"service":"([^"]*)"')
-        if service_name then
+        local ok, row = pcall(json.decode, line)
+        if ok and type(row) == "table" and row["object.service.name"] then
+            -- A bin.guid comes out of evctl's JSON as `{"$binary": hex}`;
+            -- the hex is all the comparison below needs.
+            local guid = row["object.operation.guid"]
             records[#records + 1] = {
-                service = service_name,
-                context_id = tonumber(line:match('"context_id":(%d+)')),
-                operation_id = line:match('"operation_id":"([^"]*)"'),
-                outcome = line:match('"outcome":"([^"]*)"'),
+                service = row["object.service.name"],
+                context_id = tonumber(row["graph.context"]),
+                operation_id = type(guid) == "table" and guid["$binary"] or guid,
+                satisfied = row["outcome.success"],
             }
         end
     end
@@ -614,7 +623,7 @@ while :; do sleep 1; done
     end)
 
 -- Retirement is bookkeeping with no reader. A drained context can
--- dispatch no further `graph.operation_terminal` whether it is still
+-- dispatch no further `peinit.graph.operation.ended` whether it is still
 -- held or not, so the event this file reads contexts through is the
 -- same either way, and `svctl` has no view of a context at all. What
 -- retirement changes is PID 1's memory and the cost of its terminal

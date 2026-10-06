@@ -22,6 +22,7 @@
 -- the reload path.
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 -- One VM for the file: every test here reads an answer, and the seeds
 -- give each of them a service of its own to read it about.
 peinit.claim(1)
@@ -83,7 +84,15 @@ local function definitions()
     }
 end
 
-local vm = peinit.boot({ name = "opsview", files = peinit.seed("pt-view", definitions()) })
+--- The definitions, and every `peinit.*` event switched on in the
+--- emission policy: `peinit.operation.merged`, read below, is verbose.
+local function seed_keys()
+    local keys = definitions()
+    for _, key in ipairs(peinit.verbose_events_keys()) do keys[#keys + 1] = key end
+    return keys
+end
+
+local vm = peinit.boot({ name = "opsview", files = peinit.seed("pt-view", seed_keys()) })
 
 --- Run `command` in the guest and return its stdout and how many
 --- seconds it took, measured by the guest's own clock.
@@ -141,30 +150,12 @@ end
 --- one claim here needs the ring: a merged operation's identifier is
 --- deliberately not given to the caller who merged, so the only way to
 --- ask peinit about that record is to read the identifier out of the
---- `operation.merged` event.
+--- `peinit.operation.merged` event.
 local function events(globs)
-    local flags = ""
-    for _, glob in ipairs(globs) do flags = flags .. " --type '" .. glob .. "'" end
-    local r = vm:run("revstrm --snapshot --pretty" .. flags, { timeout = 60 })
-    r:assert_ok()
-    local out, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        local kind = line:match("^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+([%w_]+%.[%w_]+)%s*$")
-        if kind then
-            current = { type = kind, payload = "" }
-            out[#out + 1] = current
-        elseif current and line:match("^%s") then
-            current.payload = current.payload .. line .. "\n"
-        end
-    end
-    return out
+    return revstrm.snapshot(vm, globs)
 end
 
-local function event_field(event, name)
-    local value = event.payload:match("\n?%s+" .. name .. "%s%s+([^\r\n]*)")
-    if not value then return nil end
-    return (value:gsub('^"', ""):gsub('"$', ""))
-end
+local event_field = revstrm.field
 
 --- The member names of a flat JSON object, ignoring nested ones.
 local function members(json)
@@ -376,9 +367,9 @@ test("what a terminal operation's answer carries",
         -- caller is not given, so it is found in the ring and then asked
         -- about by that identifier.
         local merged_id
-        for _, event in ipairs(events({ "operation.merged" })) do
-            if event_field(event, "service") == "pt-merges" then
-                merged_id = event_field(event, "operation_id")
+        for _, event in ipairs(events({ "peinit.operation.merged" })) do
+            if event_field(event, "object.service.name") == "pt-merges" then
+                merged_id = revstrm.guid(event_field(event, "object.operation.guid"))
             end
         end
         t:assert(merged_id, "a merge was recorded for pt-merges")

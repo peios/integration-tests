@@ -243,7 +243,7 @@ test("a value beyond four times the base timeout is clamped rather than refused"
 
         -- Clamped, not rejected: a refusal would have been recorded.
         local rejected = vm:run(
-            "revstrm --snapshot --pretty --type 'notify.rejected'").stdout
+            "revstrm --snapshot --pretty --type 'peinit.notify.rejected'").stdout
         t:assert(not rejected:find("pt%-wd%-cap"),
             "and nothing was recorded as rejected: " .. rejected)
     end)
