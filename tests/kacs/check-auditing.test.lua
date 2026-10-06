@@ -786,6 +786,47 @@ test("the audit policy is read from the effective token, so impersonation carrie
         t:assert_eq(plain, 0, "and a principal whose policy is zero forces nothing")
     end)
 
+test("an access record names the requested bits the mandatory checks denied",
+    { spec = "PKM *check.auditing.mandatory-denials-recorded" }, function(t)
+        local FAIL = POLICY.OBJECT_ACCESS_FAILURE
+        -- The DACL grants read and write to everyone; the label does not.
+        local labelled = access.simple({ grant(READ | WRITE, E) }, { sacl = access.acl({
+            access.label_ace(token.INTEGRITY.HIGH, access.LABEL.NO_WRITE_UP) }) })
+        local events = recording(function()
+            local r = as_subject({ integrity_level = token.INTEGRITY.MEDIUM, audit_policy = FAIL },
+                labelled, WRITE)
+            t:assert(r.denied, "a Medium caller cannot write up to a High object")
+        end)
+        local ev = of(events, "kacs.audit.access.checked")
+        t:assert_eq(#ev, 1, "the failure is recorded")
+        t:assert_eq(ev[1].payload.access["denied-integrity"], WRITE,
+            "naming the write the label withheld")
+        t:assert_eq(ev[1].payload.access["denied-trust"], nil, "and no trust denial")
+        -- A trust label admitting only reads to a non-dominant caller.
+        local trusted = access.simple({ grant(READ | WRITE, E) }, { sacl = access.acl({
+            access.trust_label_ace(1024, 1024, READ) }) })
+        local tev = of(recording(function()
+            with_subject({ audit_policy = FAIL }, function(fd)
+                -- A caller-supplied PIP below the label's, so it does not
+                -- dominate whatever the agent's own PIP is.
+                local r = access.check(vm, { token_fd = fd, sd = trusted, desired = WRITE,
+                    mapping = OBJ, pip_type = 512, pip_trust = 512 })
+                t:assert(r.denied, "a caller without the trust is refused the write")
+            end)
+        end), "kacs.audit.access.checked")
+        t:assert_eq(#tev, 1, "recorded")
+        t:assert_eq(tev[1].payload.access["denied-trust"], WRITE,
+            "naming the write the trust label withheld")
+        -- And a check the labels allowed names no denial.
+        local okev = of(recording(function()
+            as_subject({ audit_policy = POLICY.OBJECT_ACCESS_SUCCESS,
+                integrity_level = token.INTEGRITY.MEDIUM }, labelled, READ)
+        end), "kacs.audit.access.checked")
+        t:assert_eq(#okev, 1, "a granted read is recorded too")
+        t:assert_eq(okev[1].payload.access["denied-integrity"], nil,
+            "with no denial, since read was not withheld")
+    end)
+
 test("a SACL record from the AccessCheck syscall needs SeAuditPrivilege on the caller",
     { spec = "PKM *check.auditing.syscall-sacl-needs-audit-privilege" }, function(t)
         local AUDIT_PRIV = token.bit(token.PRIV.AUDIT)
