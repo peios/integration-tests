@@ -109,12 +109,16 @@ local function file_size(path)
     return ok and #data or 0
 end
 
+--- Wait for the record of `key` being changed to `new_value` (written as
+--- the registry decimal; the record carries it as an integer).
 local function config_change(key, new_value)
     local found
     eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago TAKE 1000",
         function(rs)
             for _, r in ipairs(rs) do
-                if r.key == key and r.new_value == new_value then found = r; return true end
+                if r["config.name"] == key and r["config.value"] == tonumber(new_value) then
+                    found = r; return true
+                end
             end
             return false
         end, { desc = "a config change of " .. key .. " to " .. new_value })
@@ -428,7 +432,7 @@ test("the default caps are 10000 events and 100 ms", {
     local function recorded(key)
         local n = 0
         for _, r in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago TAKE 1000")) do
-            if r.key == key then n = n + 1 end
+            if r["config.name"] == key then n = n + 1 end
         end
         return n
     end
@@ -547,7 +551,7 @@ test("retention reaches an active shard only through its writer, a bounded step 
         { timeout = 120, interval = 0.5, desc = "the flood to be stored" })
     t:assert(present(head) and present(seg(8)), "the head and segment 8 are stored")
     local startups0 = sql(SHARD0,
-        "SELECT count(*) FROM events WHERE event_type = 'synthetic.startup'")[1][1]
+        "SELECT count(*) FROM events WHERE event_type = '" .. eventd.T.startup .. "'")[1][1]
     t:assert(startups0 >= 1, "shard 0 holds this boot's startup records: " .. startups0)
 
     local ok, err = pcall(function()
@@ -574,7 +578,7 @@ test("retention reaches an active shard only through its writer, a bounded step 
             "the event emitted mid-retention was committed while the run still had segment 8 " ..
             "to delete: the writer took it between bounded retention steps, not after the run")
         local startups1 = sql(SHARD0,
-            "SELECT count(*) FROM events WHERE event_type = 'synthetic.startup'")[1][1]
+            "SELECT count(*) FROM events WHERE event_type = '" .. eventd.T.startup .. "'")[1][1]
         t:assert(startups1 < startups0,
             "synthetic records live in the same shard and age out with the events around them: " ..
             startups0 .. " -> " .. startups1 .. " startup records")

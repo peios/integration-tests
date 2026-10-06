@@ -132,7 +132,7 @@ local function account(lo, hi)
     end
     for _, q in ipairs(eventd.rows(vm, string.format(
         "EVENTS %s WHERE event.cpu == 0 SINCE 1h ago TAKE 10000", eventd.T.gap))) do
-        gaps[#gaps + 1] = { q.first_sequence, q.last_sequence }
+        gaps[#gaps + 1] = { q["loss.sequence"], q["loss.sequence-last"] }
     end
     local lost, hole, first_lost = 0, nil, nil
     for s = lo, hi do
@@ -176,7 +176,7 @@ local function wait_config_change(key, new_value)
     eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago TAKE 1000",
         function(rs)
             for _, r in ipairs(rs) do
-                if r.key == key and r.new_value == new_value then return true end
+                if r["config.name"] == key and r["config.value"] == tonumber(new_value) then return true end
             end
             return false
         end, { desc = "a config change of " .. key .. " to " .. tostring(new_value) })

@@ -21,6 +21,7 @@ local eventd = require("helpers.eventd")
 local peinit = require("helpers.peinit")
 local token = require("helpers.token")
 local access = require("helpers.access")
+local sys = require("helpers.sys")
 peinit.claim(1)
 
 local vm = eventd.boot({ name = "ev-enforce" })
@@ -469,9 +470,8 @@ end)
 -- The audit trail
 -- ---------------------------------------------------------------------------
 
-test("every check is audited by KACS, against the data type and pattern, into the event store", {
-    spec = "eventd *enforce.every-access-check-produces-a-kacs-audit-event"
-        .. " eventd *enforce.the-audit-context-names-the-data-type-and-pattern-accessed"
+test("a check a SACL audits is recorded by KACS, against the data type and pattern, into the event store", {
+    spec = "eventd *enforce.the-audit-context-names-the-data-type-and-pattern-accessed"
         .. " eventd *enforce.access-audit-events-are-stored-and-governed-like-any-other-event",
 }, function(t)
     local base = eventd.marker("ptaudit")
@@ -505,6 +505,87 @@ test("every check is audited by KACS, against the data type and pattern, into th
     settle("EVENTS kacs.audit.access.checked SINCE 1h ago TAKE 1", count(0),
         "Events\\kacs.audit.access.checked to govern them")
     eventd.drop_descriptor(vm, "Events", "kacs.audit.access.checked")
+end)
+
+--- A minted ordinary user: Everyone and Authenticated Users but not an
+--- Administrator, so the default `Events\*` (SYSTEM and Administrators
+--- only) denies it. SeChangeNotifyPrivilege for the walk to /run/eventd.
+local NOTIFY = token.bit(token.PRIV.CHANGE_NOTIFY)
+local GROUP_ON = token.GROUP.MANDATORY | token.GROUP.ENABLED_BY_DEFAULT | token.GROUP.ENABLED
+local function ordinary_user()
+    return {
+        user_sid = token.SID.TEST_USER,
+        privs_present = NOTIFY, privs_enabled = NOTIFY,
+        groups = {
+            { sid = EVERYONE, attributes = GROUP_ON },
+            { sid = token.SID.AUTHENTICATED_USERS, attributes = GROUP_ON },
+        },
+    }
+end
+
+--- kacs.audit.access.checked records under the default `Events\*` written
+--- at or after `from`, narrowed by `where` (query text after the pattern).
+local function default_audits(from, where)
+    local out = {}
+    for _, r in ipairs(rows('EVENTS kacs.audit.access.checked WHERE object.event-namespace.pattern == "*"'
+        .. (where or "") .. " SINCE 1h ago TAKE 100000")) do
+        if r["event.time"] >= from then out[#out + 1] = r end
+    end
+    return out
+end
+
+-- PEI-1279 item 5: every default descriptor carries (AU;FA;0xd;;;WD), so a
+-- denial under one is a KACS record with no descriptor work by anyone, and
+-- a grant, which no success ACE asks for, is not.
+test("under a default descriptor every denied check is audited, and a granted one is not", {
+    spec = "eventd *enforce.every-denied-check-under-a-default-descriptor-produces-a-kacs-audit-event",
+}, function(t)
+    local ty = eventd.marker("ptdefaudit") .. ".x"
+    emit(ty, { n = 1 })
+    settle(since("EVENTS " .. ty), count(1))
+    local from = eventd.guest_ns(vm)
+    -- Granted, as SYSTEM, and a fresh check: a field set the cache has not
+    -- seen for this identifier (§7.5).
+    t:assert_eq(#rows(since("EVENTS " .. ty .. " WHERE n == 1")), 1, "SYSTEM reads it under Events\\*")
+    local seen
+    token.as_principal(t, vm, ordinary_user(), function(w)
+        local r = w:run("/usr/bin/evctl", { args = { "--format", "jsonl", since("EVENTS " .. ty) } })
+        seen = r.exit_code == 0 and r.stdout or ("exit " .. tostring(r.exit_code) .. ": " .. tostring(r.stderr))
+    end)
+    t:assert(not tostring(seen):find(ty, 1, true), "the ordinary user is shown nothing of it: " .. tostring(seen))
+    local user = ' WHERE subject.token.sid == x"' .. eventd.hex(token.SID.TEST_USER) .. '"'
+    local denied
+    pcall(wait_until, function()
+        denied = default_audits(from, user)[1]
+        return denied ~= nil
+    end, { timeout = 15, interval = 0.25, desc = "the denied check's audit record" })
+    t:assert(denied, "the denial under Events\\* was audited, with no SACL written by anyone")
+    t:assert_eq(denied and denied["outcome.success"], false, "as a failure")
+    t:assert_eq(denied and denied["access.requested"], READ, "of EVENTD_READ")
+    t:assert_eq(denied and denied["trigger.kind"], "sacl", "triggered by the descriptor's SACL")
+    t:assert_eq(denied and denied["object.kind"], "event-namespace", "naming the event namespace")
+    t:assert_eq(denied and denied["emitter.process.executable"], "/usr/sbin/eventd", "from eventd's check")
+    -- The denial's record is there, so a record of the earlier grant would
+    -- be too.
+    local granted = default_audits(from, " WHERE outcome.success == true")
+    t:assert_eq(#granted, 0, "and the granted check wrote nothing: " .. json.encode(granted[1]))
+end)
+
+-- A8: KACS writes SACL records from the AccessCheck syscall only for a
+-- caller holding SeAuditPrivilege enabled. The denial above being recorded
+-- at all is the consequence; this is the cause, read off eventd's token.
+test("eventd's checks are audited because its token holds SeAuditPrivilege, enabled", {
+    spec = "eventd *enforce.eventds-checks-are-audited-because-its-token-holds-seauditprivilege",
+}, function(t)
+    local pidfd = assert(token.pidfd_open(vm, eventd.pid(vm)))
+    local fd, e = token.open_process(vm, pidfd, token.RIGHT.QUERY)
+    sys.close(vm, pidfd)
+    t:assert(fd, "eventd's token opens for query: errno " .. tostring(e))
+    local p = fd and token.privileges(vm, fd)
+    if fd then sys.close(vm, fd) end
+    local audit = token.bit(token.PRIV.AUDIT)
+    t:assert(p and p.present & audit ~= 0, "SeAuditPrivilege is on eventd's token")
+    t:assert(p and p.enabled & audit ~= 0, "and enabled")
 end)
 
 -- Route closed: as for §7.1 (access-model.test.lua), KACS captures an

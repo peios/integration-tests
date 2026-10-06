@@ -61,12 +61,12 @@ local function barrier()
     barrier_seq = barrier_seq + 1
     local v = 200000 + barrier_seq
     eventd.set(vm, "CrossTypeMaxLookbackSeconds", "dword:" .. v):assert_ok()
-    eventd.wait_rows(vm, "EVENTS " .. CC .. ' WHERE key == "CrossTypeMaxLookbackSeconds" AND new_value == ' ..
-        q(tostring(v)) .. " SINCE 1h ago", function(rs) return #rs >= 1 end)
+    eventd.wait_rows(vm, "EVENTS " .. CC .. ' WHERE config.name == "CrossTypeMaxLookbackSeconds" AND config.value == ' ..
+        v .. " SINCE 1h ago", function(rs) return #rs >= 1 end)
 end
 
 local function changes(key, socket)
-    return eventd.query(vm, "EVENTS " .. CC .. " WHERE key == " .. q(key) .. " SINCE 1h ago",
+    return eventd.query(vm, "EVENTS " .. CC .. " WHERE config.name == " .. q(key) .. " SINCE 1h ago",
         { socket = socket }).rows
 end
 
@@ -332,7 +332,7 @@ test("an invalid value is ignored and the value in use kept, live and at startup
     -- Live: a valid value goes into use, invalid ones after it are ignored,
     -- and deleting the key is a change from the value eventd kept.
     eventd.set(vm, "LogMaxBatchSize", "dword:7000"):assert_ok()
-    eventd.wait_rows(vm, "EVENTS " .. CC .. ' WHERE key == "LogMaxBatchSize" AND new_value == "7000" SINCE 1h ago',
+    eventd.wait_rows(vm, "EVENTS " .. CC .. ' WHERE config.name == "LogMaxBatchSize" AND config.value == 7000 SINCE 1h ago',
         function(rs) return #rs >= 1 end)
     local n = #changes("LogMaxBatchSize")
     for _, bad in ipairs({ "dword:5", "sz:7000", "qword:7000" }) do
@@ -341,10 +341,18 @@ test("an invalid value is ignored and the value in use kept, live and at startup
         t:assert_eq(#changes("LogMaxBatchSize"), n, "LogMaxBatchSize=" .. bad .. " is ignored")
     end
     eventd.unset(vm, "LogMaxBatchSize")
-    local rows = eventd.wait_rows(vm, "EVENTS " .. CC .. ' WHERE key == "LogMaxBatchSize"' ..
-        ' AND new_value_type == "absent" SINCE 1h ago', function(rs) return #rs >= 1 end)
-    t:assert_eq(rows[1] and rows[1].old_value, "7000",
-        "deleting it changes from the 7000 eventd kept: " .. json.encode(rows[1]))
+    -- A removed value leaves `config.type` and `config.value` out (§3.2).
+    local rows = eventd.wait_rows(vm, "EVENTS " .. CC .. ' WHERE config.name == "LogMaxBatchSize"' ..
+        ' AND config.value-previous == 7000 SINCE 1h ago', function(rs)
+            for _, r in ipairs(rs) do if r["config.type"] == nil then return true end end
+            return false
+        end)
+    local removed
+    for _, r in ipairs(rows) do if r["config.type"] == nil then removed = r end end
+    t:assert(removed and removed["config.value"] == nil,
+        "deleting it is a change with no value now: " .. json.encode(rows))
+    t:assert_eq(removed and removed["config.value-previous"], 7000,
+        "from the 7000 eventd kept: " .. json.encode(removed))
 
     -- At startup, a drop threshold that is not below the create threshold.
     -- Both values are in range; the pair is not. Ignored, eventd starts.

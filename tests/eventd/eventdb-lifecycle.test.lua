@@ -613,9 +613,9 @@ test("SQLite-reported corruption in the active shard renames it aside, starts a 
     local errs = eventd.rows(bad, "EVENTS " .. eventd.T.storage_error .. " SINCE 10m ago")
     local hit = false
     for _, e in ipairs(errs) do
-        if e.store == "event" and e.shard_index == 0 and e["event.time"] >= since then hit = true end
+        if e["store.kind"] == "event" and e["store.shard"] == 0 and e["event.time"] >= since then hit = true end
     end
-    t:assert(hit, "a storage_error for the event store's shard 0 was recorded: " .. json.encode(errs))
+    t:assert(hit, "an eventd.store.quarantined for the event store's shard 0 was recorded: " .. json.encode(errs))
     local logs = eventd.rows(bad, "LOGS FROM eventd SINCE 10m ago")
     local logged = false
     for _, l in ipairs(logs) do

@@ -53,7 +53,7 @@ local function hold_open(t)
     eventd.set(vm, "QueryTimeoutMs", "dword:300000"):assert_ok()
     wait_until(function()
         for _, r in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago")) do
-            if r.key == "QueryTimeoutMs" and r.new_value == "300000" then return true end
+            if r["config.name"] == "QueryTimeoutMs" and r["config.value"] == 300000 then return true end
         end
         return false
     end, { timeout = 20, interval = 0.25, desc = "the long query timeout to apply" })
@@ -239,7 +239,7 @@ end)
 
 test("a clean stop records each CPU's covered sequence, checkpoints it, and closes the WAL", {
     spec = "eventd *shutdown.each-cpus-highest-contiguously-covered-sequence-is-written-to-sequence-checkpoints"
-        .. " eventd *shutdown.a-synthetic-shutdown-event-carries-the-per-cpu-sequences"
+        .. " eventd *shutdown.an-eventd-daemon-stopped-event-carries-the-per-cpu-sequences"
         .. " eventd *shutdown.every-database-connection-is-closed-checkpointing-its-wal",
 }, function(t)
     for i = 1, 10 do eventd.emit(vm, "pt.stop", { i = i }) end
@@ -267,10 +267,12 @@ test("a clean stop records each CPU's covered sequence, checkpoints it, and clos
     local sd = eventd.rows(vm, "EVENTS " .. eventd.T.shutdown .. " SINCE 10m ago")
     table.sort(sd, function(a, b) return a["event.time"] < b["event.time"] end)
     local last = sd[#sd]
-    t:assert(last and last.last_sequences and #last.last_sequences == 1,
+    local cpus = last and last["store.committed.cpus"]
+    local seqs = last and last["store.committed.sequences"]
+    t:assert(type(cpus) == "table" and #cpus == 1 and type(seqs) == "table" and #seqs == 1,
         "the record carries one sequence per CPU: " .. json.encode(last))
-    t:assert_eq(last.last_sequences[1].cpu_id, 0, "for CPU 0")
-    t:assert_eq(last.last_sequences[1].sequence, mine and mine[3], "the same sequence as the checkpoint")
+    t:assert_eq(cpus and cpus[1], 0, "for CPU 0")
+    t:assert_eq(seqs and seqs[1], mine and mine[3], "the same sequence as the checkpoint")
 end)
 
 test("with no writable shard the shutdown record is skipped and the failure logged", {
@@ -291,7 +293,7 @@ test("with no writable shard the shutdown record is skipped and the failure logg
     -- The writer reports the refused commit (writer.rs request_retention)
     -- and the supervisor a failed one (pipeline.rs commit_synthetic_fallback);
     -- either is the failure on stderr.
-    local line = eventd.stderr_line(vm, "synthetic.shutdown", since)
+    local line = eventd.stderr_line(vm, "cannot persist " .. eventd.T.shutdown, since)
         or eventd.stderr_line(vm, "event store is full", since)
     t:assert(line, "and the failed write was reported on stderr")
 end)

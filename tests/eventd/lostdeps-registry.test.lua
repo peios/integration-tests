@@ -30,7 +30,10 @@ end
 local function wait_change(key, value, since)
     local _, ok = eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 30m ago", function(rows)
         for _, r in ipairs(rows) do
-            if r["event.time"] >= since and r.key == key and r.new_value == value then return true end
+            if r["event.time"] >= since and r["config.name"] == key
+                and r["config.value"] == tonumber(value) then
+                return true
+            end
         end
         return false
     end, { desc = key .. "=" .. value .. " to apply" })
@@ -117,7 +120,9 @@ test("when the registry returns eventd reads its configuration again", {
     eventd.unset(vm, "MaxStreamingQueries"):assert_ok()
     local _, applied = eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 30m ago", function(rows)
         for _, r in ipairs(rows) do
-            if r["event.time"] >= since and r.key == "MaxStreamingQueries" and r.new_value_type == "absent" then
+            -- A removal leaves config.type and config.value out entirely.
+            if r["event.time"] >= since and r["config.name"] == "MaxStreamingQueries"
+                and r["config.type"] == nil and r["config.value"] == nil then
                 return true
             end
         end

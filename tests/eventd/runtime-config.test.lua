@@ -1,7 +1,8 @@
 -- eventd TRM §8.3 — configuration at runtime: what eventd's registry
 -- watch applies at once, what it defers to a restart, what is not
--- configuration at all, and the `synthetic.config_change` record of each
--- applied change.
+-- configuration at all, and the `eventd.config.changed` record of each
+-- applied change (`config.name`, and `config.value` / `config.type` and
+-- their `-previous` pair as integers, TRM §3.2).
 --
 -- One VM, and every test drives the live system: `reg set` / `reg del`
 -- under `Machine\System\eventd`, then reads what eventd did about it —
@@ -29,7 +30,7 @@ local vm = eventd.boot({ name = "ev-runtime" })
 local function changes(key, since)
     local out = {}
     for _, r in ipairs(eventd.rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 30m ago")) do
-        if r.key == key and r["event.time"] >= since then out[#out + 1] = r end
+        if r["config.name"] == key and r["event.time"] >= since then out[#out + 1] = r end
     end
     table.sort(out, function(a, b) return a["event.time"] < b["event.time"] end)
     return out
@@ -52,7 +53,7 @@ test("a change is applied by the watch, without a restart", {
     local pid = eventd.pid(vm)
     local since = eventd.guest_ns(vm)
     eventd.set(vm, "MetricRetentionDays", "dword:17"):assert_ok()
-    t:assert(wait_change("MetricRetentionDays", since, function(r) return r.new_value == "17" end),
+    t:assert(wait_change("MetricRetentionDays", since, function(r) return r["config.value"] == 17 end),
         "the change was applied")
     t:assert_eq(eventd.pid(vm), pid, "by the same process")
     eventd.unset(vm, "MetricRetentionDays")
@@ -63,14 +64,16 @@ test("every applied change is recorded with its key and its old and new values",
 }, function(t)
     local since = eventd.guest_ns(vm)
     eventd.set(vm, "EventRetentionDays", "dword:41"):assert_ok()
-    local first = wait_change("EventRetentionDays", since, function(r) return r.new_value == "41" end)
+    local first = wait_change("EventRetentionDays", since, function(r) return r["config.value"] == 41 end)
     t:assert(first, "a record for the first change")
     eventd.set(vm, "EventRetentionDays", "dword:42"):assert_ok()
-    local second = wait_change("EventRetentionDays", since, function(r) return r.new_value == "42" end)
+    local second = wait_change("EventRetentionDays", since, function(r) return r["config.value"] == 42 end)
     t:assert(second, "and for the second")
-    t:assert_eq(second and second.old_value, "41", "whose old value is the first's new one")
-    t:assert_eq(second and second.old_value_type, "REG_DWORD", "rendered with its registry type")
-    t:assert_eq(second and second.new_value_type, "REG_DWORD", "both sides")
+    t:assert_eq(second and second["config.value-previous"], 41, "whose old value is the first's new one")
+    t:assert_eq(second and second["config.type-previous"], 4, "with its registry type, REG_DWORD's number")
+    t:assert_eq(second and second["config.type"], 4, "both sides")
+    t:assert_eq(second and math.type(second["config.value"]), "integer", "the values are integers, not text")
+    t:assert_eq(second and second["config.key.path"], [[Machine\System\eventd]], "under eventd's key")
     eventd.unset(vm, "EventRetentionDays")
 end)
 
@@ -79,17 +82,17 @@ test("an invalid value is ignored and the value in use, not the default, is kept
 }, function(t)
     local since = eventd.guest_ns(vm)
     eventd.set(vm, "LogRetentionDays", "dword:13"):assert_ok()
-    t:assert(wait_change("LogRetentionDays", since, function(r) return r.new_value == "13" end),
+    t:assert(wait_change("LogRetentionDays", since, function(r) return r["config.value"] == 13 end),
         "13 applied")
     -- 1..3650 is the range; 99999 is outside it.
     eventd.set(vm, "LogRetentionDays", "dword:99999"):assert_ok()
     eventd.set(vm, "LogRetentionDays", "dword:14"):assert_ok()
-    local last = wait_change("LogRetentionDays", since, function(r) return r.new_value == "14" end)
+    local last = wait_change("LogRetentionDays", since, function(r) return r["config.value"] == 14 end)
     t:assert(last, "14 applied")
     for _, r in ipairs(changes("LogRetentionDays", since)) do
-        t:assert(r.new_value ~= "99999", "the out-of-range value was never applied")
+        t:assert(r["config.value"] ~= 99999, "the out-of-range value was never applied")
     end
-    t:assert_eq(last and last.old_value, "13",
+    t:assert_eq(last and last["config.value-previous"], 13,
         "and what 14 replaced was the retained 13, not the compiled-in default")
     eventd.unset(vm, "LogRetentionDays")
 end)
@@ -103,7 +106,7 @@ test("an unknown key in the subtree is ignored", {
     -- A known change straight after, so "nothing for the unknown key" is
     -- read once eventd has demonstrably handled what came before it.
     eventd.set(vm, "MetricRetentionDays", "dword:18"):assert_ok()
-    t:assert(wait_change("MetricRetentionDays", since, function(r) return r.new_value == "18" end),
+    t:assert(wait_change("MetricRetentionDays", since, function(r) return r["config.value"] == 18 end),
         "the following known change was applied")
     t:assert_eq(#changes("PtNoSuchSetting", since), 0, "nothing was recorded for the unknown key")
     t:assert_eq(eventd.pid(vm), pid, "and eventd carried on")
@@ -228,7 +231,7 @@ test("changes arriving while eventd starts are applied after it is ready", {
         if r["event.time"] >= since then stop = r end
     end
     t:assert(start and stop, "the old process's shutdown record and the new one's startup record")
-    local last = wait_change("MetricRetentionDays", since, function(r) return r.new_value == "140" end)
+    local last = wait_change("MetricRetentionDays", since, function(r) return r["config.value"] == 140 end)
     t:assert(last, "the final value was applied")
     -- The old process, still running when the first changes landed, may
     -- apply some itself; those precede its shutdown record. What the new
@@ -237,7 +240,7 @@ test("changes arriving while eventd starts are applied after it is ready", {
     for _, r in ipairs(changes("MetricRetentionDays", since)) do
         t:assert(r["event.time"] < stop["event.time"] or r["event.time"] > start["event.time"],
             "no change was applied by the new process before its startup record ("
-            .. r.new_value .. ")")
+            .. tostring(r["config.value"]) .. ")")
     end
     t:assert(last["event.time"] > start["event.time"], "and the last one came after readiness")
     eventd.unset(vm, "MetricRetentionDays")

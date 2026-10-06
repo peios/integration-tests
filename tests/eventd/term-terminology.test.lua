@@ -55,10 +55,12 @@ local function shards_holding(etype)
     return out
 end
 
+--- Set `key` and wait for its config change record; `rendered` is the
+--- integer the record carries as config.value.
 local function applied(key, value, rendered)
     eventd.set(vm, key, value):assert_ok()
-    eventd.wait_rows(vm, "EVENTS " .. CC .. " WHERE key == " .. q(key) .. " AND new_value == " ..
-        q(rendered) .. " SINCE 1h ago", function(rs) return #rs >= 1 end)
+    eventd.wait_rows(vm, "EVENTS " .. CC .. " WHERE config.name == " .. q(key) .. " AND config.value == " ..
+        rendered .. " SINCE 1h ago", function(rs) return #rs >= 1 end)
 end
 
 local function secondary_indexes(shard)
@@ -139,15 +141,15 @@ test("synthetic events bypass KMES and carry no stamps and no sequence numbers",
     end
     eventd.unset(vm, "LogRetentionDays")
     for _, ty in ipairs(seen) do
-        t:assert(ty:sub(1, 10) ~= "synthetic.", "no synthetic event passed through KMES: " .. ty)
+        t:assert(ty ~= CC, "no config change record passed through KMES: " .. ty)
     end
-    local row = eventd.rows(vm, "EVENTS " .. CC .. ' WHERE key == "LogRetentionDays" SINCE 10m ago TAKE 1')[1]
+    local row = eventd.rows(vm, "EVENTS " .. CC .. ' WHERE config.name == "LogRetentionDays" SINCE 10m ago TAKE 1')[1]
     t:assert(row, "the config_change was stored nonetheless")
     for _, f in ipairs({ "event.sequence", "event.cpu", "emitter.class", "emitter.token.guid",
                          "emitter.true-token.guid", "emitter.process.guid" }) do
         t:assert(row[f] == nil, f .. " is null on a synthetic event: " .. json.encode(row))
     end
-    t:assert(row["event.type"]:sub(1, 10) == "synthetic.", "and its type is synthetic.-prefixed")
+    t:assert_eq(row["event.type"], "eventd.config.changed", "and its type is one of eventd's five")
     t:assert(row["event.time"] ~= nil, "while it has a time of its own: " .. json.encode(row))
 end)
 
@@ -330,7 +332,7 @@ test("a shard left by an earlier configuration takes no new events, is still que
     t:assert_eq(json.encode(shards_holding(etype)), '["shard-0001.db"]', "the event is in shard 1")
     eventd.set(vm, "StorageShards", "dword:1"):assert_ok()
     local pid = eventd.restart(vm)
-    t:assert_eq(eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1m ago TAKE 1")[1].shard_count, 1,
+    t:assert_eq(eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1m ago TAKE 1")[1]["store.shard-count"], 1,
         "eventd now runs one shard, so shard-0001.db is historical")
     t:assert_eq(#eventd.rows(vm, "EVENTS " .. etype .. " SINCE 10m ago"), 1, "and its event is still queried")
     local later = "pt.hs" .. eventd.marker()
@@ -359,7 +361,7 @@ test("eventd-meta.db is not a shard and survives shard reconfiguration", {
     local created = eventd.sql(vm, eventd.DB.meta, "SELECT CAST(value AS TEXT) FROM meta WHERE key = 'created_at'")[1][1]
     eventd.unset(vm, "StorageShards")
     eventd.restart(vm)
-    t:assert_eq(eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1m ago TAKE 1")[1].shard_count, 2,
+    t:assert_eq(eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1m ago TAKE 1")[1]["store.shard-count"], 2,
         "two shards again, eventd-meta.db not counted among them")
     t:assert_eq(eventd.sql(vm, eventd.DB.meta, "SELECT CAST(value AS TEXT) FROM meta WHERE key = 'created_at'")[1][1],
         created, "the same eventd-meta.db: its creation time is unchanged")

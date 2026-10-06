@@ -56,7 +56,10 @@ test("eventd takes its configuration from the registry and nowhere else", {
     eventd.set(vm, "EventRetentionDays", "dword:51"):assert_ok()
     local _, ok = eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago", function(rows)
         for _, r in ipairs(rows) do
-            if r["event.time"] >= since and r.key == "EventRetentionDays" and r.new_value == "51" then return true end
+            if r["event.time"] >= since and r["config.name"] == "EventRetentionDays"
+                and r["config.value"] == 51 then
+                return true
+            end
         end
         return false
     end)
@@ -115,7 +118,7 @@ test("events emitted before eventd started were read by its first drain", {
     spec = "eventd *deps.events-emitted-before-eventd-starts-are-read-by-its-first-drain-from-tail-pos",
 }, function(t)
     local first = startups()[1]
-    t:assert(first and first.restart == false, "the boot's first start")
+    t:assert(first and first["store.restarted"] == false, "the boot's first start")
     -- KMES numbers each CPU's events from 1 in a boot; the first ones
     -- were emitted by the kernel and Phase 1 long before eventd existed.
     local early = eventd.rows(vm, "EVENTS WHERE event.cpu == 0 AND event.sequence == 1 SINCE 1h ago")

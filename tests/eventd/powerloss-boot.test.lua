@@ -33,7 +33,7 @@
 --      writer takes blocks inside its commit and nothing of it reaches the
 --      disk. Its events are emitted, the writer is seen blocked (D) in
 --      /proc, and the power goes. The committed events survive, the batch
---      does not, and no synthetic.gap appears for it.
+--      does not, and no eventd.events.lost record appears for it.
 --   3. A store's creation lost: fresh stores, power cut a few seconds
 --      after creation, and the next start must still come up. Last,
 --      because it throws the earlier stores away.
@@ -103,12 +103,12 @@ test("a new boot's coverage for each CPU starts before sequence 1", {
     end
     t:assert(s, "eventd started under the new boot ID")
     t:assert_eq(s and s["event.boot.guid"], "{" .. FAKE .. "}", "the new boot")
-    t:assert_eq(s and s.restart, false, "as that boot's first start")
+    t:assert_eq(s and s["store.restarted"], false, "as that boot's first start")
     -- Coverage that begins before sequence 1 has nothing covered and
     -- nothing missing below the ring's oldest survivor: that survivor
     -- (sequence 1, the ring has not wrapped) is the first event of the
     -- new boot, and no gap precedes it. (The startup record's
-    -- resume_points are where coverage stands once the start's recovery
+    -- store.resume.* are where coverage stands once the start's recovery
     -- has committed, not where it began.)
     local found
     pcall(wait_until, function()
@@ -286,12 +286,12 @@ local function thread_state(v, pid, tid)
     return ok and stat:match("%) (%a)") or nil
 end
 
---- The synthetic.gap rows of boot `boot` that reach past sequence `after`
---- (all of that boot's, when `after` is nil).
+--- The eventd.events.lost rows of boot `boot` that reach past sequence
+--- `after` (all of that boot's, when `after` is nil).
 local function gaps_past(v, boot, after)
     local out = {}
     for _, g in ipairs(eventd.rows(v, "EVENTS " .. eventd.T.gap .. " SINCE 1h ago")) do
-        if g["event.boot.guid"] == boot and (after == nil or (g.last_sequence or 0) > after) then
+        if g["event.boot.guid"] == boot and (after == nil or (g["loss.sequence-last"] or 0) > after) then
             out[#out + 1] = g
         end
     end

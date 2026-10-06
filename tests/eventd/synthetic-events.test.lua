@@ -29,6 +29,20 @@ local vm = eventd.boot({
 -- Local helpers
 -- ---------------------------------------------------------------------------
 
+--- The five types eventd writes itself, as an SQL list.
+local OWN_TYPES = {}
+for _, k in ipairs({ "startup", "shutdown", "gap", "config_change", "storage_error" }) do
+    OWN_TYPES[#OWN_TYPES + 1] = "'" .. eventd.T[k] .. "'"
+end
+local OWN_TYPES_SQL = "(" .. table.concat(OWN_TYPES, ",") .. ")"
+
+local function is_own_type(ty)
+    for _, k in ipairs({ "startup", "shutdown", "gap", "config_change", "storage_error" }) do
+        if eventd.T[k] == ty then return true end
+    end
+    return false
+end
+
 --- Synthetic rows from every shard of `on`: {shard, id, type, timestamp,
 --- header = {cpu_id, sequence, origin_class, guids...}}.
 local function synthetic_rows(on, where)
@@ -37,7 +51,7 @@ local function synthetic_rows(on, where)
         for _, r in ipairs(eventd.sql(on, shard,
             "SELECT id, event_type, timestamp, cpu_id, sequence, origin_class, " ..
             "effective_token_guid, true_token_guid, process_guid FROM events " ..
-            "WHERE event_type LIKE 'synthetic.%'" .. (where and (" AND " .. where) or "") ..
+            "WHERE event_type IN " .. OWN_TYPES_SQL .. (where and (" AND " .. where) or "") ..
             " ORDER BY timestamp")) do
             out[#out + 1] = {
                 shard = shard:match("(shard%-%d+)%.db$"), id = r[1], type = r[2], timestamp = r[3],
@@ -70,7 +84,7 @@ local function config_change(on, key, new_value)
     eventd.wait_rows(on, "EVENTS " .. eventd.T.config_change .. " SINCE 10m ago TAKE 1000",
         function(rs)
             for _, r in ipairs(rs) do
-                if r.key == key and r.new_value == new_value then found = r; return true end
+                if r["config.name"] == key and r["config.value"] == new_value then found = r; return true end
             end
             return false
         end, { desc = "a config change of " .. key .. " to " .. new_value })
@@ -83,23 +97,24 @@ end
 
 test("a restart writes shutdown then startup straight into shard 0, and nothing into KMES", {
     spec = "eventd *synthetic.synthetic-events-are-written-straight-to-a-shard-and-never-touch-kmes"
-        .. " eventd *synthetic.starting-and-attaching-to-kmes-emits-synthetic-startup"
-        .. " eventd *synthetic.the-start-of-graceful-shutdown-emits-synthetic-shutdown"
-        .. " eventd *synthetic.a-runtime-configuration-change-emits-synthetic-config-change"
-        .. " eventd *synthetic.a-synthetic-event-has-a-generation-timestamp-and-a-synthetic-prefixed-type",
+        .. " eventd *synthetic.starting-and-attaching-to-kmes-emits-eventd-daemon-started"
+        .. " eventd *synthetic.graceful-shutdown-emits-eventd-daemon-stopped"
+        .. " eventd *synthetic.a-runtime-configuration-change-emits-eventd-config-changed"
+        .. " eventd *synthetic.a-synthetic-event-has-a-timestamp-and-one-of-five-eventd-types"
+        .. " eventd *synthetic.a-daemon-wide-records-timestamp-is-when-eventd-noticed",
 }, function(t)
     local ring = assert(kmes.attach(vm, 0))
     local before = guest_now(vm)
     eventd.restart(vm)
     eventd.set(vm, "LogRetentionDays", "dword:12"):assert_ok()
-    config_change(vm, "LogRetentionDays", "12")
+    config_change(vm, "LogRetentionDays", 12)
     eventd.unset(vm, "LogRetentionDays")
     local after = guest_now(vm)
     local through_kmes = kmes.drain(ring)
     kmes.detach(ring)
 
     for _, e in ipairs(through_kmes) do
-        t:assert(not e.type:find("^synthetic%."), "nothing synthetic passed through KMES: " .. e.type)
+        t:assert(not is_own_type(e.type), "nothing eventd writes itself passed through KMES: " .. e.type)
     end
     t:assert(#through_kmes > 0, "while the watch did see KMES traffic (" .. #through_kmes .. " events)")
 
@@ -113,11 +128,12 @@ test("a restart writes shutdown then startup straight into shard 0, and nothing 
     t:assert(#change >= 1, "the live change wrote a config_change record")
     t:assert(shutdown[1].timestamp < startup[1].timestamp, "shutdown came first")
     for _, r in ipairs(rows) do
-        t:assert(r.type:find("^synthetic%.%w"), "its type carries the synthetic. prefix: " .. r.type)
+        t:assert(is_own_type(r.type) and r.type:find("^eventd%.%w"),
+            "its type is one of eventd's five: " .. r.type)
         t:assert(r.timestamp > before and r.timestamp < after,
             r.type .. " carries a realtime timestamp from when eventd made it")
     end
-    -- The prefix is the only marker: the table has no record-kind column.
+    -- The type is the only marker: the table has no record-kind column.
     local columns = {}
     for _, c in ipairs(eventd.sql(vm, eventd.shards(vm)[1], "SELECT name FROM pragma_table_info('events')")) do
         columns[#columns + 1] = c[1]
@@ -131,7 +147,7 @@ test("synthetic records carry no KMES header and no sequence, and sort among eve
     spec = "eventd *synthetic.synthetic-events-carry-no-kmes-header"
         .. " eventd *synthetic.synthetic-events-are-ordered-by-timestamp-and-take-no-sequence-number",
 }, function(t)
-    for _, r in ipairs(synthetic_rows(vm, "event_type <> 'synthetic.gap'")) do
+    for _, r in ipairs(synthetic_rows(vm, "event_type <> '" .. eventd.T.gap .. "'")) do
         for i = 1, 6 do
             t:assert(r.header[i] == nil,
                 r.type .. " has no identity stamps, sequence, origin class or CPU (column " .. i .. ")")
@@ -144,7 +160,7 @@ test("synthetic records carry no KMES header and no sequence, and sort among eve
     eventd.emit(vm, a, { n = 1 })
     eventd.wait_rows(vm, "EVENTS " .. a .. " SINCE 10m ago", function(rs) return #rs == 1 end)
     eventd.set(vm, "LogRetentionDays", "dword:11"):assert_ok()
-    config_change(vm, "LogRetentionDays", "11")
+    config_change(vm, "LogRetentionDays", 11)
     eventd.emit(vm, b, { n = 1 })
     eventd.wait_rows(vm, "EVENTS " .. b .. " SINCE 10m ago", function(rs) return #rs == 1 end)
     eventd.unset(vm, "LogRetentionDays")
@@ -153,7 +169,7 @@ test("synthetic records carry no KMES header and no sequence, and sort among eve
     for _, r in ipairs(eventd.rows(vm, "EVENTS SINCE 2m ago TAKE 5000")) do
         local ty = r["event.type"]
         if ty == a or ty == b
-            or (ty == eventd.T.config_change and r.new_value == "11") then
+            or (ty == eventd.T.config_change and r["config.value"] == 11) then
             order[#order + 1] = ty == eventd.T.config_change and "change" or
                 (ty == a and "a" or "b")
         end
@@ -195,7 +211,7 @@ test("a storage error about one shard is written to another, writable one", {
 
     local rows = eventd.wait_rows(vm, "EVENTS " .. eventd.T.storage_error .. " SINCE 10m ago",
         function(rs) return #rs >= 1 end)
-    t:assert_eq(rows[1].shard_index, 1, "the error names shard 1")
+    t:assert_eq(rows[1]["store.shard"], 1, "the quarantine record names shard 1")
     local found = of_type(synthetic_rows(vm), eventd.T.storage_error)
     t:assert(#found >= 1, "it is stored")
     for _, r in ipairs(found) do
@@ -203,10 +219,9 @@ test("a storage error about one shard is written to another, writable one", {
     end
 end)
 
-test("access to synthetic records follows the Events\\synthetic descriptor", {
-    spec = "eventd *synthetic.access-to-synthetic-events-is-governed-by-the-synthetic-events-key",
+test("access to eventd's own records follows the Events\\eventd and Events\\eventd.daemon descriptors", {
+    spec = "eventd *synthetic.access-to-synthetic-events-is-governed-by-the-eventd-events-keys",
 }, function(t)
-    local key = eventd.SECURITY .. [[\Events\synthetic]]
     local function visible(event_type)
         return #eventd.rows(vm, "EVENTS " .. event_type .. " SINCE 1h ago TAKE 10")
     end
@@ -214,21 +229,90 @@ test("access to synthetic records follows the Events\\synthetic descriptor", {
     eventd.emit(vm, marker, { n = 1 })
     eventd.wait_rows(vm, "EVENTS " .. marker .. " SINCE 10m ago", function(rs) return #rs == 1 end)
     t:assert(visible(eventd.T.startup) >= 1, "SYSTEM reads startup records under the wildcard default")
+    t:assert(visible(eventd.T.config_change) >= 1, "and config_change records")
 
-    local ok, err = pcall(function()
-        vm:run("reg new '" .. key .. "'"):assert_ok()
-        -- A descriptor whose one ACE grants SYSTEM nothing.
-        vm:run("reg set '" .. key .. "' @ hex:" .. peinit.system_descriptor_hex(0)):assert_ok()
+    --- With a deny-SYSTEM descriptor at `key`, run `body`, then remove it.
+    local function denied_at(key, body)
+        local ok, err = pcall(function()
+            vm:run("reg new '" .. key .. "'"):assert_ok()
+            -- A descriptor whose one ACE grants SYSTEM nothing.
+            vm:run("reg set '" .. key .. "' @ hex:" .. peinit.system_descriptor_hex(0)):assert_ok()
+            body()
+        end)
+        vm:run("reg del '" .. key .. "' @")
+        vm:run("reg del '" .. key .. "'")
+        if not ok then error(err, 0) end
+        wait_until(function() return visible(eventd.T.startup) >= 1 end,
+            { timeout = 30, interval = 0.5, desc = "eventd's records to be readable again" })
+    end
+
+    -- Events\eventd covers all five.
+    denied_at(eventd.SECURITY .. [[\Events\eventd]], function()
         wait_until(function() return visible(eventd.T.startup) == 0 end,
-            { timeout = 30, interval = 0.5, desc = "synthetic records to be withheld" })
-        t:assert_eq(visible(eventd.T.config_change), 0, "every synthetic.* type is withheld")
+            { timeout = 30, interval = 0.5, desc = "eventd's records to be withheld" })
+        t:assert_eq(visible(eventd.T.config_change), 0, "every eventd.* type is withheld")
         t:assert_eq(visible(marker), 1, "while ordinary events stay readable")
     end)
-    vm:run("reg del '" .. key .. "' @")
+    -- Events\eventd.daemon covers only the start and stop records.
+    denied_at(eventd.SECURITY .. [[\Events\eventd.daemon]], function()
+        wait_until(function() return visible(eventd.T.startup) == 0 end,
+            { timeout = 30, interval = 0.5, desc = "start records to be withheld" })
+        t:assert_eq(visible(eventd.T.shutdown), 0, "stop records are withheld too")
+        t:assert(visible(eventd.T.config_change) >= 1, "but config_change records stay readable")
+    end)
+end)
+
+-- PEI-1294: the guard is exactly the five names. A KMES event claiming one
+-- of them is counted and dropped (and receipted, so no gap appears); a
+-- KMES event of any other eventd.* type, or of the retired synthetic.*
+-- family, is stored like any other.
+test("exactly the five eventd types are reserved, not the eventd root or the old synthetic prefix", {
+    spec = "eventd *synthetic.exactly-the-five-types-are-reserved-not-the-eventd-root",
+}, function(t)
+    local m = eventd.marker("reserved")
+    local other = "eventd.test." .. m
+    local retired = "synthetic." .. m
+    local forged = eventd.T.startup
+    local before = #eventd.rows(vm, "EVENTS " .. forged .. " SINCE 1h ago TAKE 1000")
+    for _, ty in ipairs({ forged, other, retired }) do
+        t:assert_eq(eventd.emit(vm, ty, { marker = m }).ret, 0, "emitted " .. ty)
+    end
+    eventd.wait_rows(vm, "EVENTS " .. other .. " SINCE 10m ago", function(rs) return #rs == 1 end,
+        { desc = "another eventd.* type to be stored" })
+    eventd.wait_rows(vm, "EVENTS " .. retired .. " SINCE 10m ago", function(rs) return #rs == 1 end,
+        { desc = "a synthetic.* type to be stored" })
+    local forged_rows = eventd.rows(vm, "EVENTS " .. forged .. " SINCE 1h ago TAKE 1000")
+    t:assert_eq(#forged_rows, before, "the forged " .. forged .. " was not stored")
+    for _, r in ipairs(forged_rows) do
+        t:assert(r.marker == nil, "no stored startup record carries the forged payload")
+    end
+end)
+
+-- All five are essential: eventd consults no emission policy for them,
+-- so switching their types off under Machine\Generic\Events changes
+-- nothing (PGSS §6.9).
+test("eventd's own records are written even with their types switched off", {
+    spec = "eventd *synthetic.all-five-types-are-essential-and-no-emission-policy-applies",
+}, function(t)
+    local key = [[Machine\Generic\Events\eventd]]
+    local before = #eventd.rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 1h ago TAKE 1000")
+    local ok, err = pcall(function()
+        -- The parent may already exist (the platform seed); either is fine.
+        vm:run([[reg new 'Machine\Generic\Events']])
+        vm:run("reg new '" .. key .. "'"):assert_ok()
+        eventd.set(vm, "Enabled", "dword:0", { key = key }):assert_ok()
+        eventd.set(vm, "LogRetentionDays", "dword:13"):assert_ok()
+        config_change(vm, "LogRetentionDays", 13)
+        eventd.restart(vm)
+        eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. " SINCE 1h ago TAKE 1000",
+            function(rs) return #rs > before end)
+    end)
+    eventd.unset(vm, "LogRetentionDays")
+    eventd.unset(vm, "Enabled", { key = key })
     vm:run("reg del '" .. key .. "'")
     if not ok then error(err, 0) end
-    wait_until(function() return visible(eventd.T.startup) >= 1 end,
-        { timeout = 30, interval = 0.5, desc = "synthetic records to be readable again" })
+    local starts = eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 2m ago TAKE 10")
+    t:assert(#starts >= 1, "the restart under the policy wrote its start record")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -293,7 +377,7 @@ end
 
 local function config_changes_in(f, shard)
     return eventd.sql(f, string.format("%s/shard-%04d.db", eventd.STORE.events, shard),
-        "SELECT count(*) FROM events WHERE event_type = 'synthetic.config_change'")[1][1]
+        "SELECT count(*) FROM events WHERE event_type = '" .. eventd.T.config_change .. "'")[1][1]
 end
 
 -- The full-store tests run in order: the metric store full (while shard 0
@@ -304,14 +388,14 @@ end
 -- a write refused for space takes the capacity path, requesting
 -- retention and emitting nothing.
 test("a corrupt metric store is recorded as a storage error; a full one is not", {
-    spec = "eventd *synthetic.a-store-found-corrupt-and-quarantined-emits-synthetic-storage-error"
+    spec = "eventd *synthetic.a-store-found-corrupt-and-quarantined-emits-eventd-store-quarantined"
         .. " eventd *storagefail.a-write-refused-for-want-of-space-emits-no-storage-error",
 }, function(t)
     local f = full_vm()
     local function metric_errors()
         local n = 0
         for _, r in ipairs(eventd.rows(f, "EVENTS " .. eventd.T.storage_error .. " SINCE 1h ago")) do
-            if r.store == "metric" then n = n + 1 end
+            if r["store.kind"] == "metric" then n = n + 1 end
         end
         return n
     end
@@ -320,7 +404,7 @@ test("a corrupt metric store is recorded as a storage error; a full one is not",
     vm:write_file(eventd.DB.metrics, string.rep("this is not a database. ", 400))
     vm:run("rm -f " .. eventd.DB.metrics .. "-wal " .. eventd.DB.metrics .. "-shm"):assert_ok()
     eventd.start(vm)
-    local _, corrupt = eventd.wait_rows(vm, "EVENTS " .. eventd.T.storage_error .. ' WHERE store == "metric" SINCE 1h ago',
+    local _, corrupt = eventd.wait_rows(vm, "EVENTS " .. eventd.T.storage_error .. ' WHERE store.kind == "metric" SINCE 1h ago',
         function(rs) return #rs >= before + 1 end)
     t:assert(corrupt, "the corrupt metric store is recorded as a storage_error naming the metric store")
     local after_corrupt = metric_errors()
@@ -348,7 +432,7 @@ test("a corrupt metric store is recorded as a storage error; a full one is not",
     t:assert_eq(metric_errors(), after_corrupt, "and no storage_error records the writes refused for space")
 end)
 
--- Every daemon-wide record, not only synthetic.shutdown, falls back from a
+-- Every daemon-wide record, not only eventd.daemon.stopped, falls back from a
 -- full shard 0 to the lowest-numbered writable active shard.
 test("with shard 0 full, a configuration change is recorded in shard 1", {
     spec = "eventd *synthetic.daemon-wide-events-go-to-shard-0-else-the-lowest-numbered-writable-active-shard",

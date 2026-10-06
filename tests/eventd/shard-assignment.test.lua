@@ -321,10 +321,10 @@ test("a stripe missing from the middle is re-ingested: receipts, not a high-wate
         tostring(lo) .. ".." .. tostring(hi) .. " < " .. max)
 
     eventd.stop(vm)
-    -- The stop wrote synthetic.shutdown (shard 0) and the metadata
+    -- The stop wrote eventd.daemon.stopped (shard 0) and the metadata
     -- checkpoints, both of which put CPU 0 at or beyond `max`.
     local shutdown = eventd.sql(vm, eventd.shards(vm)[1],
-        "SELECT count(*) FROM events WHERE event_type = 'synthetic.shutdown'")[1][1]
+        "SELECT count(*) FROM events WHERE event_type = '" .. eventd.T.shutdown .. "'")[1][1]
     t:assert(shutdown >= 1, "a shutdown record is in shard 0")
     vm:run("rm -f /var/state/eventd/events/shard-0002.db /var/state/eventd/events/shard-0002.db-wal " ..
         "/var/state/eventd/events/shard-0002.db-shm"):assert_ok()

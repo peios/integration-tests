@@ -89,8 +89,8 @@ local function apply_cap(n)
     if cap_now == n then return end
     local since = eventd.guest_ns(vm)
     eventd.set(vm, "AdaptiveRollupMaxRows", "dword:" .. n):assert_ok()
-    eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. ' WHERE key == "AdaptiveRollupMaxRows"'
-        .. ' AND new_value == "' .. n .. '" SINCE 10m ago', function(rs)
+    eventd.wait_rows(vm, "EVENTS " .. eventd.T.config_change .. ' WHERE config.name == "AdaptiveRollupMaxRows"'
+        .. ' AND config.value == ' .. n .. ' SINCE 10m ago', function(rs)
             for _, r in ipairs(rs) do if r["event.time"] >= since then return true end end
             return false
         end)

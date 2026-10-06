@@ -109,10 +109,10 @@ test("a restart re-ingests uncovered survivors and records a gap only for what n
     local lowest = math.huge
     for _, r in ipairs(kept) do
         local seq = r["event.sequence"]
-        t:assert(seq > gap.last_sequence, "no stored survivor falls inside the gap")
+        t:assert(seq > gap["loss.sequence-last"], "no stored survivor falls inside the gap")
         lowest = math.min(lowest, seq)
     end
-    t:assert_eq(lowest, gap.last_sequence + 1, "the gap ends where the oldest survivor begins")
+    t:assert_eq(lowest, gap["loss.sequence-last"] + 1, "the gap ends where the oldest survivor begins")
 end)
 
 test("logs and metrics waiting in the receive queues are lost in a crash", {
@@ -151,7 +151,7 @@ test("after a crash peinit restarts eventd and it carries on with nothing done b
     t:assert(s, "it wrote a startup record")
     -- The crash wrote nothing on its way out; the start knew it was a
     -- restart from what the store already held for this boot.
-    t:assert_eq(s and s.restart, true, "and recognised itself as a restart within the boot")
+    t:assert_eq(s and s["store.restarted"], true, "and recognised itself as a restart within the boot")
     t:assert_eq(latest(eventd.T.shutdown, since), nil, "though no shutdown record announced it")
 end)
 
@@ -196,10 +196,11 @@ test("SIGQUIT writes a diagnostic dump to stderr, taken before the shutdown star
         -- are made again each try: a log record whose origin is outside
         -- the grammar, a metric datagram with no identity, one whose
         -- publish descriptor grants nobody anything, a type conflict, and
-        -- a KMES event typed in eventd's reserved namespace (the event
-        -- after it, once stored, shows the writer has been past it).
+        -- a KMES event claiming one of the five types eventd writes itself
+        -- (the event after it, once stored, shows the writer has been past
+        -- it).
         local reserved = eventd.marker("rsv")
-        eventd.emit(vm, "synthetic.pt" .. reserved, { tag = reserved })
+        eventd.emit(vm, eventd.T.startup, { tag = reserved })
         eventd.emit(vm, "pt.crash.after." .. reserved, { tag = reserved })
         eventd.wait_rows(vm, "EVENTS pt.crash.after." .. reserved .. " SINCE 10m ago",
             function(r) return #r == 1 end)
@@ -276,7 +277,7 @@ test("the dump gives the series cache occupancy", {
         "metric_series_cache holds the series used: " .. tostring(dump.metric_series_cache))
 end)
 
-test("the dump counts KMES events discarded for a type in the reserved synthetic namespace", {
+test("the dump counts KMES events discarded for claiming a type eventd writes itself", {
     spec = "eventd *crash.the-dump-includes-kmes-events-discarded-for-a-reserved-type",
 }, function(t)
     need_dump(t)

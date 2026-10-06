@@ -190,7 +190,8 @@ test("a type mismatch is dropped, emits no event, and never changes the type", {
     t:assert_eq(#samples, 2, "only the two gauge samples are stored, not the counter")
     -- No event names this metric: a mismatch raises nothing on the event
     -- path. The only event eventd ever raises for a metric-store problem is a
-    -- storage_error, and only on corruption; none should mention this name.
+    -- eventd.store.quarantined, and only on corruption; none should mention
+    -- this name.
     local ev = eventd.rows(vm, "EVENTS " .. eventd.T.storage_error .. " SINCE 10m ago")
     local hit = false
     for _, r in ipairs(ev) do

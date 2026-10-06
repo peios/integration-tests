@@ -1,7 +1,9 @@
 -- eventd TRM §7.2 — patterns and descriptors: the three namespaces,
 -- dot-delimited prefix matching, the walk from an identifier to `*`, where
--- descriptors are stored, the defaults eventd provisions, conditional
--- ACEs, and the administrative descriptor that governs INDEX.
+-- descriptors are stored and who may change them, the defaults eventd
+-- provisions (each with a failure-audit SACL for Everyone, PEI-1279), the
+-- upgrade of a former default, conditional ACEs, and the administrative
+-- descriptor that governs INDEX.
 --
 -- One file-scope eventd serves every test. Most tests write descriptors
 -- only for their own marker-named identifiers. The ones that must change
@@ -437,16 +439,52 @@ test("a service may publish nothing until a more specific pattern grants its ser
     drop("Metrics", name)
 end)
 
-test("the old read-only Metrics wildcard is upgraded only when it matches byte for byte", {
-    spec = "eventd *pattern.the-old-metrics-wildcard-is-replaced-only-on-an-exact-binary-match"
+--- `bytes` (a self-relative descriptor laid out owner, group, SACL, DACL,
+--- as libpeios writes one) without its SACL: what the same SDDL minus its
+--- `S:` part parses to.
+local function strip_sacl(bytes)
+    local rev, sbz, control, owner_off, group_off, sacl_off, dacl_off =
+        string.unpack("<I1I1I2I4I4I4I4", bytes)
+    if sacl_off == 0 then return bytes end
+    assert(dacl_off > sacl_off, "the SACL sits before the DACL")
+    return string.pack("<I1I1I2I4I4I4I4", rev, sbz, control & ~access.CONTROL.SACL_PRESENT,
+        owner_off, group_off, 0, sacl_off) .. bytes:sub(21, sacl_off) .. bytes:sub(dacl_off + 1)
+end
+
+-- PEI-1279 item 5: (AU;FA;0xd;;;WD) on every default, so a denial under
+-- one is audited whoever asked, and nothing else in the SACL.
+test("every default descriptor audits every failed access, by anyone, at every eventd right", {
+    spec = "eventd *pattern.every-default-descriptor-audits-every-failed-access-by-everyone",
+}, function(t)
+    for _, d in ipairs(DEFAULTS) do
+        local where = eventd.key_of(d[1], d[2])
+        local h = get_hex(d[1], d[2])
+        t:assert(h, where .. " exists")
+        local sd = h and access.parse_sd(eventd.unhex(h))
+        local aces = sd and sd.sacl and sd.sacl.aces or {}
+        t:assert_eq(#aces, 1, where .. " has a SACL of exactly one ACE")
+        local ace = aces[1] or {}
+        t:assert_eq(ace.type, access.ACE.AUDIT, where .. ": a SYSTEM_AUDIT ACE")
+        t:assert_eq(ace.flags, access.ACE_FLAG.FAILED_ACCESS, where .. ": for failure only")
+        t:assert_eq(ace.mask, READ | ADMINISTER | PUBLISH, where .. ": at every eventd right")
+        t:assert(ace.sid == EVERYONE, where .. ": for Everyone")
+    end
+end)
+
+test("a former default is upgraded only when it matches byte for byte", {
+    spec = "eventd *pattern.a-former-default-is-replaced-only-on-an-exact-binary-match"
         .. " eventd *pattern.an-administrator-changed-descriptor-is-never-rewritten",
 }, function(t)
     local metrics_now = assert(get_hex("Metrics", "*"))
     local events_now = assert(get_hex("Events", "*"))
-    -- The former compiled default differs from today's only in its masks:
-    -- read (0x1) where SYSTEM and Administrators now hold read|publish
-    -- (0x9). Patch exactly those two masks in today's bytes.
-    local bytes = eventd.unhex(metrics_now)
+    local logs_now = assert(get_hex("Logs", "*"))
+    -- The defaults before PEI-1279 item 5 were today's without the SACL.
+    local logs_former = eventd.hex(strip_sacl(eventd.unhex(logs_now)))
+    t:assert(logs_former ~= logs_now, "today's Logs\\* differs from its former default")
+    -- The Metrics wildcard's older default also differs in its masks: read
+    -- (0x1) where SYSTEM and Administrators now hold read|publish (0x9).
+    -- Patch exactly those two masks in the SACL-less bytes.
+    local bytes = strip_sacl(eventd.unhex(metrics_now))
     local sd = access.parse_sd(bytes)
     t:assert_eq(#sd.dacl.aces, 3, "today's Metrics\\* has three ACEs")
     local legacy, edits = bytes, 0
@@ -472,12 +510,15 @@ test("the old read-only Metrics wildcard is upgraded only when it matches byte f
 
     finally(function()
         put_hex("Metrics", "*", eventd.hex(legacy))
+        put_hex("Logs", "*", logs_former)
         put_hex("Events", "*", custom_events)
         eventd.restart(vm)
         t:assert_eq(get_hex("Metrics", "*"), metrics_now,
-            "the exact former default is replaced by today's")
+            "the Metrics wildcard's older read-only default is replaced by today's")
+        t:assert_eq(get_hex("Logs", "*"), logs_now,
+            "a default without its SACL is replaced by today's, SACL and all")
         t:assert_eq(get_hex("Events", "*"), custom_events,
-            "an administrator's Events\\* is left as written")
+            "an administrator's Events\\* is left as written, though it has no SACL")
 
         -- One ACE more than the former default: not a byte-exact match.
         local near = eventd.unhex(eventd.hex(legacy))
@@ -493,8 +534,92 @@ test("the old read-only Metrics wildcard is upgraded only when it matches byte f
             "a changed read-only wildcard is never treated as the default")
     end, function()
         put_hex("Metrics", "*", metrics_now)
+        put_hex("Logs", "*", logs_now)
         put_hex("Events", "*", events_now)
     end)
+end)
+
+--- The ACEs of `reg sd --dacl` output as a sorted "flags;rights;sid" list,
+--- with the protected flag; flags letter-sorted so "CIOI" and "OICI" agree.
+local function dacl_of(key)
+    local r = vm:run("reg sd '" .. key .. "' --dacl")
+    if r.exit_code ~= 0 then return nil, r.stderr end
+    local text = r.stdout:gsub("%s", "")
+    local aces = {}
+    for ty, flags, rights, sid in text:gmatch("%((%a+);([^;]*);([^;]*);[^;]*;[^;]*;([^)]*)%)") do
+        local f = {}
+        for i = 1, #flags, 2 do f[#f + 1] = flags:sub(i, i + 1) end
+        table.sort(f)
+        aces[#aces + 1] = ty .. ";" .. table.concat(f) .. ";" .. rights .. ";" .. sid
+    end
+    table.sort(aces)
+    return { protected = text:find("D:P", 1, true) ~= nil, aces = aces, text = text }
+end
+
+--- A key-rights field as `reg sd` may print it, normalised to its code.
+local function key_right(r)
+    local codes = { ["0xf003f"] = "KA", ["0x20019"] = "KR" }
+    return codes[r:lower()] or r
+end
+
+test("the security root gets a protected DACL while its own is wholly inherited, and keeps a chosen one", {
+    spec = "eventd *pattern.the-security-root-gets-a-protected-dacl-while-its-dacl-is-wholly-inherited",
+}, function(t)
+    -- The image's Security key was created by prepare-security, inheriting
+    -- from Machine\System\eventd, so eventd has restricted it.
+    local d, err = dacl_of(eventd.SECURITY)
+    t:assert(d, "reg sd reads the Security key: " .. tostring(err))
+    t:assert(d and d.protected, "its DACL is protected: " .. tostring(d and d.text))
+    local got = {}
+    for _, a in ipairs(d and d.aces or {}) do
+        local ty, flags, rights, sid = a:match("^([^;]*);([^;]*);([^;]*);(.*)$")
+        got[#got + 1] = ty .. ";" .. flags .. ";" .. key_right(rights) .. ";" .. sid
+    end
+    table.sort(got)
+    t:assert_eq(table.concat(got, " "), "A;CIOI;KA;BA A;CIOI;KA;SY A;CIOI;KR;AU",
+        "SYSTEM and Administrators full control, Authenticated Users read, all inheritable")
+
+    -- A DACL somebody chose is never replaced: one more read grant.
+    local saved = d and d.text
+    local chosen = "D:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;KR;;;AU)(A;OICI;KR;;;"
+        .. token.sid_string(GROUP) .. ")"
+    finally(function()
+        vm:run("reg sd '" .. eventd.SECURITY .. "' --dacl --set '" .. chosen .. "'"):assert_ok()
+        eventd.restart(vm)
+        local after = dacl_of(eventd.SECURITY)
+        t:assert_eq(after and #after.aces, 4, "prepare-security left the chosen DACL as it was: "
+            .. tostring(after and after.text))
+    end, function()
+        if saved then vm:run("reg sd '" .. eventd.SECURITY .. "' --dacl --set '" .. saved .. "'") end
+    end)
+end)
+
+-- The caveat of §7.2: the SACL travels inside the value, so the right to
+-- set the value is the right to drop it. An Administrator's token without
+-- SeSecurityPrivilege does exactly that.
+test("whoever may write a descriptor value may also drop its SACL, with no SeSecurityPrivilege", {
+    spec = "eventd *pattern.whoever-may-write-a-descriptor-value-may-also-drop-its-sacl",
+}, function(t)
+    local p = eventd.marker("ptsacldrop")
+    put("Events", p, descriptor({ allow(READ, SY) }, {
+        sacl = access.acl({ access.ace(access.ACE.AUDIT, READ, EVERYONE, access.ACE_FLAG.FAILED_ACCESS) }) }))
+    local before = access.parse_sd(eventd.unhex(assert(get_hex("Events", p))))
+    t:assert(before.sacl and #before.sacl.aces == 1, "the pattern starts with a SACL")
+    local bare = eventd.hex(descriptor({ allow(READ, SY) }))
+    local written
+    token.as_principal(t, vm, {
+        user_sid = token.SID.TEST_USER,
+        groups = groups_of({ EVERYONE, AU, BA }),
+        integrity_level = token.INTEGRITY.HIGH,
+        privs_present = NOTIFY, privs_enabled = NOTIFY,
+    }, function(w)
+        written = w:run("/bin/reg", { args = { "set", "-p", eventd.key_of("Events", p), "@", "hex:" .. bare } })
+    end)
+    t:assert_eq(written and written.exit_code, 0, "an Administrator without SeSecurityPrivilege may set the value: "
+        .. tostring(written and written.stderr))
+    local after = access.parse_sd(eventd.unhex(assert(get_hex("Events", p))))
+    t:assert(not after.sacl, "and the descriptor now has no SACL at all")
+    drop("Events", p)
 end)
 
 -- ---------------------------------------------------------------------------

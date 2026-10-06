@@ -572,7 +572,7 @@ test("rejected metric input leaves no event and no log record behind", {
         return #eventd.rows(vm, "LOGS FROM eventd SINCE 1h ago TAKE 100000")
     end
     local function eventd_events()
-        return #eventd.rows(vm, 'EVENTS synthetic.* SINCE 1h ago TAKE 100000')
+        return #eventd.rows(vm, 'EVENTS eventd.* SINCE 1h ago TAKE 100000')
     end
     local logs, events = eventd_logs(), eventd_events()
     local name = eventd.marker("ptreject")

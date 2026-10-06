@@ -35,9 +35,14 @@ local function startups()
     return rows
 end
 
+--- Where a startup record says `cpu` resumed: the entry of
+--- `store.resume.sequences` parallel to `cpu` in `store.resume.cpus`.
 local function resume_of(startup, cpu)
-    for _, p in ipairs(startup and startup.resume_points or {}) do
-        if p.cpu_id == cpu then return p.sequence end
+    local cpus = startup and startup["store.resume.cpus"]
+    local seqs = startup and startup["store.resume.sequences"]
+    if type(cpus) ~= "table" or type(seqs) ~= "table" then return nil end
+    for i, c in ipairs(cpus) do
+        if c == cpu then return seqs[i] end
     end
 end
 
@@ -174,7 +179,7 @@ test("the boot's first eventd start covers from before sequence 1 and says resta
     local s = startups()
     local first = s[1]
     t:assert(first, "a startup record exists")
-    t:assert_eq(first.restart, false, "the boot's first start carries restart false")
+    t:assert_eq(first["store.restarted"], false, "the boot's first start carries store.restarted false")
     t:assert_eq(first["event.boot.guid"]:lower(), "{" .. kernel_boot_id():lower() .. "}", "under the new boot ID")
     local boot = eventd.boot_pcds_hex(vm)
     local low = eventd.sql(vm, eventd.shards(vm)[1],
@@ -191,7 +196,7 @@ test("a restart in the same boot keeps the boot ID, merges coverage and says res
     eventd.restart(vm)
     local s = startups()
     local last = s[#s]
-    t:assert_eq(last.restart, true, "restart true")
+    t:assert_eq(last["store.restarted"], true, "store.restarted true")
     t:assert_eq(last["event.boot.guid"]:lower(), "{" .. kernel_boot_id():lower() .. "}", "the same boot ID")
     local resume = resume_of(last, 0)
     t:assert(resume and resume >= before,
@@ -207,7 +212,8 @@ test("neither the sequence checkpoints nor the last shutdown payload steer recov
     local covered = covered_through(boot)
     eventd.edit_store(vm, eventd.DB.meta,
         "UPDATE sequence_checkpoints SET sequence = 999999999 WHERE hex(boot_id) = '" .. boot .. "';")
-    local lie = eventd.msgpack({ last_sequences = { { cpu_id = 0, sequence = 999999999 } } })
+    local lie = eventd.msgpack({ store = { committed = {
+        cpus = eventd.array({ 0 }), sequences = eventd.array({ 999999999 }) } } })
     local hex = eventd.hex(lie, true)
     for _, shard in ipairs(eventd.shards(vm)) do
         eventd.edit_store(vm, shard, "UPDATE events SET payload = X'" .. hex .. "' WHERE event_type = '"
@@ -237,7 +243,7 @@ test("committed receipt ranges, not stored rows, decide where ingestion resumes"
     eventd.start(vm)
     local last = startups()
     last = last[#last]
-    t:assert_eq(last.restart, true, "the receipts alone made it a restart")
+    t:assert_eq(last["store.restarted"], true, "the receipts alone made it a restart")
     t:assert(resume_of(last, 0) >= covered, "resume point from the receipts: " .. tostring(resume_of(last, 0)))
     vm:clock():sleep("2s")
     local again = 0
@@ -260,7 +266,7 @@ test("committed event rows alone show that eventd ran before in this boot", {
     eventd.start(vm)
     local last = startups()
     last = last[#last]
-    t:assert_eq(last.restart, true, "with no receipt at all, the rows made it a restart")
+    t:assert_eq(last["store.restarted"], true, "with no receipt at all, the rows made it a restart")
 end)
 
 test("first start and restart are told apart by the stored data, not a persisted flag", {
@@ -277,7 +283,7 @@ test("first start and restart are told apart by the stored data, not a persisted
     eventd.start(vm)
     local s = startups()
     t:assert_eq(#s, 1, "the fresh shard holds only the new startup record")
-    t:assert_eq(s[1].restart, false, "and it reports a first start")
+    t:assert_eq(s[1]["store.restarted"], false, "and it reports a first start")
 end)
 
 test("startup looks for the current boot in historical shards too", {
@@ -308,6 +314,6 @@ test("startup looks for the current boot in historical shards too", {
     eventd.start(vm)
     local s = startups()
     table.sort(s, function(a, b) return a["event.time"] < b["event.time"] end)
-    t:assert_eq(s[#s].restart, true,
+    t:assert_eq(s[#s]["store.restarted"], true,
         "the evidence in the historical shard made it a restart")
 end)

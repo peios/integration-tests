@@ -50,16 +50,18 @@ test("an overrun is seen as a sequence gap on the CPU that overran", {
 end)
 
 test("the gap record names the missing range", {
-    spec = "eventd *lostevents.an-overrun-writes-a-synthetic-gap-naming-the-missing-range",
+    spec = "eventd *lostevents.an-overrun-writes-an-eventd-events-lost-record-naming-the-missing-range",
 }, function(t)
     local g = overrun.gap
     t:assert(g, "the gap from the previous test")
-    t:assert(g.first_sequence and g.last_sequence and g.last_sequence >= g.first_sequence,
+    t:assert_eq(g["event.type"], eventd.T.gap, "the record is an eventd.events.lost")
+    local first, last = g["loss.sequence"], g["loss.sequence-last"]
+    t:assert(first and last and last >= first,
         "a first and last sequence: " .. json.encode(g))
-    t:assert_eq(g.count, g.last_sequence - g.first_sequence + 1, "and the count they span")
+    t:assert_eq(g["loss.count"], last - first + 1, "and the count they span")
     -- None of the range is stored: those sequences are gone.
-    local inside = eventd.rows(vm, "EVENTS WHERE event.cpu == 0 AND event.sequence >= " .. g.first_sequence
-        .. " AND event.sequence <= " .. g.last_sequence .. " SINCE 10m ago")
+    local inside = eventd.rows(vm, "EVENTS WHERE event.cpu == 0 AND event.sequence >= " .. first
+        .. " AND event.sequence <= " .. last .. " SINCE 10m ago")
     local real = 0
     for _, r in ipairs(inside) do if r["event.type"] ~= eventd.T.gap then real = real + 1 end end
     t:assert_eq(real, 0, "no event in the named range was stored")
@@ -77,7 +79,7 @@ test("after an overrun draining resumes from the oldest survivor", {
         lowest = math.min(lowest, r["event.sequence"])
         highest_i = math.max(highest_i, r.i)
     end
-    t:assert_eq(lowest, g.last_sequence + 1, "the first stored after the gap is the next sequence")
+    t:assert_eq(lowest, g["loss.sequence-last"] + 1, "the first stored after the gap is the next sequence")
     t:assert_eq(highest_i, 120, "and everything from there to the end of the burst was read")
     local tag = eventd.marker("after")
     eventd.emit(vm, "pt.after", { tag = tag })

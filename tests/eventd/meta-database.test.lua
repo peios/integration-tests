@@ -273,8 +273,9 @@ test("graceful shutdown writes each CPU's last committed sequence to sequence_ch
     local last = shutdowns[#shutdowns]
     t:assert(last, "the stop recorded a shutdown event")
     local seq
-    for _, p in ipairs(last and last.last_sequences or {}) do
-        if p.cpu_id == 0 then seq = p.sequence end
+    local cpus = last and last["store.committed.cpus"] or {}
+    for i, cpu in ipairs(cpus) do
+        if cpu == 0 then seq = last["store.committed.sequences"][i] end
     end
     t:assert_eq(row[3], seq,
         "the checkpoint is the last committed sequence the shutdown event also reports")
@@ -295,10 +296,10 @@ test("startup recovery ignores a sequence checkpoint that disagrees with the rec
     eventd.start(vm)
     local s = startups()
     local last = s[#s]
-    t:assert_eq(last.restart, true, "the start was a restart")
+    t:assert_eq(last["store.restarted"], true, "the start was a restart")
     local resume
-    for _, p in ipairs(last.resume_points or {}) do
-        if p.cpu_id == 0 then resume = p.sequence end
+    for i, cpu in ipairs(last["store.resume.cpus"] or {}) do
+        if cpu == 0 then resume = last["store.resume.sequences"][i] end
     end
     t:assert(resume and resume < 999999999,
         "the resume point comes from receipt coverage, not the checkpoint: " .. tostring(resume))

@@ -123,7 +123,7 @@ test("a query sees an event a batch commit interval after KMES delivered it", {
     spec = "eventd *overview.eventd-costs-a-batch-commit-interval-of-latency-over-kmes",
 }, function(t)
     eventd.set(vm, "MaxBatchLatencyMs", "dword:4000"):assert_ok()
-    eventd.wait_rows(vm, "EVENTS " .. CC .. ' WHERE key == "MaxBatchLatencyMs" AND new_value == "4000" SINCE 1h ago',
+    eventd.wait_rows(vm, "EVENTS " .. CC .. ' WHERE config.name == "MaxBatchLatencyMs" AND config.value == 4000 SINCE 1h ago',
         function(rs) return #rs >= 1 end)
     -- A KMES consumer of the test's own has the event at once.
     local ring = assert(kmes.attach(vm, 0))

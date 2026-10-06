@@ -4,7 +4,8 @@
 --
 -- One file-scope VM, the image's own eventd, driven live through the
 -- registry. eventd records every change it actually applies as a
--- `synthetic.config_change` event naming the key, and records nothing for
+-- `eventd.config.changed` event naming the key in `config.name`, its new
+-- integer in `config.value` (TRM §3.2), and records nothing for
 -- a change it ignores (config.rs `apply_reload`), so the event is the
 -- witness for every claim here:
 --
@@ -43,7 +44,7 @@ local function q(s) return '"' .. s .. '"' end
 
 --- Every config_change record naming `key`, newest first.
 local function changes(key)
-    return eventd.rows(vm, "EVENTS " .. CC .. " WHERE key == " .. q(key) .. " SINCE 1h ago")
+    return eventd.rows(vm, "EVENTS " .. CC .. " WHERE config.name == " .. q(key) .. " SINCE 1h ago")
 end
 
 local barrier_seq = 0
@@ -56,8 +57,8 @@ local function barrier(key)
         barrier_seq = barrier_seq + 1
         local v = (bkey == BARRIER) and (100000 + barrier_seq) or (100000 + barrier_seq)
         eventd.set(vm, bkey, "dword:" .. v):assert_ok()
-        eventd.wait_rows(vm, "EVENTS " .. CC .. " WHERE key == " .. q(bkey) ..
-            " AND new_value == " .. q(tostring(v)) .. " SINCE 1h ago",
+        eventd.wait_rows(vm, "EVENTS " .. CC .. " WHERE config.name == " .. q(bkey) ..
+            " AND config.value == " .. v .. " SINCE 1h ago",
             function(rs) return #rs >= 1 end, { desc = "barrier " .. bkey .. "=" .. v })
     end
 end
@@ -75,8 +76,9 @@ end
 --- Set `key` to `value` and wait for the change eventd records for it.
 local function applied(t, key, value, rendered, why)
     eventd.set(vm, key, value):assert_ok()
-    local rows, ok = eventd.wait_rows(vm, "EVENTS " .. CC .. " WHERE key == " .. q(key) ..
-        " AND new_value == " .. q(rendered) .. " SINCE 1h ago",
+    -- `rendered` is the integer eventd records, compared as a number.
+    local rows, ok = eventd.wait_rows(vm, "EVENTS " .. CC .. " WHERE config.name == " .. q(key) ..
+        " AND config.value == " .. rendered .. " SINCE 1h ago",
         function(rs) return #rs >= 1 end, { timeout = 10, desc = key .. "=" .. rendered })
     t:assert(ok and #rows >= 1, why .. " — " .. key .. "=" .. value ..
         " was recorded as applied")
@@ -183,7 +185,8 @@ test("eventd reads its configuration from Machine\\System\\eventd and nowhere ne
     eventd.unset(vm, "MaxBatchSize", { key = svc })
     local row = applied(t, "MaxBatchSize", "dword:20000", "20000",
         "the same value directly under Machine\\System\\eventd")
-    t:assert_eq(row and row.old_value_type, "absent", "and it changed from absent: " .. json.encode(row))
+    t:assert(row and row["config.type-previous"] == nil and row["config.value-previous"] == nil,
+        "and it changed from no stored value, so neither previous field is there: " .. json.encode(row))
     reset("MaxBatchSize")
 end)
 
@@ -197,7 +200,8 @@ test("a value eventd does not know is ignored, live and at boot", {
     barrier(name)
     local all = eventd.rows(vm, "EVENTS " .. CC .. " SINCE 1h ago")
     for _, r in ipairs(all) do
-        t:assert(not tostring(r.key):find("PtUnknown", 1, true), "no change names the unknown key: " .. json.encode(r))
+        t:assert(not tostring(r["config.name"]):find("PtUnknown", 1, true),
+            "no change names the unknown key: " .. json.encode(r))
     end
     -- the barrier is the only new change
     t:assert_eq(#all, before + 1, "only the barrier's change was recorded")
@@ -233,8 +237,8 @@ test("every tuning key is applied by the running eventd, without a restart", {
     for key, v in pairs(TUNING) do eventd.set(vm, key, "dword:" .. v):assert_ok() end
     local missing = {}
     for key, v in pairs(TUNING) do
-        local _, ok = eventd.wait_rows(vm, "EVENTS " .. CC .. " WHERE key == " .. q(key) ..
-            " AND new_value == " .. q(tostring(v)) .. " SINCE 1h ago",
+        local _, ok = eventd.wait_rows(vm, "EVENTS " .. CC .. " WHERE config.name == " .. q(key) ..
+            " AND config.value == " .. v .. " SINCE 1h ago",
             function(rs) return #rs >= 1 end, { timeout = 5, desc = key })
         if not ok then missing[#missing + 1] = key end
     end

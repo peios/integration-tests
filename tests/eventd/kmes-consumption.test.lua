@@ -154,7 +154,7 @@ test("eventd attaches every CPU's ring at startup and drains each with its own t
 
     local startup = eventd.rows(vm, "EVENTS " .. eventd.T.startup .. " SINCE 1h ago TAKE 1")[1]
     local cpus = {}
-    for _, rp in ipairs(startup.resume_points) do cpus[#cpus + 1] = rp.cpu_id end
+    for _, cpu in ipairs(startup["store.resume.cpus"]) do cpus[#cpus + 1] = cpu end
     table.sort(cpus)
     t:assert_eq(json.encode(cpus), "[0,1]", "the startup record names both CPUs")
 
@@ -386,27 +386,28 @@ test("each CPU keeps its own last sequence: a loss on one CPU is a gap on that C
     local g
     wait_until(function()
         for _, x in ipairs(gaps_on(1)) do
-            if x.first_sequence > last.sequence then g = x end
+            if x["loss.sequence"] > last.sequence then g = x end
         end
         return g ~= nil
     end, { timeout = 30, interval = 0.5, desc = "a gap on CPU 1" })
+    t:assert_eq(g["buffer.cpu"], 1, "the record names CPU 1's ring as buffer.cpu")
     -- The last sequence CPU 1's thread saw is CPU 1's, whatever CPU 0 did.
     local seen = {}
     for _, shard in ipairs(eventd.shards(vm)) do
         for _, r in ipairs(eventd.sql(vm, shard, string.format(
-            "SELECT max(sequence) FROM events WHERE cpu_id = 1 AND sequence < %d", g.first_sequence))) do
+            "SELECT max(sequence) FROM events WHERE cpu_id = 1 AND sequence < %d", g["loss.sequence"]))) do
             if r[1] then seen[#seen + 1] = r[1] end
         end
     end
     table.sort(seen)
-    t:assert_eq(g.first_sequence, seen[#seen] + 1,
+    t:assert_eq(g["loss.sequence"], seen[#seen] + 1,
         "the gap starts right after the last CPU-1 sequence eventd stored")
     t:assert_eq(#gaps_on(0), gaps0, "and CPU 0 recorded no gap")
 
     local in_shard
     for _, shard in ipairs(eventd.shards(vm)) do
         local r = eventd.sql(vm, shard, string.format(
-            "SELECT count(*) FROM events WHERE event_type = 'synthetic.gap' AND cpu_id = 1 " ..
+            "SELECT count(*) FROM events WHERE event_type = '" .. eventd.T.gap .. "' AND cpu_id = 1 " ..
             "AND timestamp = %d", g["event.time"]))
         if r[1][1] > 0 then in_shard = shard end
     end
@@ -470,17 +471,18 @@ test("events a shrink discards before eventd reads them are recorded as an ordin
     local g
     wait_until(function()
         for _, x in ipairs(gaps_on(0)) do
-            if x.first_sequence > last.sequence then g = x end
+            if x["loss.sequence"] > last.sequence then g = x end
         end
         return g ~= nil
     end, { timeout = 30, interval = 0.5, desc = "a gap after the shrink" })
     local rows = stored(flood)
+    local first, last_lost = g["loss.sequence"], g["loss.sequence-last"]
     t:assert(#rows > 0 and #rows < 1500, "only the newest survivors were stored: " .. #rows)
-    t:assert_eq(g.last_sequence + 1, rows[1].sequence,
+    t:assert_eq(last_lost + 1, rows[1].sequence,
         "the gap ends at the oldest event the shrink kept")
-    t:assert(g.first_sequence <= rows[1].sequence - (1500 - #rows),
+    t:assert(first <= rows[1].sequence - (1500 - #rows),
         "and covers every flood event the shrink discarded")
-    t:assert_eq(g.count, g.last_sequence - g.first_sequence + 1, "as an ordinary gap record")
+    t:assert_eq(g["loss.count"], last_lost - first + 1, "as an ordinary gap record")
 end)
 
 -- ---------------------------------------------------------------------------
