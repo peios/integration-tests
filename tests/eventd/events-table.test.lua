@@ -215,9 +215,11 @@ test("origin_class is the header's origin, 0 for a userspace emitter, and null f
     t:assert_eq(stored_row(vm, "pt.ev.origin", r["event.sequence"]).origin_class, 0, "kmes_emit from userspace is class 0")
     local classes = eventd.sql(vm, SHARD0,
         "SELECT DISTINCT origin_class FROM events WHERE event_type NOT IN " .. OWN)
+    -- The header's value, stored as it came: the kernel ABI's five
+    -- assigned classes, 4 being NTFE (ntfe.policy.published at boot).
     for _, c in ipairs(classes) do
-        t:assert(c[1] == 0 or c[1] == 1 or c[1] == 2 or c[1] == 3,
-            "every real row is one of the four classes: " .. json.encode(classes))
+        t:assert(math.type(c[1]) == "integer" and c[1] >= 0 and c[1] <= 4,
+            "every real row is one of the five assigned classes: " .. json.encode(classes))
     end
     t:assert_eq(synthetic_row(vm, eventd.T.startup).origin_class, "null", "a synthetic record has none")
 end)
@@ -800,7 +802,7 @@ test("retention removes a type its deletes orphaned, once rechecked, and never a
         local since = eventd.guest_ns(craft)
         eventd.set(craft, key, "dword:" .. value):assert_ok()
         eventd.wait_rows(craft, "EVENTS " .. eventd.T.config_change
-            .. ' WHERE key == "' .. key .. '" AND new_value == "' .. value .. '" SINCE 10m ago', function(rs)
+            .. ' WHERE config.name == "' .. key .. '" AND config.value == ' .. value .. ' SINCE 10m ago', function(rs)
                 for _, r in ipairs(rs) do if r["event.time"] >= since then return true end end
                 return false
             end)
