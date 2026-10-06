@@ -18,7 +18,8 @@
 -- the name the catalogue and the event viewer give it. Values are revstrm's
 -- text with a string's quotes taken off: revstrm formats each value by the
 -- type the installed catalogue declares (`/usr/share/evman`), so a
--- `bin.guid` is GUID text, a `bin.sid` SDDL, a `uint.time` RFC 3339, a
+-- `bin.guid` is GUID text, a `bin.sid` SDDL (after its name, when it has
+-- one: read it with `sid`), a `uint.time` RFC 3339, a
 -- `uint.duration` `N ns (…)`, an `int.errno` `-N (text)`, a `uint.flags` the
 -- flag names, and a scalar array `[a, b]`.
 
@@ -165,12 +166,17 @@ function M.guid(value)
     return (value:lower():gsub("^{", ""):gsub("}$", ""))
 end
 
---- A SID's SDDL text, from revstrm's text (already SDDL) or an eventd
---- row's value: evctl's jsonl writes a `bin.sid` as `{"$binary": "<hex>"}`
---- of the binary SID (revision, sub-authority count, a 48-bit big-endian
---- authority, then 32-bit little-endian sub-authorities).
+--- A SID's SDDL text, from revstrm's text or an eventd row's value.
+--- revstrm prints a SID it can name as the name with the SDDL in
+--- parentheses, `Local System (S-1-5-18)`, and any other as bare SDDL;
+--- either reads back as the SDDL. evctl's jsonl writes a `bin.sid` as
+--- `{"$binary": "<hex>"}` of the binary SID (revision, sub-authority
+--- count, a 48-bit big-endian authority, then 32-bit little-endian
+--- sub-authorities).
 function M.sid(value)
-    if type(value) == "string" then return value end
+    if type(value) == "string" then
+        return value:match("%((S%-[%d%-]+)%)$") or value
+    end
     if type(value) ~= "table" or type(value["$binary"]) ~= "string" then return nil end
     local hex = value["$binary"]
     local function byte(i) return tonumber(hex:sub(i * 2 + 1, i * 2 + 2), 16) end

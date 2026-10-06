@@ -16,6 +16,7 @@
 -- recovery (PEI-826, in shutdown-boot.test.lua).
 
 local peinit = require("helpers.peinit")
+local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local function with_vm(opts, body)
@@ -505,19 +506,17 @@ test("the global timeout kills whatever is left and the shutdown finishes anyway
         end)
     end)
 
---- Every operation event in the ring, as `{type = kind, fields = {…}}`.
+--- Every `peinit.operation.*` event in the ring, as `{type = kind,
+--- fields = {type, service, source}}`: the operation's type and source
+--- and the service it is on, read from their catalogue paths.
 local function operation_events(vm)
-    local r = vm:run("revstrm --snapshot --pretty --type 'operation.*'", { timeout = 30 })
-    local out, current = {}, nil
-    for line in r.stdout:gmatch("[^\r\n]+") do
-        local kind = line:match("^%d%d:%d%d:%d%d[%.%d]*%s+cpu.-#%d+%s+%u+%s+(operation%.[%w_]+)%s*$")
-        if kind then
-            current = { type = kind, fields = {} }
-            out[#out + 1] = current
-        elseif current then
-            local name, value = line:match("^%s+([%w_]+)%s%s+(.-)%s*$")
-            if name then current.fields[name] = (value:gsub('^"', ""):gsub('"$', "")) end
-        end
+    local out = {}
+    for _, e in ipairs(revstrm.snapshot(vm, { "peinit.operation.*" }, { timeout = 30 })) do
+        out[#out + 1] = { type = e.type, fields = {
+            type = revstrm.field(e, "object.operation.type"),
+            service = revstrm.field(e, "object.service.name"),
+            source = revstrm.field(e, "object.operation.source"),
+        } }
     end
     return out
 end

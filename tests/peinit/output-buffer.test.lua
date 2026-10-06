@@ -242,7 +242,7 @@ test("an audit event emitted before eventd was serving is collected from the rin
         local events
         for _ = 1, 20 do
             events = small:run(
-                "evctl 'EVENTS graph.* SINCE 1h ago TAKE 200' --format jsonl").stdout
+                "evctl 'EVENTS peinit.graph.validation.failed SINCE 1h ago TAKE 200' --format jsonl").stdout
             if events:find("pt%-blocked") then break end
             small:run("sleep 1")
         end
@@ -254,7 +254,7 @@ test("an audit event emitted before eventd was serving is collected from the rin
         -- The distinction the page draws: the same boot's *logs* from
         -- that window went through the bounded buffer, while this went
         -- through KMES and so had no window in which it could be lost.
-        t:assert(events:find('"phase":"boot"', 1, true),
+        t:assert(events:find('"graph.phase":"boot"', 1, true),
             "and it is recorded as having happened at boot")
     end)
 

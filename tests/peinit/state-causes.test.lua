@@ -242,21 +242,23 @@ test("a transition emits no event of its own",
     function(t)
         -- §6.3 used to promise a record per transition. There is none:
         -- a transition is visible through the job and operation events
-        -- that carried it, and the ring has no `service.*` type at all.
-        -- pt-cs-always has by now been through Starting, Backoff and
-        -- Failed several times over, so if any transition emitted an
-        -- event, this window would hold one.
+        -- that carried it. pt-cs-always has by now been through Starting,
+        -- Backoff and Failed several times over, so if any transition
+        -- emitted an event, this window would hold one. The only
+        -- `peinit.service.*` types the catalogue has are an abandonment
+        -- (on the shutdown path) and an unconfirmed reload, neither of
+        -- which this boot does.
         settle("pt-cs-always", "failed", "pt-cs-always to have failed")
-        local snapshot = vm:run("revstrm --snapshot --type 'service.*'",
+        local snapshot = vm:run("revstrm --snapshot --type 'peinit.service.*'",
             { timeout = 60 })
         snapshot:assert_ok()
         t:assert(not snapshot.stdout:match("service%.%w+"),
-            "no service.* event was ever emitted: " .. snapshot.stdout:sub(1, 400))
+            "no peinit.service.* event was ever emitted: " .. snapshot.stdout:sub(1, 400))
 
         -- And the events that do carry the transition are there, so the
         -- absence above is an absence rather than an empty ring.
-        local jobs = vm:run("revstrm --snapshot --type 'job.*'", { timeout = 60 })
+        local jobs = vm:run("revstrm --snapshot --type 'peinit.job.*'", { timeout = 60 })
         jobs:assert_ok()
-        t:assert(jobs.stdout:match("job%.%w+"),
+        t:assert(jobs.stdout:match("peinit%.job%.%w+"),
             "while the job events that carried those transitions are present")
     end)

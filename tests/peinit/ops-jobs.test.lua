@@ -293,7 +293,7 @@ test("a submitted job's resolved identity is its job identity's user SID",
         vm:run("svctl --json job wait " .. id, { timeout = 60 })
         local event = events_for("peinit.job.ended", id)[1]
         t:assert(event, "the job's end was emitted")
-        t:assert_eq(field(event, "object.job.token.sid"), sid,
+        t:assert_eq(revstrm.sid(field(event, "object.job.token.sid")), sid,
             "and records the SID rather than a name: " .. event.payload)
         t:assert(not revstrm.has(event, "resolved_identity"),
             "with no identity name beside it: " .. event.payload)

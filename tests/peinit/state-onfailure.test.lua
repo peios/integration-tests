@@ -451,7 +451,7 @@ test("a chain entry is retired when its handler ends, so its next failure starts
         local chain = chain_of(event)
         t:assert_eq(table.concat(chain, ","), "pt-of-endx,pt-of-ends,pt-of-endx",
             "the handler's failure began a chain of its own: " .. event)
-        t:assert(event:find('"attempted_handler":"pt-of-endx"', 1, true),
+        t:assert(event:find('"object.service.on-failure.name":"pt-of-endx"', 1, true),
             "and the refused start was pt-of-endx's: " .. event)
         vm:run("sleep 2", { timeout = 10 })
         t:assert_eq(runs("ends"), 3,
