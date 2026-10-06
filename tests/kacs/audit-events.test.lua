@@ -208,7 +208,7 @@ test("kacs.audit.privilege.used comes from privilege-use auditing on a check",
             t:assert(r.ok, "SeBackupPrivilege grants read against an empty DACL")
             sys.close(vm, fd)
         end)
-        local records = kmes.of_type(events, "kacs.audit.privilege.used")
+        local records = kmes.privilege_uses(events)
         t:assert_eq(#records, 1, "one kacs.audit.privilege.used record")
         local p = records[1].payload
         t:assert_eq(p.privilege.name, "SeBackupPrivilege",
@@ -385,7 +385,7 @@ test("only five privilege names are representable in a privilege-use record",
                     intent = c[4].intent, mapping = MAP })
                 sys.close(vm, fd)
             end)
-            local records = kmes.of_type(events, "kacs.audit.privilege.used")
+            local records = kmes.privilege_uses(events)
             t:assert_eq(#records, 1, c[1] .. " produces one record")
             t:assert_eq(records[1].payload.privilege.name, c[1],
                 "under its canonical name")
@@ -394,10 +394,8 @@ test("only five privilege names are representable in a privilege-use record",
 
 test("no other privilege ever appears in a privilege-use record",
     { spec = "PKM *audit-events.privilege-encoder-fails-closed" }, function(t)
-        -- The encoder has a name for five privileges and refuses
-        -- anything else rather than emitting an unnamed one, which is
-        -- consistent with those being the only five that can influence a
-        -- check at all: a token full of the others audits nothing.
+        -- Only five privileges can influence a check, so a token full of
+        -- the others produces no access-check privilege record at all.
         local POLICY = AUDIT.PRIVILEGE_USE_SUCCESS | AUDIT.PRIVILEGE_USE_FAILURE
         local FIVE = token.bit(token.PRIV.SECURITY)
             | token.bit(token.PRIV.TAKE_OWNERSHIP)
@@ -419,7 +417,7 @@ test("no other privilege ever appears in a privilege-use record",
                 "and a denied one")
             sys.close(vm, fd)
         end)
-        t:assert_eq(#kmes.of_type(events, "kacs.audit.privilege.used"), 0,
+        t:assert_eq(#kmes.privilege_uses(events), 0,
             "every other privilege enabled at once, and no record at all")
         -- And nothing that does emit carries a name outside the five.
         local NAMED = { SeSecurityPrivilege = true,
@@ -433,7 +431,7 @@ test("no other privilege ever appears in a privilege-use record",
                 desired = 0x1, intent = access.INTENT.BACKUP, mapping = MAP })
             sys.close(vm, fd)
         end)
-        local records = kmes.of_type(emitted, "kacs.audit.privilege.used")
+        local records = kmes.privilege_uses(emitted)
         t:assert(#records > 0, "a token holding one of the five does emit")
         for _, e in ipairs(records) do
             t:assert(NAMED[e.payload.privilege.name],

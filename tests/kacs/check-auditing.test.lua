@@ -95,7 +95,13 @@ local function recording(fn)
     if not ok then error(err, 0) end
     return events
 end
-local function of(events, ty) return kmes.of_type(events, ty) end
+--- Events of type `ty`. Privilege-use records are those of access checks
+--- only: a capability the agent itself first uses inside a window is
+--- recorded under the same type (`linux-cap`), and is not the check's.
+local function of(events, ty)
+    if ty == "kacs.audit.privilege.used" then return kmes.privilege_uses(events) end
+    return kmes.of_type(events, ty)
+end
 
 -- Observational ------------------------------------------------------------------------
 
