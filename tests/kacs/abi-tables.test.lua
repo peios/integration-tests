@@ -330,7 +330,7 @@ test("the four audit-policy bits select the four audited outcomes",
             sys.errname(e or 0))
     end)
 
-test("the logon types are the six published values and no others",
+test("the logon types are the seven published values and no others",
     { spec = "PKM *kacs-abi.logon-types" }, function(t)
         for name, value in pairs(token.LOGON_TYPE) do
             local sid, e = token.create_logon_session(vm, { logon_type = value })
@@ -341,7 +341,7 @@ test("the logon types are the six published values and no others",
                 "and a token in the session reports it")
             sys.close(vm, fd)
         end
-        for _, value in ipairs({ 0, 1, 6, 7, 10, 255 }) do
+        for _, value in ipairs({ 0, 1, 6, 7, 11, 255 }) do
             local sid, e = token.create_logon_session(vm, { logon_type = value })
             t:assert(not sid, value .. " is not a logon type: " ..
                 sys.errname(e or 0))

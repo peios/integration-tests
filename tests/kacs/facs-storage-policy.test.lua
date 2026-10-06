@@ -162,10 +162,14 @@ test("the public ABI accepts only the three managed classes and rejects malforme
         t:assert_eq(after.policy, start.policy, "the class is unchanged")
         t:assert_eq(after.generation, start.generation,
             "and no failure moved the generation")
-        -- Validation runs before the descriptor is even looked up.
-        local r = kacs.set_mount_policy_ex(vm, -1, MP.UNMANAGED, {})
-        t:assert_eq(r.errno, sys.E.INVAL,
-            "malformed arguments are rejected before the fd is resolved")
+        -- The superblock is resolved before the arguments are validated, on
+        -- purpose (PEI-586, mount_policy.c: a stratafs or unmanaged
+        -- superblock is refused ahead of argument checks). So a bad fd fails
+        -- closed with EBADF even beside a malformed argument.
+        local r = kacs.set_mount_policy_ex(vm, -1, MP.DENY_MISSING, { flags = 1 })
+        t:assert_eq(r.ret, -1, "a malformed call on a bad fd is refused")
+        t:assert_eq(r.errno, sys.E.BADF,
+            "and the fd is resolved before the arguments are validated")
         sys.close(vm, fd)
     end)
 
