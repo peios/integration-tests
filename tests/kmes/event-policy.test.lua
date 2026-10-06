@@ -163,10 +163,15 @@ test("Events created later is noticed by the machine-root fallback",
         -- armed for it. Creating Events, two levels below Machine, re-runs
         -- the bootstrap, which walks it and arms its own watch.
         with_machine(seed_other_kernel_keys, function(src, w)
+            local generic = lcs.create_key(src, w, { path = "Machine\\Generic" })
+            t:assert(generic.ret >= 0, "Machine\\Generic is created: "
+                .. sys.errname(generic.errno or 0))
             local mark = src:mark()
-            local made = lcs.create_key(src, w, { path = EVENTS_PATH })
+            local made = lcs.create_key(src, w,
+                { parent_fd = generic.ret, path = "Events" })
             t:assert(made.ret >= 0, "Machine\\Generic\\Events is created: "
                 .. sys.errname(made.errno or 0))
+            sys.close(w, generic.ret)
             local events_guid = src:lookup(EVENTS_PATH)
             t:assert(events_guid, "the source holds it")
             t:assert(reads_of(src, mark, events_guid) >= 1,
