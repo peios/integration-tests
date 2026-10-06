@@ -72,6 +72,26 @@ test("a mounted filesystem is adopted through a descriptor on any of its objects
         sys.close(vm, inner); sys.close(vm, fd)
     end)
 
+test("setting a mount policy writes kacs.mount.policy.changed",
+    { spec = "PKM *facs.storage.set-mount-policy-recorded" }, function(t)
+        local kmes = require("helpers.kmes")
+        local _, fd = mounted(t, "recorded", nil)
+        local events = kmes.recording(t, vm, function()
+            local r = kacs.set_mount_policy_ex(vm, fd, MP.SYNTHESIZE_EPHEMERAL, {})
+            t:assert_eq(r.ret, 0, "the class is set: " .. sys.errname(r.errno or 0))
+        end)
+        local rec = kmes.of_type(events, "kacs.mount.policy.changed")
+        t:assert_eq(#rec, 1, "one record of the change")
+        local m = rec[1].payload.object.mount
+        t:assert_eq(m["fs-type"], "tmpfs", "naming the filesystem type")
+        t:assert_eq(m.policy, "synthesize-ephemeral", "the policy set")
+        t:assert_eq(m["policy-previous"], "deny-missing", "the one it replaced")
+        t:assert(m["policy-generation"], "and the generation it began")
+        t:assert_eq(rec[1].payload.outcome.success, true, "a change made")
+        t:assert_eq(rec[1].payload.subject.token.sid, token.SID.LOCAL_SYSTEM, "by SYSTEM")
+        sys.close(vm, fd)
+    end)
+
 test("setting a mount policy needs SeTcbPrivilege held and enabled, and marks it used",
     { spec = "PKM *facs.storage.set-mount-policy-privilege" }, function(t)
         local at, fd = mounted(t, "priv", nil)
