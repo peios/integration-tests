@@ -1158,11 +1158,14 @@ test("a null name, a name that is not UTF-8 and a null address are NOTFOUND, ENO
         for i, x in ipairs(r) do expect(t, x, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, x.op .. " #" .. i) end
     end)
 
-test("a buffer too small for the result is TRYAGAIN, ERANGE, h_errno 0; everything a successful call returns lies inside the caller's buffer",
+test("a buffer too small for the result is TRYAGAIN, ERANGE, NETDB_INTERNAL; everything a successful call returns lies inside the caller's buffer",
     { spec = "resolvd *nss-module.small-buffer-is-erange resolvd *nss-module.results-placed-in-caller-buffer" }, function(t)
-        local small = pt(t, { { "n4", "both.nss.test" }, { "n3", "both.nss.test", "10" }, { "a2", "10.88.0.1" },
-                              { "n1", "localhost" } }, { buf = 16 })
-        for i, x in ipairs(small) do expect(t, x, NSS.TRYAGAIN, E.ERANGE, 0, x.op .. " #" .. i .. " with a 16-byte buffer") end
+        local small = pt(t, { { "n4", "both.nss.test" }, { "n3", "both.nss.test", "10" },
+                              { "n2", "both.nss.test", "2" }, { "a2", "10.88.0.1" }, { "a1", "10.88.0.1" },
+                              { "n1", "localhost" }, { "n4", "localhost" } }, { buf = 16 })
+        for i, x in ipairs(small) do
+            expect(t, x, NSS.TRYAGAIN, E.ERANGE, H.NETDB_INTERNAL, x.op .. " #" .. i .. " with a 16-byte buffer")
+        end
         local ok = pt(t, { { "n4", "both.nss.test" }, { "n3", "both.nss.test", "10" }, { "a2", "10.88.0.1" },
                            { "n4", "many.nss.test" } })
         for i, x in ipairs(ok) do
@@ -1173,14 +1176,12 @@ test("a buffer too small for the result is TRYAGAIN, ERANGE, h_errno 0; everythi
     end)
 
 test("an over-full caller buffer is TRYAGAIN with ERANGE, so glibc retries with a larger one",
-    { spec = "PSPU *nri-shim.over-full-buffer-is-tryagain-erange", tags = { "known-bug" } }, function(t)
-        -- PEI-1341: the shim sets h_errno 0 rather than NETDB_INTERNAL, and
-        -- glibc grows its buffer only for TRYAGAIN + ERANGE + NETDB_INTERNAL,
-        -- so a name whose answer outgrows glibc's first buffer fails.
+    { spec = "PSPU *nri-shim.over-full-buffer-is-tryagain-erange" }, function(t)
+        -- PEI-1341: glibc grows its buffer only for the complete
+        -- TRYAGAIN + ERANGE + NETDB_INTERNAL result. Check the installed
+        -- module's triple as well as the real glibc retry paths.
         local direct = pt(t, { { "n4", "many.nss.test" } }, { buf = 64 })[1]
-        t:assert_eq(direct.status, NSS.TRYAGAIN, "the module answers an over-full buffer TRYAGAIN")
-        t:assert_eq(direct.errno, E.ERANGE, "with ERANGE")
-        t:log("h_errno with it: " .. tostring(direct.herrno) .. " (glibc retries only on NETDB_INTERNAL, -1)")
+        expect(t, direct, NSS.TRYAGAIN, E.ERANGE, H.NETDB_INTERNAL, "the module's over-full buffer result")
         local r = pt(t, { { "gai", "many.nss.test", "0" }, { "gai", "many.nss.test", "2" },
                           { "ghbn", "many.nss.test", "2" } }, { buf = 64 })
         for i = 1, 2 do
@@ -1194,6 +1195,7 @@ test("an over-full caller buffer is TRYAGAIN with ERANGE, so glibc retries with 
         t:assert_eq(r[2].gai, 0, "getaddrinfo(AF_INET) retries with a larger buffer and succeeds")
         t:assert_eq(r[2].count, MANY_N, "with every address")
         t:assert_eq(r[3].ret, E.ERANGE, "gethostbyname2_r passes ERANGE back, so its caller can grow the buffer")
+        t:assert_eq(r[3].herrno, H.NETDB_INTERNAL, "gethostbyname2_r identifies caller-buffer exhaustion")
         t:assert_eq(r[3].growing_count, MANY_N, "gethostbyname2, which grows its own buffer, returns every address")
     end)
 
