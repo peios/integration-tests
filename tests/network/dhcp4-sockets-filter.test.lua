@@ -1,7 +1,7 @@
 -- netd TRM §5.6 — what the DHCPv4 packet socket lets through: its classic
--- BPF filter passes only an IPv4 UDP datagram with fragment offset zero,
--- addressed to port 68. It tests the offset alone, so a first fragment
--- (more-fragments set, offset zero) passes and is decoded (PEI-1370).
+-- BPF filter passes only an unfragmented IPv4 UDP datagram addressed to
+-- port 68: both the more-fragments flag and fragment offset must be zero.
+-- The don't-fragment flag is allowed (PEI-1370).
 --
 -- The gateway's DHCP server answers no DISCOVER here; the test answers by
 -- hand, with OFFER frames built byte by byte, so each one can be wrong in
@@ -44,6 +44,8 @@ local function offer_for(m)
     return gateway.dhcp_encode({
         op = 2, xid = m.xid, flags = m.flags, chaddr = m.chaddr,
         yiaddr = "10.77.0.50", siaddr = "10.77.0.1",
+        -- With the 8-byte UDP header, keep a first fragment 8-byte aligned.
+        pad = 304,
         options = {
             { 53, string.char(gateway.DHCP.OFFER) }, { 54, gateway.ip4("10.77.0.1") },
             { 51, gateway.opt.u32(3600) }, { 1, "\255\255\255\0" }, { 3, gateway.ip4("10.77.0.1") },
@@ -92,6 +94,7 @@ local function try_offer(t, xid, dport, frag, what)
 end
 
 local IP_MF = 0x2000
+local IP_DF = 0x4000
 
 local second_xid
 
@@ -121,15 +124,14 @@ test("the packet socket refuses a non-first fragment and a datagram to another p
         second_xid = d[#d].xid
     end)
 
--- PEI-1370: the filter tests only the fragment-offset bits (`jset #0x1fff`
--- on bytes 6-7 of the IPv4 header), so a first fragment (more-fragments
--- set, offset 0) passes it, and the re-check after the read does not look
--- at fragmentation at all: netd decodes and acts on the OFFER in it. This
--- is the documented current behaviour; when the filter also tests MF, this
--- test asserts "ignored" instead.
-test("a first fragment (more-fragments set, offset 0) passes the filter and its OFFER is taken",
+-- PEI-1370: MF alone must be refused even when offset is zero and the
+-- bytes contain a decodable OFFER. DF alone must still pass. The next
+-- DISCOVER proves rejection; a REQUEST proves the positive control.
+test("the packet socket refuses a first fragment but reads an unfragmented datagram with DF set",
     { spec = "netd *dhcp4-sockets.packet-socket" }, function(t)
         t:assert(second_xid, "the first test left the client in Selecting")
-        t:assert_eq(try_offer(t, second_xid, 68, IP_MF, "a first fragment (MF set, offset 0)"), "taken",
-            "an OFFER in a datagram with more-fragments set and offset 0 is read and answered with a REQUEST (PEI-1370)")
+        t:assert_eq(try_offer(t, second_xid, 68, IP_MF, "a first fragment (MF set, offset 0)"), "ignored",
+            "an OFFER in a datagram with more-fragments set is not read (PEI-1370)")
+        t:assert_eq(try_offer(t, second_xid, 68, IP_DF, "an unfragmented OFFER with DF set"), "taken",
+            "the same OFFER with only don't-fragment set is read and answered with a REQUEST")
     end)
