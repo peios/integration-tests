@@ -10,6 +10,8 @@
 local sys = require("helpers.sys")
 local kacs = require("helpers.kacs")
 local stratafs = require("helpers.stratafs")
+local access = require("helpers.access")
+local token = require("helpers.token")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -172,6 +174,77 @@ test("the open-time grant is frozen into the descriptor",
                 local again, errno = sys.open(worker, s:join("f"), sys.O.RDONLY)
                 t:assert(again == nil, "while a fresh open is refused")
                 t:assert_eq(errno, sys.E.ACCES, sys.errname(errno))
+            end)
+        end)
+    end)
+
+for _, mode in ipairs({ { name = "O_PATH", flags = sys.O.PATH },
+                         { name = "data", flags = sys.O.RDONLY } }) do
+    test("a retained " .. mode.name .. " handle observes descriptor changes",
+        { spec = "PKM *security.open-grant-frozen" }, function(t)
+            stratafs.with(vm, "sd-retained-" .. mode.name, {
+                { name = "only", flags = { "create" }, entries = { f = "contents" } },
+            }, function(s)
+                local provider = s:in_stratum("only", "f")
+                grant_all(t, provider)
+                -- The worker remains SYSTEM without bypass privileges. Give
+                -- the object another owner so implicit owner READ_CONTROL
+                -- cannot satisfy the live query after the DACL revocation.
+                local owner = access.sd({ owner = token.sid(5, 21, 253, 1) })
+                local changed = kacs.set_sd(vm, provider, owner, kacs.SI.OWNER)
+                t:assert_eq(changed.ret, 0, "use a non-owner subject")
+                kacs.as_dacl_bound(t, vm, function(worker)
+                    local fd = sys.open(worker, s:join("f"), mode.flags)
+                    local direct = sys.open(worker, provider, sys.O.RDONLY)
+                    t:assert(fd, "the handle opens")
+                    t:assert(direct, "the direct handle opens with READ_CONTROL")
+                    t:assert(kacs.get_sd_fd(worker, fd), "prime its descriptor cache")
+
+                    grant_all_but(t, provider, R.READ_CONTROL)
+                    local expected = kacs.get_sd_fd(worker, direct)
+                    local actual, errno = kacs.get_sd_fd(worker, fd)
+                    -- Restore through the provider, without touching the outer inode.
+                    grant_all(t, provider)
+                    local restored = kacs.get_sd_fd(worker, fd)
+                    sys.close(worker, fd)
+                    sys.close(worker, direct)
+
+                    t:assert(expected, "the direct handle retains its query grant")
+                    t:assert_eq(restored, kacs.get_sd(vm, provider),
+                        "the next query sees restored permissions")
+                    if mode.flags == sys.O.PATH then
+                        t:assert(actual == nil, "O_PATH rechecks the tightened descriptor")
+                        t:assert_eq(errno, sys.E.ACCES, "READ_CONTROL was revoked")
+                    else
+                        t:assert_eq(actual, expected,
+                            "the frozen grant permits reading the current descriptor")
+                    end
+                end)
+            end)
+        end)
+end
+
+test("a copied-up handle queries its new provider's current descriptor",
+    { spec = "PKM *security.open-grant-frozen" }, function(t)
+        stratafs.with(vm, "sd-rebound", {
+            { name = "top", flags = { "create" } },
+            { name = "bot", flags = { "ro" }, entries = { f = "contents" } },
+        }, function(s)
+            grant_all(t, s:in_stratum("bot", "f"))
+            kacs.as_dacl_bound(t, vm, function(worker)
+                local fd = sys.open(worker, s:join("f"), sys.O.RDWR)
+                t:assert(fd, "open before copy-up")
+                t:assert(kacs.get_sd_fd(worker, fd), "prime the lower descriptor cache")
+                local written = sys.write(worker, fd, "updated")
+                t:assert_eq(written.ret, 7, "write copies up under the frozen grant")
+                grant_all_but(t, s:in_stratum("top", "f"), R.READ_CONTROL)
+                grant_all_but(t, s:in_stratum("bot", "f"), R.WRITE_DATA)
+                local actual = kacs.get_sd_fd(worker, fd)
+                sys.close(worker, fd)
+                t:assert_eq(actual, kacs.get_sd(vm, s:in_stratum("top", "f")),
+                    "query follows the new provider, including a later direct change")
+                t:assert_neq(actual, kacs.get_sd(vm, s:in_stratum("bot", "f")),
+                    "the old provider no longer supplies this handle's descriptor")
             end)
         end)
     end)
