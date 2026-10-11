@@ -36,7 +36,14 @@ gw:router({ lifetime = 1800, prefixes = {
     { prefix = "fd77::", len = 64, valid = 86400, preferred = 14400 },
     { prefix = "fd78::", len = 64, L = false, valid = 86400, preferred = 14400 },
 } })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("NETD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/netd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 -- ---------------------------------------------------------------------------
 -- rtnetlink, from the agent
@@ -725,12 +732,10 @@ test("PROBE: a second joined interface whose default route has the same metric a
         "ptr4 has its desired default route via 10.64.0.1")
 end)
 
-test("PROBE: an IPv6 route at Route.Metric 0 lands at the profile's metric and the interface converges",
-    { tags = { "known-bug" } }, function(t)
-    -- PEI-1369: netd sends no RTA_PRIORITY for metric 0, the
-    -- kernel files an IPv6 route without one at 1024, and netd then sees a
-    -- protocol-200 route at 1024 it does not desire and one at 0 it lacks:
-    -- a delete and an add on every pass, each pass's changes waking the next.
+test("an IPv6 route at Route.Metric 0 converges at the kernel default",
+    { tags = { "pei-1369" } }, function(t)
+    -- Linux normalizes IPv6 metric zero to 1024 even when it is explicit.
+    -- netd must compare the effective metric to avoid a delete/add loop.
     local MAC5 = "02:c0:00:00:03:05"
     network.write(sut, "Profiles\\ptr-z", { ["Address.Static"] = "multi:fd65::2/64",
         ["Route.Gateway"] = "multi:fd65::1", ["Route.Metric"] = "dword:0" })
@@ -752,5 +757,5 @@ test("PROBE: an IPv6 route at Route.Metric 0 lands at the profile's metric and t
     rule("ptc-r5", MAC5, "DOWN")
     wait_until(function() return #netd_routes_on(d) == 0 end, { timeout = 20, interval = 0.25 })
     t:assert_eq(churn, 0, "a converged interface: no route changes")
-    t:assert_eq(metrics[1], ":: metric 0", "the route carries the profile's metric")
+    t:assert_eq(metrics[1], ":: metric 1024", "zero uses the IPv6 kernel default")
 end)
