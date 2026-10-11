@@ -814,6 +814,14 @@ function Source:register(o)
         return nil, "open " .. M.DEVICE .. ": " .. sys.errname(errno)
     end
     self.fd = fd
+    if o.lifetime then
+        local r = self.worker:syscall(sys.NR.ioctl, {
+            args = {fd, 0xc0105201, 0},
+            bufs = {string.pack("<I4I4I8", 1, 0, 0)}, ptrs = {2},
+        })
+        if r.ret ~= 0 then self:close(); return nil, "REG_SRC_NEGOTIATE: " .. sys.errname(r.errno) end
+        self.session = select(3, string.unpack("<I4I4I8", r.out_bufs[1]))
+    end
     local entries, names = hive_entries(self)
     local max_seq = o.max_sequence or self.seq
     local bufs = { string.pack("<I4I4I8I8", #self.hives, o.pad or 0, max_seq, 0), entries }
