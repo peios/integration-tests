@@ -1098,26 +1098,22 @@ test("an IPv6 link-local address comes back in a tuple with scope id 0",
 -- found, but not in the family asked
 -- ---------------------------------------------------------------------------
 
-test("a name resolvd finds with no address of the family asked is NOTFOUND, ENOENT, HOST_NOT_FOUND, as a name that does not exist",
-    { spec = "resolvd *nss-module.found-without-family-is-host-not-found" }, function(t)
-        -- PEI-1345: the spec wants NO_DATA here; the TRM records HOST_NOT_FOUND.
+test("a name resolvd finds with no address of the family asked is NOTFOUND, ENOENT, NO_DATA",
+    { spec = "resolvd *nss-module.found-without-family-is-no-data" }, function(t)
         local r = pt(t, { { "n3", "v4only.nss.test", "10" }, { "n2", "v4only.nss.test", "10" } })
         for _, x in ipairs(r) do
             t:assert(x.reply and x.reply.outcome == "found", x.op .. ": resolvd said found")
             t:assert_eq(#addresses_of(x.reply), 0, x.op .. ": with no IPv6 address")
-            expect(t, x, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, x.op)
+            expect(t, x, NSS.NOTFOUND, E.ENOENT, H.NO_DATA, x.op)
         end
     end)
 
 test("a found name with no address of the family asked is NOTFOUND with NO_DATA",
-    { spec = "PSPU *nri-shim.found-without-family-is-no-data", tags = { "known-bug" } }, function(t)
-        -- PEI-1345: the shim gives HOST_NOT_FOUND, the h_errno of a name
-        -- that does not exist.
+    { spec = "PSPU *nri-shim.found-without-family-is-no-data" }, function(t)
         local r = pt(t, { { "n3", "v4only.nss.test", "10" } })[1]
         t:assert(r.reply and r.reply.outcome == "found" and #addresses_of(r.reply) == 0,
             "resolvd said found, with no IPv6 address")
-        t:assert_eq(r.status, NSS.NOTFOUND, "NOTFOUND")
-        t:assert_eq(r.herrno, H.NO_DATA, "h_errno NO_DATA")
+        expect(t, r, NSS.NOTFOUND, E.ENOENT, H.NO_DATA, "found without the requested family")
     end)
 
 -- ---------------------------------------------------------------------------
@@ -1158,11 +1154,14 @@ test("a null name, a name that is not UTF-8 and a null address are NOTFOUND, ENO
         for i, x in ipairs(r) do expect(t, x, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, x.op .. " #" .. i) end
     end)
 
-test("a buffer too small for the result is TRYAGAIN, ERANGE, h_errno 0; everything a successful call returns lies inside the caller's buffer",
+test("a buffer too small for the result is TRYAGAIN, ERANGE, NETDB_INTERNAL; everything a successful call returns lies inside the caller's buffer",
     { spec = "resolvd *nss-module.small-buffer-is-erange resolvd *nss-module.results-placed-in-caller-buffer" }, function(t)
-        local small = pt(t, { { "n4", "both.nss.test" }, { "n3", "both.nss.test", "10" }, { "a2", "10.88.0.1" },
-                              { "n1", "localhost" } }, { buf = 16 })
-        for i, x in ipairs(small) do expect(t, x, NSS.TRYAGAIN, E.ERANGE, 0, x.op .. " #" .. i .. " with a 16-byte buffer") end
+        local small = pt(t, { { "n4", "both.nss.test" }, { "n3", "both.nss.test", "10" },
+                              { "n2", "both.nss.test", "2" }, { "a2", "10.88.0.1" }, { "a1", "10.88.0.1" },
+                              { "n1", "localhost" }, { "n4", "localhost" } }, { buf = 16 })
+        for i, x in ipairs(small) do
+            expect(t, x, NSS.TRYAGAIN, E.ERANGE, H.NETDB_INTERNAL, x.op .. " #" .. i .. " with a 16-byte buffer")
+        end
         local ok = pt(t, { { "n4", "both.nss.test" }, { "n3", "both.nss.test", "10" }, { "a2", "10.88.0.1" },
                            { "n4", "many.nss.test" } })
         for i, x in ipairs(ok) do
@@ -1173,14 +1172,12 @@ test("a buffer too small for the result is TRYAGAIN, ERANGE, h_errno 0; everythi
     end)
 
 test("an over-full caller buffer is TRYAGAIN with ERANGE, so glibc retries with a larger one",
-    { spec = "PSPU *nri-shim.over-full-buffer-is-tryagain-erange", tags = { "known-bug" } }, function(t)
-        -- PEI-1341: the shim sets h_errno 0 rather than NETDB_INTERNAL, and
-        -- glibc grows its buffer only for TRYAGAIN + ERANGE + NETDB_INTERNAL,
-        -- so a name whose answer outgrows glibc's first buffer fails.
+    { spec = "PSPU *nri-shim.over-full-buffer-is-tryagain-erange" }, function(t)
+        -- PEI-1341: glibc grows its buffer only for the complete
+        -- TRYAGAIN + ERANGE + NETDB_INTERNAL result. Check the installed
+        -- module's triple as well as the real glibc retry paths.
         local direct = pt(t, { { "n4", "many.nss.test" } }, { buf = 64 })[1]
-        t:assert_eq(direct.status, NSS.TRYAGAIN, "the module answers an over-full buffer TRYAGAIN")
-        t:assert_eq(direct.errno, E.ERANGE, "with ERANGE")
-        t:log("h_errno with it: " .. tostring(direct.herrno) .. " (glibc retries only on NETDB_INTERNAL, -1)")
+        expect(t, direct, NSS.TRYAGAIN, E.ERANGE, H.NETDB_INTERNAL, "the module's over-full buffer result")
         local r = pt(t, { { "gai", "many.nss.test", "0" }, { "gai", "many.nss.test", "2" },
                           { "ghbn", "many.nss.test", "2" } }, { buf = 64 })
         for i = 1, 2 do
@@ -1194,6 +1191,7 @@ test("an over-full caller buffer is TRYAGAIN with ERANGE, so glibc retries with 
         t:assert_eq(r[2].gai, 0, "getaddrinfo(AF_INET) retries with a larger buffer and succeeds")
         t:assert_eq(r[2].count, MANY_N, "with every address")
         t:assert_eq(r[3].ret, E.ERANGE, "gethostbyname2_r passes ERANGE back, so its caller can grow the buffer")
+        t:assert_eq(r[3].herrno, H.NETDB_INTERNAL, "gethostbyname2_r identifies caller-buffer exhaustion")
         t:assert_eq(r[3].growing_count, MANY_N, "gethostbyname2, which grows its own buffer, returns every address")
     end)
 
@@ -1283,7 +1281,8 @@ test("gethostbyname4_r's TTL is the least among all the addresses",
 test("notfound is NOTFOUND, ENOENT, HOST_NOT_FOUND",
     { spec = "resolvd *nss-module.notfound-is-host-not-found PSPU *nri-shim.notfound-is-host-not-found" }, function(t)
         scope_ready(t)
-        local r = pt(t, { { "n4", "nosuch.example.test" }, { "n3", "nosuch.example.test", "2" } }, { serve = true })
+        local r = pt(t, { { "n4", "nosuch.example.test" }, { "n3", "nosuch.example.test", "2" },
+                         { "a2", "10.77.0.85" }, { "a1", "10.77.0.85" } }, { serve = true })
         for _, x in ipairs(r) do
             t:assert_eq(x.reply and x.reply.outcome, "notfound", x.op .. ": resolvd said notfound")
             expect(t, x, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, x.op)
@@ -1316,19 +1315,19 @@ test("a reverse is rendered from the PTR records in order, trailing dots removed
         t:assert_eq(b.ttl, 30, "the least TTL includes the CNAME's (30) as well as the PTR's (300)")
     end)
 
-test("a reverse found with no records, or with records but no PTR among them, is NOTFOUND with HOST_NOT_FOUND",
+test("a reverse found with no records, or with records but no PTR among them, is NOTFOUND with NO_DATA",
     { spec = "resolvd *nss-reverse.found-without-records-is-notfound resolvd *nss-reverse.no-ptr-record-is-notfound" }, function(t)
         scope_ready(t)
         local r = pt(t, { { "a2", "10.77.0.84" }, { "a2", "10.77.0.83" } }, { serve = true })
         local empty, cname = r[1], r[2]
         t:assert_eq(empty.reply and empty.reply.outcome, "found", "10.77.0.84: resolvd said found")
         t:assert_eq(#((empty.reply and empty.reply.records) or {}), 0, "10.77.0.84: with no records")
-        expect(t, empty, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, "found without records")
+        expect(t, empty, NSS.NOTFOUND, E.ENOENT, H.NO_DATA, "found without records")
         t:assert_eq(cname.reply and cname.reply.outcome, "found", "10.77.0.83: resolvd said found")
         local recs = (cname.reply and cname.reply.records) or {}
         t:assert(#recs > 0, "10.77.0.83: with records")
         for _, rec in ipairs(recs) do t:assert(rec.type ~= 12, "none of them a PTR (type " .. tostring(rec.type) .. ")") end
-        expect(t, cname, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, "records but no PTR")
+        expect(t, cname, NSS.NOTFOUND, E.ENOENT, H.NO_DATA, "records but no PTR")
     end)
 
 -- ---------------------------------------------------------------------------
@@ -1394,7 +1393,9 @@ test("a name is asked as a lookup in the entry point's family, the reply's addre
         local v6only = frame_hex({ ok = true, kind = "addresses", outcome = "found", canonical = "six.nss.test",
             addresses = { { address = "fd66::6", ttl = 50 } }, source = "dns", validation = "unvalidated" })
         local e = pt(t, { { "n3", "six.nss.test", "2" } }, { fake = "hex:" .. v6only })[1]
-        expect(t, e, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, "nothing left after the filter")
+        t:assert_eq(e.reply and e.reply.outcome, "found", "the stand-in said found")
+        same_list(t, addresses_of(e.reply), { "fd66::6" }, "only the unrequested family arrived")
+        expect(t, e, NSS.NOTFOUND, E.ENOENT, H.NO_DATA, "nothing left after the filter")
     end)
 
 -- ---------------------------------------------------------------------------

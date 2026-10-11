@@ -260,6 +260,18 @@ local function submit(args)
     return id, "jobs/" .. id
 end
 
+--- PCDS bin.guid bytes from the control channel's canonical UUID text.
+--- The first three fields are little-endian; the final eight bytes stay
+--- in textual order. Both the log wire and object.job.guid use this form.
+local function pcds_hex(uuid)
+    local hex = uuid:lower():gsub("[^%x]", "")
+    local out = {}
+    for _, i in ipairs({ 4, 3, 2, 1, 6, 5, 8, 7, 9, 10, 11, 12, 13, 14, 15, 16 }) do
+        out[#out + 1] = hex:sub(2 * i - 1, 2 * i)
+    end
+    return table.concat(out)
+end
+
 --- The descriptor in PID 1's table that is connected to `sink`, and its
 --- socket inode — found by asking sock_diag who is connected to the tool
 --- and matching the answer against /proc/1/fd.
@@ -296,6 +308,7 @@ test("every datagram is one msgpack array of one or more records, and nothing el
     {
         spec = {
             "peinit *eventd.a-datagram-holds-a-msgpack-array-of-records",
+            "peinit *eventd.the-record-fields",
             "peinit *eventd.the-job-id-is-omitted-when-there-is-none",
         },
     },
@@ -345,8 +358,8 @@ test("every datagram is one msgpack array of one or more records, and nothing el
                 "keyed as §11.4 lists them")
             t:assert_eq(record.types, "str,bool,str,uint,bin",
                 "with the types §11.4 gives: string, bool, string, uint, bin")
-            t:assert_eq(record.job_id, (id:gsub("-", "")),
-                "and the bin is the job's own 16-byte GUID")
+            t:assert_eq(record.job_id, pcds_hex(id),
+                "and the bin is the job's own 16-byte PCDS GUID (PEI-1238)")
         end
     end)
 
@@ -481,14 +494,6 @@ test("a sink that would block loses lines for the sink only, and says so once",
         -- job by `object.job.guid`, a bin.guid that evctl's JSON prints as
         -- `{"$binary": hex}` of the PCDS GUID — the first three fields of
         -- the UUID byte-reversed — so that is the form looked for.
-        local function pcds_hex(uuid)
-            local hex = uuid:lower():gsub("[^%x]", "")
-            local out = {}
-            for _, i in ipairs({ 4, 3, 2, 1, 6, 5, 8, 7, 9, 10, 11, 12, 13, 14, 15, 16 }) do
-                out[#out + 1] = hex:sub(2 * i - 1, 2 * i)
-            end
-            return table.concat(out)
-        end
         local guid = pcds_hex(id)
         local events = 0
         wait_until(function()
