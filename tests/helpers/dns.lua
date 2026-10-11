@@ -493,7 +493,7 @@ function M.serve(gw, o)
         while true do
             local fd = ntfe.tcp_accept(g.vm, g.dns_listener, 0)
             if not fd then break end
-            g.dns_conns[fd] = { buf = "", server = local_addr(g, fd) }
+            g.dns_conns[fd] = { buf = "", output = "", server = local_addr(g, fd) }
         end
         for fd, c in pairs(g.dns_conns) do
             local data, err = ntfe.recv(g.vm, fd, 0, 4096)
@@ -504,7 +504,7 @@ function M.serve(gw, o)
                 g.dns_conns[fd] = nil
                 c = nil
             end
-            while c and #c.buf >= 2 do
+            while c and not c.close_after_reply and #c.buf >= 2 do
                 local len = string.unpack(">I2", c.buf)
                 if #c.buf < 2 + len then break end
                 local raw = c.buf:sub(3, 2 + len)
@@ -520,13 +520,24 @@ function M.serve(gw, o)
                     c = nil
                 else
                     local p = payload_of(q, r, "tcp")
-                    ntfe.send(g.vm, fd, string.pack(">I2", #p) .. p)
-                    if type(r) == "table" and r.close then
-                        sys.close(g.vm, fd)
-                        g.dns_conns[fd] = nil
-                        c = nil
-                    end
+                    c.output = c.output .. string.pack(">I2", #p) .. p
+                    c.close_after_reply = type(r) == "table" and r.close
                 end
+            end
+            if c and #c.output > 0 then
+                -- TCP writes are nonblocking and may consume only a prefix.
+                -- Keep the rest for the next pump, including replies > 46 KiB.
+                local sent = ntfe.send(g.vm, fd, c.output)
+                if sent.ret > 0 then
+                    c.output = c.output:sub(sent.ret + 1)
+                elseif sent.ret == 0 or (sent.errno ~= sys.E.AGAIN and sent.errno ~= sys.E.INTR) then
+                    sys.close(g.vm, fd)
+                    g.dns_conns[fd], c = nil, nil
+                end
+            end
+            if c and c.close_after_reply and #c.output == 0 then
+                sys.close(g.vm, fd)
+                g.dns_conns[fd] = nil
             end
         end
     end

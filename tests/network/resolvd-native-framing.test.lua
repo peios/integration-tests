@@ -81,7 +81,14 @@ dns.serve(gw, {
         return nil
     end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 -- ---------------------------------------------------------------------------
 -- Local helpers
@@ -878,8 +885,8 @@ test("a request whose length exceeds the ceiling is refused without reading its 
 -- PEI-1355: this is the documented current behaviour (the reply is not
 -- checked against the ceiling, and libresolv clients refuse it); the test
 -- passes on it.
-test("a reply is not checked against the 65 536-byte ceiling: a large TXT answer goes out whole",
-    { spec = "resolvd *native-framing.reply-size-not-checked" }, function(t)
+test("an oversized native TXT answer is replaced by a bounded reply too large error",
+    { tags = { "pei-1355" }, spec = "resolvd *native-framing.reply-size-not-checked" }, function(t)
         ready(t)
         dns.forget(gw)
         local fd = open()
@@ -893,10 +900,10 @@ test("a reply is not checked against the 65 536-byte ceiling: a large TXT answer
         t:log(string.format("reply length %s; %d records; TCP questions %d; %s", tostring(r.len),
             r.reply and #(r.reply.records or {}) or -1, #tcp, tostring(r.err)))
         t:assert(r.reply, "the whole reply is read: " .. tostring(r.err))
-        t:assert_eq(r.reply.ok, true, "an answer")
-        t:assert_eq(r.reply.kind, "answer", "kind answer")
-        t:assert_eq(#r.reply.records, BIG_N, "every TXT record")
-        t:assert(r.len > 65536, "a payload over 65 536 bytes (" .. r.len .. ") is written as it is")
+        t:assert_eq(r.reply.ok, false, "oversized reply is an error")
+        t:assert_eq(r.reply.error, "reply too large", "explicit size error")
+        t:assert(r.len <= 65536, "the error stays within the channel ceiling")
+        t:assert(#tcp >= 1, "the large RRset was fetched over TCP")
     end)
 
 -- ---------------------------------------------------------------------------
