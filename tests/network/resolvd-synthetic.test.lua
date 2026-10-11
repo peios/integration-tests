@@ -52,7 +52,14 @@ dns.serve(gw, {
     },
     soa = { name = "example.test", data = { minimum = 30 } },
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local SOCK = "/run/resolvd/resolv.sock"
 local HOSTS = [[Dns\Hosts]]
@@ -421,9 +428,8 @@ test("asked for PTR or ANY, a loopback address is localhost, a static name's add
             "no synthetic reverse question reached the network")
     end)
 
-test("an address listed by several static names reverses to one of them, the same one for every question under one configuration",
+test("a shared static address reverses to the first canonical name across configuration reloads",
     { spec = "resolvd *engine-synthetic.shared-static-address-reverse-per-configuration" }, function(t)
-        local names = { ["alpha.home"] = true, ["beta.home"] = true, ["gamma.home"] = true }
         set_hosts(t, {
             ["alpha.home"] = "sz:10.99.0.7", ["beta.home"] = "sz:10.99.0.7", ["gamma.home"] = "sz:10.99.0.7",
         }, "gamma.home", T.A, "A 10.99.0.7")
@@ -434,16 +440,15 @@ test("an address listed by several static names reverses to one of them, the sam
                 synthetic(t, r, "hosts", nil, what .. " #" .. i)
                 t:assert_eq(#r.records, 1, what .. ": one PTR")
                 local name = r.records[1].text
-                t:assert(names[name], what .. ": " .. name .. " is one of the static names")
+                t:assert_eq(name, "alpha.home", what .. ": first canonical static name")
                 first = first or name
                 t:assert_eq(name, first, what .. ": the same name every time")
             end
             return first
         end
         local a = five("first configuration")
-        -- A change to any value builds the table afresh (PEI-1354: which
-        -- name comes back may then differ; the TRM states only that it is
-        -- one of them, fixed until the next change).
+        -- A change to any value builds the table afresh; the answer must
+        -- remain alpha.home regardless of its new hash seed (PEI-1354).
         network.write(sut, HOSTS, { ["zeta.home"] = "sz:10.99.0.9" })
         t:assert(pcall(wait_until, function() return texts(resolve("zeta.home", T.A)) == "A 10.99.0.9" end,
             { timeout = 15, interval = 0.25 }), "the change is applied")
