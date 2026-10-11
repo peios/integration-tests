@@ -1,7 +1,5 @@
--- resolvd TRM §4.6 "The attempt limit": the three attempts are counted
--- per candidate, not per question; and the two PSPU §6.B statements
--- that depend on it, which resolvd does not meet (PEI-1361): three
--- attempts per question, and a shim timeout longer than any question.
+-- resolvd TRM §4.6: three attempts per question across search candidates.
+-- The resolver must answer before the NSS shim's ten-second timeout.
 --
 -- Harness: the scripted gateway (helpers.gateway) is the one DNS server
 -- (helpers.dns, 10.77.0.1 from the lease). `ExtraSearchDomains` gives
@@ -10,8 +8,8 @@
 -- and type: under one.test the first two attempts get no reply and the
 -- third gets NXDOMAIN (no SOA, so nothing is cached) 1.5 s late; under
 -- two.test nothing is ever answered. The first candidate therefore uses
--- its three attempts and comes back notfound, and the second gets three
--- more of its own: six attempts and about 11.5 s for one question.
+-- its three attempts and comes back notfound; the exhausted question
+-- budget prevents sending the second candidate.
 --
 -- Each test asks a different single label, so the counts are its own.
 --
@@ -49,7 +47,14 @@ dns.serve(gw, {
     end,
 })
 
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local function rstatus()
     local s, err = network.call(sut, { query = "status" }, { path = SOCK })
@@ -88,31 +93,29 @@ local function udp(name, rtype)
     end)
 end
 
-test("the attempt limit counts per candidate: a single label with two candidates can make six attempts",
+test("the attempt limit spans search candidates: exhaustion prevents asking the next name",
     { spec = "resolvd *engine-servers.limit-is-per-candidate" }, function(t)
         setup(t)
         local out, elapsed = timed(t, "resolv query pc A")
         t:assert(out:find("\nunavailable", 1, true), "the question is unavailable")
         local one, two = udp("pc.one.test"), udp("pc.two.test")
         t:assert_eq(#one, 3, "three attempts at the first candidate, the third answered NXDOMAIN")
-        t:assert_eq(#two, 3, "and three more at the second: the budget started again")
-        t:assert(two[1].at > one[3].at, "the second candidate was asked after the first's NXDOMAIN")
-        t:log(string.format("six attempts in %.2f s", elapsed))
+        t:assert_eq(#two, 0, "the second candidate has no attempt budget left")
+        t:log(string.format("three attempts in %.2f s", elapsed))
     end)
 
 test("a question gets three attempts",
-    { spec = "PSPU *nri-limits.attempts-per-question", tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-limits.attempts-per-question" }, function(t)
         setup(t)
         local out = timed(t, "resolv query pq A")
         t:assert(out:find("\nunavailable", 1, true), "the question is unavailable")
         local n = #udp("pq.one.test") + #udp("pq.two.test")
-        -- PEI-1361: resolvd's budget is per candidate; this one question
-        -- made six attempts (three at each candidate).
+        -- PEI-1361: the budget applies to the entire question.
         t:assert(n <= 3, "at most three attempts for the question (made " .. n .. ")")
     end)
 
 test("a slow upstream is reported by the resolver as unavailable before the shim's own timeout",
-    { spec = "PSPU *nri-limits.shim-timeout-exceeds-attempts-times-server-timeout", tags = { "known-bug" } },
+    { spec = "PSPU *nri-limits.shim-timeout-exceeds-attempts-times-server-timeout" },
     function(t)
         setup(t)
         local out, elapsed = timed(t, "getent ahosts sh")
@@ -120,8 +123,6 @@ test("a slow upstream is reported by the resolver as unavailable before the shim
         gw:serve({ timeout = 4 })
         local n = #udp("sh.one.test", "A") + #udp("sh.two.test", "A")
         t:log(string.format("getent returned after %.2f s; resolvd made %d A attempts", elapsed, n))
-        -- PEI-1361: the per-candidate budget makes this question take
-        -- ~11.5 s, so the shim's 10 s timeout ends it first (getent
-        -- returns at ~10 s) and resolvd's `unavailable` comes too late.
+        t:assert(n <= 3, "the A question stayed within three attempts")
         t:assert(elapsed < 9.8, string.format("resolvd answered within the shim's 10 s (getent took %.2f s)", elapsed))
     end)
