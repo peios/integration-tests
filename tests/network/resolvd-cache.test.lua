@@ -27,6 +27,10 @@
 -- renewals; with eth0's default DNS claim disabled, the fallback scope
 -- stands in when the lease has none.
 --
+-- The two in-flight invalidation cases require an image containing the
+-- PEI-1339 source correction (resolvd bc4efa36dd72a942169e4d5ad849f5806a4fd7f1).
+-- Their source-only update has not been run in a VM; older images can fail.
+--
 -- Own VMs: the lease's DNS servers are changed.
 
 local peinit = require("helpers.peinit")
@@ -365,8 +369,8 @@ test("expired entries stay, counted, until something replaces them",
         t:assert_eq(entries(), before + 1, "the fresh answer replaced it")
     end)
 
-test("a reply that arrives after a flush is stored, under the same scope",
-    { spec = "resolvd *engine-cache.late-reply-stored-after-flush" }, function(t)
+test("a reply that arrives after a flush answers its requester without being cached",
+    { spec = "resolvd *engine-cache.invalidated-task-does-not-store PSPU *nri-requests.flush-drops-every-cached-answer" }, function(t)
         hold["late.example.test"] = true
         local p = sut:run_async("sh", { args = { "-c", "resolv query late.example.test A" } })
         t:assert(gw:serve({ timeout = 10, until_ = function() return #asked("late.example.test") > 0 end }),
@@ -376,14 +380,26 @@ test("a reply that arrives after a flush is stored, under the same scope",
         t:assert_eq(entries(), 0, "the cache is empty")
         t:assert_eq(release(), 1, "the held reply is released")
         hold["late.example.test"] = nil
-        gw:serve({ timeout = 10, until_ = function() return p:status() == "exited" end })
-        local r = parse(p:wait(5).stdout)
-        t:assert(r.source == "dns" and r.server == "10.77.0.1", "the late reply answered the question")
+        t:assert(gw:serve({ timeout = 10, until_ = function() return p:status() == "exited" end }),
+            "the original requester completed")
+        local done = p:wait(5)
+        t:assert_eq(done.exit_code, 0, "the original query succeeded")
+        local r = parse(done.stdout)
+        t:assert(r.outcome == "found" and r.source == "dns" and r.server == "10.77.0.1",
+            "the late reply answered the original question")
+        t:assert_eq(r.records[1] and r.records[1].text, "10.77.1.8", "with its original answer")
         t:assert_eq(#asked("late.example.test"), 1, "on the first attempt (it landed in time)")
-        t:assert_eq(entries(), 1, "and it was stored after the flush")
+        t:assert_eq(entries(), 0, "the invalidated task did not refill the cache")
         local again = query(t, "late.example.test", "A")
-        t:assert_eq(again.source, "cache", "the next question is a hit")
-        t:assert_eq(again.iface, "eth0", "under the scope it was asked through")
+        t:assert(again.exit == 0 and again.outcome == "found" and again.source == "dns"
+            and again.server == "10.77.0.1", "a new question goes to the current server")
+        t:assert_eq(#asked("late.example.test"), 2, "a second question reached the server")
+        t:assert_eq(entries(), 1, "the new request can cache its answer normally")
+        local hit = query(t, "late.example.test", "A")
+        t:assert(hit.exit == 0 and hit.outcome == "found" and hit.source == "cache"
+            and hit.server == "10.77.0.1", "the new request's answer is a cache hit")
+        t:assert_eq(hit.iface, "eth0", "under the scope it was asked through")
+        t:assert_eq(#asked("late.example.test"), 2, "the cache hit sent no further question")
     end)
 
 test("an entry's key is the candidate in lower case, the record type and the scope; the class is not in it",
@@ -447,7 +463,7 @@ test("an entry's key is the candidate in lower case, the record type and the sco
     end)
 
 test("when a scope's servers change, every answer learned through it is discarded, a reply still in flight included",
-    { spec = "PSPU *nri-resolution.cache-discarded-with-scope", tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-resolution.cache-discarded-with-scope resolvd *engine-cache.invalidated-task-does-not-store" }, function(t)
         servers_become(t, { "10.77.0.1" }, "eth0 has its lease's server")
         t:assert_eq(query(t, "pre.example.test", "A").source, "dns", "an answer learned through eth0")
         t:assert_eq(query(t, "pre.example.test", "A").source, "cache", "held")
@@ -465,16 +481,31 @@ test("when a scope's servers change, every answer learned through it is discarde
         t:assert(changed - sent < 1.8, "the change landed inside the transaction's 2 s (else the test proves nothing)")
         t:assert_eq(release(), 1, "the old server's reply is released")
         hold["inflight.example.test"] = nil
-        gw:serve({ timeout = 10, until_ = function() return p:status() == "exited" end })
-        local r = parse(p:wait(5).stdout)
-        t:assert(r.source == "dns" and r.server == "10.77.0.1", "the old server's late reply answered the asker")
+        t:assert(gw:serve({ timeout = 10, until_ = function() return p:status() == "exited" end }),
+            "the original requester completed")
+        local done = p:wait(5)
+        t:assert_eq(done.exit_code, 0, "the original query succeeded")
+        local r = parse(done.stdout)
+        t:assert(r.outcome == "found" and r.source == "dns" and r.server == "10.77.0.1",
+            "the old server's late reply answered the original asker")
+        t:assert_eq(r.records[1] and r.records[1].text, "10.77.1.11", "with its original answer")
+        t:assert_eq(#asked("inflight.example.test"), 1, "the original request did not retry")
 
         local pre = query(t, "pre.example.test", "A")
-        t:assert(pre.source == "dns" and pre.server == "10.77.0.3", "what was learned before the change is discarded")
+        t:assert(pre.exit == 0 and pre.outcome == "found" and pre.source == "dns"
+            and pre.server == "10.77.0.3", "what was learned before the change is discarded")
+        t:assert_eq(#asked("pre.example.test"), 2, "a new question refreshed the preexisting answer")
         local late = query(t, "inflight.example.test", "A")
-        -- PEI-1339: resolvd stores the old server's late reply under the
-        -- scope after the change, and serves it: `found cache via 10.77.0.1`.
-        t:assert(late.source == "dns" and late.server == "10.77.0.3",
+        -- PEI-1339's corrected source suppresses the old task's cache insertion.
+        t:assert(late.exit == 0 and late.outcome == "found" and late.source == "dns"
+            and late.server == "10.77.0.3",
             "the reply learned from the old server is not served after the change (got "
             .. tostring(late.source) .. " via " .. tostring(late.server) .. ")")
+        local qs = asked("inflight.example.test")
+        t:assert_eq(#qs, 2, "a second question was sent after the invalidated task completed")
+        t:assert_eq(qs[2] and qs[2].server, "10.77.0.3", "it reached the replacement server")
+        local hit = query(t, "inflight.example.test", "A")
+        t:assert(hit.exit == 0 and hit.outcome == "found" and hit.source == "cache"
+            and hit.server == "10.77.0.3", "the new request can cache the replacement server's answer")
+        t:assert_eq(#asked("inflight.example.test"), 2, "the cache hit sent no further question")
     end)
