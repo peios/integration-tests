@@ -8,9 +8,11 @@
 --
 -- Own VMs, and the order matters: the lease starts with no DNS servers
 -- (option 6 withheld) so the first test sees a scope with none; the
--- second adds `Dns FallbackServers`; the third names the machine and
--- re-arms the DHCP server with both addresses and renews, so the scope
--- gains its servers; the fourth demotes 10.77.0.1 and flushes; the fifth
+-- second removes the default DNS claim and adds `Dns FallbackServers`
+-- for a name outside the lease's domain, then restores the claim; the
+-- third names the machine and re-arms the DHCP server with both addresses
+-- and renews, so the scope gains its servers; the fourth demotes
+-- 10.77.0.1 and flushes; the fifth
 -- holds a question unanswered; the last stops and starts netd.
 --
 -- Requests go to the native socket as SYSTEM. Status and flush are read
@@ -53,7 +55,7 @@ local function rr(t, data) return { type = t, data = data, ttl = 60 } end
 local H = {}
 dns.serve(gw, {
     zone = {
-        ["fb.example.test"] = { rr("A", "10.77.0.201") },
+        ["fb.fallback.test"] = { rr("A", "10.77.0.201") },
         ["fl1.example.test"] = { rr("A", "10.77.0.202") },
         ["dm.example.test"] = { rr("A", "10.77.0.203") },
         ["held.example.test"] = { rr("A", "10.77.0.204") },
@@ -275,7 +277,7 @@ local COUNTERS = { "queries", "synthetic", "cache_hits", "upstream_sent", "upstr
 -- Tests
 -- ---------------------------------------------------------------------------
 
-test("status: every scope in the snapshot, one with no servers that takes no part in routing included; subnets are the interface's own addresses; no level; the fields' types; an empty hostname when there is none",
+test("status: every scope in the snapshot, one with no servers included; subnets are the interface's own addresses; no level; the fields' types; an empty hostname when there is none",
     { spec = "resolvd *native-requests.status-scopes-every-scope resolvd *native-requests.status-subnets-are-interface-addresses resolvd *native-requests.status-level-not-reported PSPU *nri-requests.status-scopes PSPU *nri-requests.status-counters" }, function(t)
         local s = wait_status(function(s)
             local sc = scope_of(s, "eth0")
@@ -328,34 +330,47 @@ test("status: every scope in the snapshot, one with no servers that takes no par
         t:assert(has, "10.77.0.50/24: the address itself")
         t:assert(not net, "not 10.77.0.0/24, the network it is in")
 
-        -- The serverless scope takes no part in routing: with no fallback,
-        -- a question is unavailable and nothing is asked.
+        -- The matching scope has no servers: the question is
+        -- unavailable and nothing is asked upstream.
         local r = resolve("nr.example.test")
         gw:serve({ timeout = 1 })
         t:log("question with no servers anywhere: " .. show(r))
-        t:assert_eq(r.outcome, "unavailable", "no routable scope: unavailable")
+        t:assert_eq(r.outcome, "unavailable", "the matching scope has no servers: unavailable")
         t:assert_eq(#asked("nr.example.test"), 0, "nothing was asked upstream")
     end)
 
 test("status fallback_servers: FallbackServers as parsed — trimmed, in canonical form, malformed strings dropped",
     { spec = "resolvd *native-requests.status-fallback-servers PSPU *nri-requests.status-fallback-servers" }, function(t)
         t:assert_eq(list(rstatus().fallback_servers), "", "none configured: an empty list")
+        network.write(sut, "Profiles\\default", { ["Dns.Default"] = "dword:0" })
         network.write(sut, "Dns", { FallbackServers = "multi: 10.77.0.1 ,fd77:0:0::1,not-an-address" })
-        local s = wait_status(function(s) return #(s.fallback_servers or {}) > 0 end, 20)
-        t:assert(s, "the fallback servers appear in status")
+        local s = wait_status(function(s)
+            local sc = scope_of(s, "eth0")
+            local i = network.iface(network.status(sut), "eth0")
+            return #(s.fallback_servers or {}) > 0 and sc and #sc.servers == 0 and sc.default_route == false
+                and i and network.bound(i) and i.level == "routed" and network.has_address(i, "10.77.0.50")
+        end, 45)
+        t:assert(s, "fallback servers appear, with routed eth0 serverless and its default DNS claim disabled")
         t:log("fallback_servers: " .. list(s.fallback_servers) .. "; registry: "
             .. tostring(network.get(sut, "Dns", "FallbackServers")))
         t:assert_eq(list(s.fallback_servers), "10.77.0.1,fd77::1", "the two addresses, as parsed; the malformed string dropped")
 
-        -- They are the servers in use: eth0 has none, so the fallback
-        -- scope answers, and its answer is cached.
-        local r = resolve("fb.example.test")
+        -- The name is outside eth0's domain, and its default DNS claim
+        -- is disabled: the fallback scope answers and its answer is cached.
+        local r = resolve("fb.fallback.test")
         t:log("via the fallback servers: " .. show(r))
         if r.source ~= "dns" then diag(t, "fallback") end
         t:assert_eq(r.source, "dns", "answered by a fallback server")
         t:assert_eq(r.server, "10.77.0.1", "… the first one")
-        r = resolve("fb.example.test")
+        r = resolve("fb.fallback.test")
         t:assert_eq(r.source, "cache", "the fallback scope's answer is in the cache")
+        network.reg(sut, { "del", network.KEY .. "\\Profiles\\default", "Dns.Default" }):assert_ok()
+        t:assert(wait_status(function(s)
+            local sc = scope_of(s, "eth0")
+            local i = network.iface(network.status(sut), "eth0")
+            return sc and #sc.servers == 0 and sc.default_route == true
+                and i and network.bound(i) and i.level == "routed" and network.has_address(i, "10.77.0.50")
+        end, 45), "eth0's default DNS claim follows its route again")
     end)
 
 test("status hostname: the hostname in use, as the resolver knows it; servers from a renewed lease appear in the scope",
@@ -420,7 +435,7 @@ test("status demoted lists the scope's servers demoted now; flush empties the ca
         end
         t:assert(window, "a quiet window was found")
         if window == 1 then
-            -- fb.example.test (the fallback scope), fl1 and dm (eth0's).
+            -- fb.fallback.test (the fallback scope), fl1 and dm (eth0's).
             t:assert(before.cache_entries >= 3, "before: entries in the fallback scope and in eth0's")
         end
         t:assert(before.cache_entries >= 1, "before: the cache held entries")

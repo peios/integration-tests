@@ -1,21 +1,12 @@
 -- resolvd §4.4 "Scope routing" and PSPU §6.7 "Routing", for scopes that
--- are up with no servers. Here resolvd and the contract part company:
---
--- - resolvd routes over **routable** scopes only (level link or better
---   *and* a server, TRM §1.3), so a serverless scope is skipped at every
---   step and the question goes on to another interface;
--- - PSPU §6.2 defines **up** as level link or better alone: a serverless
---   up scope "still takes every routing step it qualifies for, and a
---   question routed to it is `unavailable` without a query".
---
--- The TRM tests assert what resolvd does and pass. The PSPU tests assert
--- the contract and are `known-bug`: PEI-1337 (an exclusive scope with no
--- servers is not exclusive: the VPN leak), PEI-1360 (a default-route
--- claimant with no servers is skipped), and
--- PEI-1360 (the same for the search-domain and
--- subnet steps, not filed).
--- Each known-bug test gathers every observation before asserting, so its
--- log is the evidence whichever assertion fails first.
+-- are up with no servers (PEI-1337 and PEI-1360). Up means level link or
+-- better; an exclusive winner must additionally be addressed. A fresh
+-- question needing upstream work stays with its earlier routing winner:
+-- no servers means unavailable without trying another scope or fallback.
+-- Only ordinary step 5 filters out serverless scopes.
+-- Unique names and NXDOMAIN without SOA avoid cache hits; synthetic names
+-- are deliberately not used. Each test first proves the observation path
+-- with a successful DNS exchange before applying its target configuration.
 --
 -- Harness: as resolvd-routing.test.lua — two dummy links joined to
 -- profiles `r5a` (dummy0) and `r5b` (dummy1) beside eth0's DHCP scope,
@@ -160,7 +151,8 @@ local set_up = false
 local function configure(t, cfg, what)
     local a, b = cfg.dummy0 or {}, cfg.dummy1 or {}
     apply({ { PROFILE.dummy0, table.unpack(profile_values(a)) },
-            { PROFILE.dummy1, table.unpack(profile_values(b)) } })
+            { PROFILE.dummy1, table.unpack(profile_values(b)) },
+            { [[Profiles\default]], { "Dns.Default", "dword", cfg.eth0_default == false and 0 or 1 } } })
     if not set_up then
         apply({
             { [[Rules\Interface\r5-d0]], { "Interface.Equal", "multi", { "dummy0" } },
@@ -192,9 +184,18 @@ local function configure(t, cfg, what)
                 return false
             end
         end
+        -- Profile changes may briefly restart DHCP. A serverless target
+        -- must still have its bound, routed lease; otherwise an unrelated
+        -- local send failure could masquerade as correct no-query routing.
+        local ei = ns and network.iface(ns, "eth0")
+        if not (ei and network.bound(ei) and ei.level == "routed"
+            and network.has_address(ei, "10.77.0.50")) then
+            why = "eth0 bound and routed with 10.77.0.50"
+            return false
+        end
         local e = scope_of(s, "eth0")
         local servers = cfg.eth0 == false and {} or { SERVER.E }
-        if not (e and same(e.servers or {}, servers) and e.default_route == true and e.metric == 100) then
+        if not (e and same(e.servers or {}, servers) and e.default_route == (cfg.eth0_default ~= false) and e.metric == 100) then
             why = "eth0"
             return false
         end
@@ -239,7 +240,7 @@ local function ask(t, name, qtype)
     return out
 end
 
---- resolvd's present behaviour: `name` went to `server` alone and the
+--- Positive observation control: `name` went to `server` alone and the
 --- answer names it and `iface`.
 local function routed_to(t, name, server, iface, why, qtype)
     local r = ask(t, name, qtype)
@@ -256,6 +257,7 @@ end
 --- Asserted after every observation has been logged.
 local function assert_unavailable_without_query(t, r, why)
     t:assert_eq(r.exit, 3, why .. ": " .. r.name .. " is unavailable (resolv exits 3; got `" .. r.head .. "`)")
+    t:assert_eq(r.outcome, "unavailable", why .. ": the summary says unavailable")
     t:assert_eq(r.source, "local", why .. ": decided without the network")
     t:assert(#r.asked == 0, why .. ": no server was asked for " .. r.name
         .. " (asked [" .. table.concat(r.asked, " ") .. "])")
@@ -267,18 +269,27 @@ local function in_addr(a)
     return table.concat(o, ".") .. ".in-addr.arpa"
 end
 
+local control = 0
 local function setup(t)
     if not set_up then
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "eth0 bound a lease")
     end
+    configure(t, {}, "live DNS control before the target configuration")
+    apply({ { "Dns", list_value("FallbackServers", { SERVER.E }) } })
+    t:assert(wait_until(function()
+        local s = network.call(sut, { query = "status" }, { path = RSOCK })
+        return s and same(s.fallback_servers or {}, { SERVER.E })
+    end, { timeout = 15, interval = 0.25, desc = "reachable fallback configured" }), "fallback configured")
+    control = control + 1
+    routed_to(t, "serverless-control-" .. control .. ".other.test", SERVER.E, "eth0", "live DNS control")
 end
 
 -- ---------------------------------------------------------------------------
--- What resolvd does (TRM)
+-- Up scopes and the step-5 boundary
 -- ---------------------------------------------------------------------------
 
-test("only routable scopes take part: an up scope with no servers is never chosen, and its search domain, subnet and default-route flag have no effect",
-    { spec = "resolvd *engine-routing.only-routable-scopes-take-part" }, function(t)
+test("an up scope without servers keeps its domain, subnet and default-route claims for fresh upstream questions",
+    { spec = "resolvd *engine-routing.serverless-scope-keeps-selection" }, function(t)
         setup(t)
         -- dummy0: addressed, no servers, corp.test, claims the default
         -- route at metric 50 (ahead of eth0's 100).
@@ -286,13 +297,13 @@ test("only routable scopes take part: an up scope with no servers is never chose
             dummy0 = { addr = { "10.91.0.1/24" }, domains = { "corp.test" }, default = true, metric = 50 },
             dummy1 = {},
         }, "dummy0 serverless with a domain, a subnet and the default-route flag")
-        routed_to(t, "s1.corp.test", SERVER.E, "eth0", "a name under dummy0's domain")
-        routed_to(t, in_addr("10.91.0.7"), SERVER.E, "eth0", "the reverse of an address in dummy0's subnet", "PTR")
-        routed_to(t, "s1.other.test", SERVER.E, "eth0", "an unclaimed name, dummy0 being the lower-metric claimant")
+        assert_unavailable_without_query(t, ask(t, "s1.corp.test"), "dummy0 holds the domain")
+        assert_unavailable_without_query(t, ask(t, in_addr("10.91.0.7"), "PTR"), "dummy0 holds the subnet")
+        assert_unavailable_without_query(t, ask(t, "s1.other.test"), "dummy0 is the lower-metric default claimant")
     end)
 
-test("an exclusive scope at link, or with no servers, is not exclusive: the first routes as an ordinary scope, the second takes part in nothing",
-    { spec = "resolvd *engine-routing.exclusive-without-servers-or-address-not-exclusive" }, function(t)
+test("an exclusive scope at link routes ordinarily; once addressed it is exclusive even without servers",
+    { spec = "resolvd *engine-routing.serverless-scope-keeps-selection" }, function(t)
         setup(t)
         configure(t, {
             dummy0 = { servers = { SERVER.A }, domains = { "vpn.test" }, exclusive = true, metric = 50 },
@@ -302,38 +313,50 @@ test("an exclusive scope at link, or with no servers, is not exclusive: the firs
         routed_to(t, "s2.vpn.test", SERVER.A, "dummy0", "exclusive at link: step 2 still gives it its own domain")
 
         configure(t, {
+            dummy0 = { domains = { "vpn.test" }, exclusive = true, metric = 50 },
+            dummy1 = {},
+        }, "dummy0 exclusive at link, without servers")
+        routed_to(t, "s2link.other.test", SERVER.E, "eth0", "link alone still does not activate exclusivity")
+        assert_unavailable_without_query(t, ask(t, "s2link.vpn.test"), "a serverless link still owns its domain")
+
+        configure(t, {
             dummy0 = { addr = { "10.91.0.1/24" }, domains = { "vpn.test" }, exclusive = true, metric = 50 },
             dummy1 = {},
         }, "dummy0 exclusive and addressed, no servers")
-        routed_to(t, "s2b.other.test", SERVER.E, "eth0", "exclusive with no servers: an unclaimed name goes to eth0")
-        routed_to(t, "s2b.vpn.test", SERVER.E, "eth0", "exclusive with no servers: even its own domain goes to eth0")
+        assert_unavailable_without_query(t, ask(t, "s2b.other.test"), "addressed exclusive scope keeps an unclaimed name")
+        assert_unavailable_without_query(t, ask(t, "s2b.vpn.test"), "addressed exclusive scope keeps its own domain")
     end)
 
-test("step 5 is reached when no routable scope claims the default route, including when the only claimant has no servers: the lowest metric, then the earliest",
-    { spec = "resolvd *engine-routing.step-lowest-metric" }, function(t)
+test("step 5 requires no earlier claimant and selects only scopes with servers: the lowest metric, then the earliest",
+    { spec = "resolvd *engine-routing.serverless-scope-keeps-selection PSPU *nri-resolution.route-lowest-metric-with-servers" }, function(t)
         setup(t)
-        -- eth0 (routed, so a claimant) has no server; neither dummy claims.
+        -- eth0 has no server and explicitly declines; neither dummy claims.
         configure(t, {
             dummy0 = { addr = { "10.91.0.1/24" }, servers = { SERVER.A }, metric = 200 },
             dummy1 = { addr = { "10.92.0.1/24" }, servers = { SERVER.B }, metric = 50 },
-            eth0 = false,
-        }, "eth0 claims with no server; dummy1 at 50, dummy0 at 200")
+            eth0 = false, eth0_default = false,
+        }, "eth0 declines with no server; dummy1 at 50, dummy0 at 200")
         routed_to(t, "s3.other.test", SERVER.B, "dummy1", "the lowest metric with a server")
         configure(t, {
             dummy0 = { addr = { "10.91.0.1/24" }, servers = { SERVER.A }, metric = 200 },
             dummy1 = { addr = { "10.92.0.1/24" }, servers = { SERVER.B }, metric = 200 },
-            eth0 = false,
-        }, "eth0 claims with no server; both dummies at 200")
+            eth0 = false, eth0_default = false,
+        }, "eth0 declines with no server; both dummies at 200")
         routed_to(t, "s3b.other.test", SERVER.A, "dummy0", "equal metrics: the earlier")
+        configure(t, {
+            dummy0 = { addr = { "10.91.0.1/24" }, metric = 10 },
+            dummy1 = { addr = { "10.92.0.1/24" }, servers = { SERVER.B }, metric = 200 },
+            eth0 = false, eth0_default = false,
+        }, "lower-metric serverless scopes decline; dummy1 alone has servers")
+        routed_to(t, "s3c.other.test", SERVER.B, "dummy1", "step 5 excludes serverless scopes")
     end)
 
 -- ---------------------------------------------------------------------------
--- What the contract requires (PSPU; known bugs)
+-- Normative serverless winner regressions (PSPU)
 -- ---------------------------------------------------------------------------
 
-test("an exclusive scope at addressed takes every question even with no servers: each is unavailable without a query, and no other interface's server is consulted",
-    { spec = "PSPU *nri-resolution.route-exclusive-takes-every-question PSPU *nri-resolution.exclusive-excludes-every-other-server",
-      tags = { "known-bug" } }, function(t)
+test("an exclusive scope at addressed takes every fresh upstream question even with no servers: each is unavailable without a query, and no other interface's server is consulted",
+    { spec = "PSPU *nri-resolution.route-exclusive-takes-every-question PSPU *nri-resolution.exclusive-excludes-every-other-server" }, function(t)
         setup(t)
         -- The VPN whose servers have not arrived: dummy0 exclusive and
         -- addressed, no servers yet; dummy1 holds eng.corp.test with a
@@ -348,30 +371,24 @@ test("an exclusive scope at addressed takes every question even with no servers:
             ask(t, "k1.vpn.test"),
             ask(t, in_addr("10.77.0.9"), "PTR"),
         }
-        -- PEI-1337: resolvd ignores the serverless exclusive scope and
-        -- routes on: k1.other.test, k1.vpn.test and the PTR go to eth0's
-        -- 10.77.0.1, k1.eng.corp.test to dummy1's 10.77.0.3.
         for _, r in ipairs(seen) do
             assert_unavailable_without_query(t, r, "the exclusive scope takes it")
         end
     end)
 
 test("of several exclusive scopes the lowest metric takes the question, with servers or without",
-    { spec = "PSPU *nri-resolution.route-several-exclusive-lowest-metric", tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-resolution.route-several-exclusive-lowest-metric" }, function(t)
         setup(t)
         configure(t, {
             dummy0 = { addr = { "10.91.0.1/24" }, exclusive = true, metric = 50 },
             dummy1 = { addr = { "10.92.0.1/24" }, servers = { SERVER.B }, exclusive = true, metric = 200 },
         }, "dummy0 exclusive at 50 without servers, dummy1 exclusive at 200 with one")
         local r = ask(t, "k2.other.test")
-        -- PEI-1337: resolvd skips serverless dummy0 and gives the question
-        -- to dummy1, the higher-metric exclusive scope (10.77.0.3).
         assert_unavailable_without_query(t, r, "dummy0, the lowest-metric exclusive scope, takes it")
     end)
 
 test("the default-route claimant with the lowest metric takes an unmatched question even with no servers; step 5 is only for when no interface claims",
-    { spec = "PSPU *nri-resolution.route-default-route-claimant PSPU *nri-resolution.route-lowest-metric-with-servers",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-resolution.route-default-route-claimant PSPU *nri-resolution.route-lowest-metric-with-servers" }, function(t)
         setup(t)
         -- eth0 (routed: the claimant, metric 100) got no DNS server from
         -- DHCP; dummy0 has one and declines the default route
@@ -389,16 +406,12 @@ test("the default-route claimant with the lowest metric takes an unmatched quest
             eth0 = false,
         }, "eth0 claims at 100 serverless; dummy1 claims at 200 with a server")
         local outranked = ask(t, "k3b.other.test")
-        -- PEI-1360: resolvd skips serverless eth0: k3.other.test goes to
-        -- dummy0 (10.77.0.2), which declined the default route, and
-        -- k3b.other.test to dummy1 (10.77.0.3), the higher-metric claimant.
         assert_unavailable_without_query(t, declined, "eth0, the only claimant, takes it")
         assert_unavailable_without_query(t, outranked, "eth0, the lowest-metric claimant, takes it")
     end)
 
 test("a serverless up scope still takes steps 2 and 3: the longest matching search domain and the reverse subnet route to it, and the question is unavailable without a query",
-    { spec = "PSPU *nri-resolution.route-longest-search-domain PSPU *nri-resolution.route-reverse-by-subnet",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-resolution.route-longest-search-domain PSPU *nri-resolution.route-reverse-by-subnet" }, function(t)
         setup(t)
         -- A VPN-like dummy0 whose servers have not arrived: addressed,
         -- corp.test, not exclusive; eth0 claims the default route.
@@ -408,9 +421,6 @@ test("a serverless up scope still takes steps 2 and 3: the longest matching sear
         }, "dummy0 serverless with corp.test and 10.91.0.1/24")
         local by_domain = ask(t, "k4.corp.test")
         local by_subnet = ask(t, in_addr("10.91.0.17"), "PTR")
-        -- PEI-1360: resolvd skips serverless
-        -- dummy0 at steps 2 and 3, and both go to eth0's 10.77.0.1: a
-        -- corp.test name leaks to the LAN resolver.
         assert_unavailable_without_query(t, by_domain, "dummy0 holds the longest matching domain")
         assert_unavailable_without_query(t, by_subnet, "dummy0's address contains the named one")
     end)

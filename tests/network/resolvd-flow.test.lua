@@ -13,12 +13,12 @@
 -- the questions each name got.
 --
 -- The machine's DNS configuration is changed from the lease: the gateway
--- first leases with no DNS server and no domain (nothing can be routed,
+-- first leases with no DNS server and no domain (no upstream can be asked,
 -- and a single label has no candidate), then is re-armed with a server,
 -- then with two search domains (option 119), each time followed by a
 -- `renew`, which brings the new lease and a new snapshot. Last the
--- servers are taken away again mid-question, and `FallbackServers`
--- gives the fallback scope.
+-- servers are taken away again mid-question; after removing the default
+-- DNS claim, `FallbackServers` gives the fallback scope.
 --
 -- Not here: candidates going to different scopes (two interfaces) is
 -- resolvd-flow-scopes.test.lua; the in-flight ceiling row is
@@ -237,8 +237,8 @@ local DOMAINS = { { 119, gateway.opt.names({ "one.test", "two.test" }) } }
 -- ---------------------------------------------------------------------------
 -- No server anywhere, no search domain.
 
-test("a candidate no scope can take is answered unavailable, source local, no server, no interface, rcode 0",
-    { spec = "resolvd *engine-flow.unroutable-candidate-is-unavailable resolvd *engine-flow.report-unroutable" },
+test("a candidate selected by a serverless scope is answered unavailable, source local, no server, no interface, rcode 0",
+    { spec = "resolvd *engine-routing.serverless-scope-keeps-selection resolvd *engine-flow.report-scope-without-servers" },
     function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "netd bound")
         serve_until_r(t, function(s) return eth0(s) ~= nil end, "resolvd has eth0's scope")
@@ -457,8 +457,17 @@ test("a scope left with no servers during a question answers unavailable, source
 
 test("an answer through the fallback scope has no interface: a server's reply, a cache hit and exhausted attempts",
     { spec = "resolvd *engine-flow.fallback-scope-has-no-interface" }, function(t)
+        -- The lease's one.test/two.test domains do not match these
+        -- names. Drop its default DNS claim for this fallback phase too.
+        network.write(sut, "Profiles\\default", { ["Dns.Default"] = "dword:0" })
         network.write(sut, "Dns", { FallbackServers = "sz:10.77.0.1" })
-        serve_until_r(t, function(s) return s.fallback_servers[1] == "10.77.0.1" end, "the fallback server is configured")
+        serve_until_r(t, function(s)
+            local sc = eth0(s)
+            local i = network.iface(network.status(sut), "eth0")
+            return s.fallback_servers[1] == "10.77.0.1" and sc and #sc.servers == 0
+                and sc.default_route == false and i and network.bound(i) and i.level == "routed"
+                and network.has_address(i, "10.77.0.50")
+        end, "the fallback server is configured and routed eth0 has no servers or default DNS claim", 45)
         report(t, resolve("fb.example.test", T.A), { "found", "dns", "10.77.0.1", nil, 0, "A 10.77.0.91" }, "fb.example.test")
         report(t, resolve("fb.example.test", T.A), { "found", "cache", "10.77.0.1", nil, 0, "A 10.77.0.91" }, "fb.example.test again")
         behave["silent2.example.test"] = silent

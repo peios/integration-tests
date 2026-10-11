@@ -5,10 +5,10 @@
 --
 -- Harness: the scripted gateway (helpers.gateway) with its DNS server
 -- (helpers.dns), and a whole Peios (helpers.network). The gateway's DHCP
--- offers no DNS server, so eth0's scope has none and is not routable:
--- every question that leaves the machine goes to the fallback scope,
--- which is exactly what FallbackServers configures. The gateway answers
--- on 10.77.0.1 and on a second address, 10.77.0.2, so a change of server
+-- offers no DNS server or domain, and the fixture disables eth0's
+-- default DNS claim: every question that leaves the machine goes to the
+-- fallback scope, which is exactly what FallbackServers configures. The
+-- gateway answers on 10.77.0.1 and on a second address, 10.77.0.2, so a change of server
 -- shows in which address was asked. The last test gives eth0 a server
 -- through a DHCP renewal, for the one claim about interface scopes.
 --
@@ -329,13 +329,18 @@ test("without the Dns key every value takes its default, and the key is seen whe
     { spec = "resolvd *config.absent-key-gives-defaults resolvd *config.watches-network-key-recursively" },
     function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "eth0 bound")
-        -- The premise of the file: eth0 is up in resolvd's view, with no server.
+        -- Keep the routed lease, but remove its default DNS claim so
+        -- serverless eth0 does not win before the fallback scope.
+        network.write(sut, "Profiles\\default", { ["Dns.Default"] = "dword:0" })
         local s
-        wait_until(function()
+        t:assert(gw:serve({ timeout = 45, until_ = function()
             s = rstatus()
             local sc = scope(s, "eth0")
-            return s.netd and sc ~= nil and #(sc.subnets or {}) > 0
-        end, { timeout = 30, interval = 0.25, desc = "resolvd to see eth0 addressed" })
+            local i = network.iface(network.status(sut), "eth0")
+            return s.netd and sc ~= nil and sc.default_route == false and #sc.servers == 0
+                and #(sc.subnets or {}) > 0 and i and network.bound(i) and i.level == "routed"
+                and network.has_address(i, "10.77.0.50")
+        end }), "eth0 is bound and routed, with no servers or default DNS claim")
         t:assert_eq(list_text(scope(s, "eth0").servers), "[]", "eth0's scope has no server")
 
         local exported = reg({ "export", DNS })

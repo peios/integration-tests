@@ -267,11 +267,23 @@ local function expect_asked(t, r, want, why)
         .. "], want [" .. table.concat(want, " ") .. "]")
 end
 
+local control = 0
 local function setup(t)
     hook = nil
     if not set_up then
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "eth0 bound a lease")
     end
+    -- Prove both the resolver and gateway observation path are live before
+    -- interpreting any absence of queries in the target configuration.
+    configure(t, {}, "live DNS control before the target configuration")
+    extra(t, nil)
+    control = control + 1
+    local name = "expansion-control-" .. control .. ".other.test"
+    local r = ask(t, name)
+    t:assert_eq(r.exit, 2, "live control returns NXDOMAIN")
+    t:assert_eq(r.outcome, "notfound", "live control summary")
+    t:assert_eq(r.via, SERVER.E, "live control names the responding server")
+    expect_asked(t, r, { name .. "@" .. SERVER.E }, "live DNS control")
 end
 
 -- The usual layout: dummy0 at metric 200 with a1.test and a2.test, dummy1
@@ -294,8 +306,8 @@ end
 -- The domains and the order
 -- ---------------------------------------------------------------------------
 
-test("a single label is expanded with every routable scope's domains, scopes by metric, then ExtraSearchDomains; the candidates are asked one at a time, in that order, each routed on its own",
-    { spec = "resolvd *engine-expansion.routable-scope-domains-then-extra resolvd *engine-expansion.candidates-asked-one-at-a-time PSPU *nri-resolution.candidates-asked-in-turn" },
+test("a single label is expanded with every up scope's domains, scopes by metric, then ExtraSearchDomains; the candidates are asked one at a time, in that order, each routed on its own",
+    { spec = "resolvd *engine-expansion.up-scope-domains resolvd *engine-expansion.candidates-asked-one-at-a-time PSPU *nri-resolution.candidates-asked-in-turn" },
     function(t)
         setup(t)
         usual(t)
@@ -354,8 +366,8 @@ test("a multi-label name, and the root, have one candidate, themselves: never ex
         expect_asked(t, root, { ".@" .. SERVER.E }, "the root: asked as itself, once")
     end)
 
-test("an up scope with no servers contributes none of its search domains",
-    { spec = "resolvd *engine-expansion.scope-without-servers-contributes-no-domains" }, function(t)
+test("a serverless up scope contributes its domains in metric order; an unavailable candidate stops expansion",
+    { spec = "resolvd *engine-expansion.up-scope-domains" }, function(t)
         setup(t)
         configure(t, {
             dummy0 = { addr = { "10.91.0.1/24" }, domains = { "a1.test" }, metric = 50 },
@@ -363,9 +375,23 @@ test("an up scope with no servers contributes none of its search domains",
         }, "dummy0 serverless with a1.test (50), dummy1 with b1.test (200)")
         extra(t, { "x.test" })
         local r = ask(t, "x9host")
-        t:assert_eq(r.exit, 2, "notfound")
-        expect_asked(t, r, { "x9host.b1.test@" .. SERVER.B, "x9host.x.test@" .. SERVER.E },
-            "a1.test, of the serverless scope, is not applied")
+        t:assert_eq(r.exit, 3, "the first candidate needs the serverless scope: unavailable")
+        t:assert_eq(r.outcome, "unavailable", "the summary says unavailable")
+        t:assert_eq(r.source, "local", "decided locally")
+        expect_asked(t, r, {}, "a1.test comes first; neither later scope nor extra domain is queried")
+
+        -- The same serverless domain after a serverful NXDOMAIN must stop
+        -- expansion at that point, rather than being omitted altogether.
+        configure(t, {
+            dummy0 = { addr = { "10.91.0.1/24" }, domains = { "a1.test" }, metric = 200 },
+            dummy1 = { addr = { "10.92.0.1/24" }, servers = { SERVER.B }, domains = { "b1.test" }, metric = 50 },
+        }, "serverful b1.test first, then serverless a1.test")
+        local later = ask(t, "x9later")
+        t:assert_eq(later.exit, 3, "NXDOMAIN followed by an unavailable candidate is unavailable")
+        t:assert_eq(later.outcome, "unavailable", "the final summary says unavailable")
+        t:assert_eq(later.source, "local", "the final candidate is decided locally")
+        expect_asked(t, later, { "x9later.b1.test@" .. SERVER.B },
+            "one live NXDOMAIN, then local unavailable; x.test is not queried")
     end)
 
 test("while an exclusive scope is chosen its search domains are the only ones: no other scope's and no ExtraSearchDomains",
@@ -495,11 +521,11 @@ test("unavailable is the answer: later candidates are not asked",
     end)
 
 -- ---------------------------------------------------------------------------
--- What the contract requires (known bugs)
+-- Serverless search-domain regressions (PSPU)
 -- ---------------------------------------------------------------------------
 
 test("the applicable domains are the exclusive scope's when one is up, and otherwise every up scope's, servers or not",
-    { spec = "PSPU *nri-resolution.applicable-search-domains", tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-resolution.applicable-search-domains" }, function(t)
         setup(t)
         -- An exclusive VPN-like dummy0, addressed, its servers not yet
         -- arrived: its vpn.test is the only domain, and the candidate it
@@ -517,13 +543,28 @@ test("the applicable domains are the exclusive scope's when one is up, and other
             dummy1 = { addr = { "10.92.0.1/24" }, servers = { SERVER.B }, domains = { "b1.test" }, metric = 200 },
         }, "dummy0 serverless with a1.test, not exclusive")
         local plain = ask(t, "k10b")
-        -- PEI-1337: resolvd ignores the serverless exclusive scope and
-        -- expands k10host with b1.test and x.test, asking 10.77.0.3 and
-        -- 10.77.0.1 (the VPN leak).
         t:assert_eq(excl.exit, 3, "k10host: only vpn.test applies and its candidate is unavailable (got `" .. excl.head .. "`)")
+        t:assert_eq(excl.outcome, "unavailable", "exclusive: the summary says unavailable")
+        t:assert_eq(excl.source, "local", "exclusive: decided locally")
         t:assert(#excl.asked == 0, "k10host: nothing asked (asked [" .. table.concat(show(excl.asked), " ") .. "])")
-        -- PEI-1360 (widened to steps 2, 3 and expansion): resolvd drops a1.test (the scope
-        -- has no servers) and asks k10b.b1.test and k10b.x.test.
         t:assert_eq(plain.exit, 3, "k10b: k10b.a1.test comes first and is unavailable (got `" .. plain.head .. "`)")
+        t:assert_eq(plain.outcome, "unavailable", "ordinary: the summary says unavailable")
+        t:assert_eq(plain.source, "local", "ordinary: decided locally")
         t:assert(#plain.asked == 0, "k10b: nothing asked (asked [" .. table.concat(show(plain.asked), " ") .. "])")
+    end)
+
+
+test("a serverless exclusive winner with no domains leaves a bare label notfound, ignoring other and extra domains",
+    { spec = "PSPU *nri-resolution.applicable-search-domains PSPU *nri-resolution.no-domain-is-notfound-without-query" }, function(t)
+        setup(t)
+        configure(t, {
+            dummy0 = { addr = { "10.91.0.1/24" }, exclusive = true, metric = 200 },
+            dummy1 = { addr = { "10.92.0.1/24" }, servers = { SERVER.B }, domains = { "b1.test" }, metric = 50 },
+        }, "exclusive dummy0 has no servers or domains")
+        extra(t, { "x.test" })
+        local r = ask(t, "k10empty")
+        t:assert_eq(r.exit, 2, "no candidate: notfound rather than unavailable")
+        t:assert_eq(r.outcome, "notfound", "the summary says notfound")
+        t:assert_eq(r.source, "local", "decided locally")
+        expect_asked(t, r, {}, "neither other scopes, extra domains nor the bare label is queried")
     end)

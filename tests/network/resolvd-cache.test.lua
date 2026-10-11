@@ -24,7 +24,8 @@
 -- the reply lands (a flush, a change of servers) has that long.
 --
 -- The scope tests come last: they move the lease's servers with DHCP
--- renewals, and the fallback scope stands in when the lease has none.
+-- renewals; with eth0's default DNS claim disabled, the fallback scope
+-- stands in when the lease has none.
 --
 -- Own VMs: the lease's DNS servers are changed.
 
@@ -388,9 +389,19 @@ test("a reply that arrives after a flush is stored, under the same scope",
 test("an entry's key is the candidate in lower case, the record type and the scope; the class is not in it",
     { spec = "resolvd *engine-cache.key-is-lowercase-candidate-type-scope PSPU *nri-resolution.cache-keyed-by-name-type-scope" },
     function(t)
-        -- The lease loses its server: the fallback scope takes questions.
+        -- The lease loses its server and default DNS claim: no domain
+        -- claims these names, so the fallback scope takes questions.
         network.write(sut, "Dns", { FallbackServers = "multi:10.77.0.2" })
         lease_servers(t, false)
+        network.write(sut, "Profiles\\default", { ["Dns.Default"] = "dword:0" })
+        t:assert(gw:serve({ timeout = 45, until_ = function()
+            local s = rstatus()
+            local sc = s.scopes[1]
+            local i = network.iface(network.status(sut), "eth0")
+            return list(s.fallback_servers) == "10.77.0.2" and sc and sc.interface == "eth0"
+                and #sc.servers == 0 and sc.default_route == false
+                and i and network.bound(i) and i.level == "routed" and network.has_address(i, "10.77.0.50")
+        end }), "the fallback server is configured and routed eth0 has no servers or default DNS claim")
         local r = query(t, "Key.Example.TEST", "A")
         t:assert(r.source == "dns" and r.server == "10.77.0.2", "asked through the fallback scope")
         r = query(t, "key.example.test", "A")
@@ -411,7 +422,8 @@ test("an entry's key is the candidate in lower case, the record type and the sco
         t:assert_eq(rstatus().counters.cache_hits, hits + 1, "from the class-IN entry")
         t:assert_eq(#asked("key.example.test", "A"), 1, "nothing more went upstream")
 
-        -- The lease's server returns: the same name and type, another scope.
+        -- The lease's server returns: step 5 takes the same name and
+        -- type through another scope, even without a default DNS claim.
         lease_servers(t, { "10.77.0.1" })
         r = query(t, "key.example.test", "A")
         t:assert(r.source == "dns" and r.server == "10.77.0.1" and r.iface == "eth0",
@@ -424,6 +436,14 @@ test("an entry's key is the candidate in lower case, the record type and the sco
         t:assert_eq(#asked("key.example.test", "A"), 2, "two questions upstream in all, one per scope")
         lease_servers(t, { "10.77.0.1" })
         network.delete(sut, "Dns")
+        network.reg(sut, { "del", network.KEY .. "\\Profiles\\default", "Dns.Default" }):assert_ok()
+        t:assert(gw:serve({ timeout = 45, until_ = function()
+            local sc = rstatus().scopes[1]
+            local i = network.iface(network.status(sut), "eth0")
+            return sc and sc.interface == "eth0" and list(sc.servers) == "10.77.0.1"
+                and sc.default_route == true and i and network.bound(i) and i.level == "routed"
+                and network.has_address(i, "10.77.0.50")
+        end }), "eth0's default DNS claim follows its route again")
     end)
 
 test("when a scope's servers change, every answer learned through it is discarded, a reply still in flight included",
