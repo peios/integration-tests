@@ -1098,26 +1098,22 @@ test("an IPv6 link-local address comes back in a tuple with scope id 0",
 -- found, but not in the family asked
 -- ---------------------------------------------------------------------------
 
-test("a name resolvd finds with no address of the family asked is NOTFOUND, ENOENT, HOST_NOT_FOUND, as a name that does not exist",
-    { spec = "resolvd *nss-module.found-without-family-is-host-not-found" }, function(t)
-        -- PEI-1345: the spec wants NO_DATA here; the TRM records HOST_NOT_FOUND.
+test("a name resolvd finds with no address of the family asked is NOTFOUND, ENOENT, NO_DATA",
+    { spec = "resolvd *nss-module.found-without-family-is-no-data" }, function(t)
         local r = pt(t, { { "n3", "v4only.nss.test", "10" }, { "n2", "v4only.nss.test", "10" } })
         for _, x in ipairs(r) do
             t:assert(x.reply and x.reply.outcome == "found", x.op .. ": resolvd said found")
             t:assert_eq(#addresses_of(x.reply), 0, x.op .. ": with no IPv6 address")
-            expect(t, x, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, x.op)
+            expect(t, x, NSS.NOTFOUND, E.ENOENT, H.NO_DATA, x.op)
         end
     end)
 
 test("a found name with no address of the family asked is NOTFOUND with NO_DATA",
-    { spec = "PSPU *nri-shim.found-without-family-is-no-data", tags = { "known-bug" } }, function(t)
-        -- PEI-1345: the shim gives HOST_NOT_FOUND, the h_errno of a name
-        -- that does not exist.
+    { spec = "PSPU *nri-shim.found-without-family-is-no-data" }, function(t)
         local r = pt(t, { { "n3", "v4only.nss.test", "10" } })[1]
         t:assert(r.reply and r.reply.outcome == "found" and #addresses_of(r.reply) == 0,
             "resolvd said found, with no IPv6 address")
-        t:assert_eq(r.status, NSS.NOTFOUND, "NOTFOUND")
-        t:assert_eq(r.herrno, H.NO_DATA, "h_errno NO_DATA")
+        expect(t, r, NSS.NOTFOUND, E.ENOENT, H.NO_DATA, "found without the requested family")
     end)
 
 -- ---------------------------------------------------------------------------
@@ -1285,7 +1281,8 @@ test("gethostbyname4_r's TTL is the least among all the addresses",
 test("notfound is NOTFOUND, ENOENT, HOST_NOT_FOUND",
     { spec = "resolvd *nss-module.notfound-is-host-not-found PSPU *nri-shim.notfound-is-host-not-found" }, function(t)
         scope_ready(t)
-        local r = pt(t, { { "n4", "nosuch.example.test" }, { "n3", "nosuch.example.test", "2" } }, { serve = true })
+        local r = pt(t, { { "n4", "nosuch.example.test" }, { "n3", "nosuch.example.test", "2" },
+                         { "a2", "10.77.0.85" }, { "a1", "10.77.0.85" } }, { serve = true })
         for _, x in ipairs(r) do
             t:assert_eq(x.reply and x.reply.outcome, "notfound", x.op .. ": resolvd said notfound")
             expect(t, x, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, x.op)
@@ -1318,19 +1315,19 @@ test("a reverse is rendered from the PTR records in order, trailing dots removed
         t:assert_eq(b.ttl, 30, "the least TTL includes the CNAME's (30) as well as the PTR's (300)")
     end)
 
-test("a reverse found with no records, or with records but no PTR among them, is NOTFOUND with HOST_NOT_FOUND",
+test("a reverse found with no records, or with records but no PTR among them, is NOTFOUND with NO_DATA",
     { spec = "resolvd *nss-reverse.found-without-records-is-notfound resolvd *nss-reverse.no-ptr-record-is-notfound" }, function(t)
         scope_ready(t)
         local r = pt(t, { { "a2", "10.77.0.84" }, { "a2", "10.77.0.83" } }, { serve = true })
         local empty, cname = r[1], r[2]
         t:assert_eq(empty.reply and empty.reply.outcome, "found", "10.77.0.84: resolvd said found")
         t:assert_eq(#((empty.reply and empty.reply.records) or {}), 0, "10.77.0.84: with no records")
-        expect(t, empty, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, "found without records")
+        expect(t, empty, NSS.NOTFOUND, E.ENOENT, H.NO_DATA, "found without records")
         t:assert_eq(cname.reply and cname.reply.outcome, "found", "10.77.0.83: resolvd said found")
         local recs = (cname.reply and cname.reply.records) or {}
         t:assert(#recs > 0, "10.77.0.83: with records")
         for _, rec in ipairs(recs) do t:assert(rec.type ~= 12, "none of them a PTR (type " .. tostring(rec.type) .. ")") end
-        expect(t, cname, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, "records but no PTR")
+        expect(t, cname, NSS.NOTFOUND, E.ENOENT, H.NO_DATA, "records but no PTR")
     end)
 
 -- ---------------------------------------------------------------------------
@@ -1396,7 +1393,9 @@ test("a name is asked as a lookup in the entry point's family, the reply's addre
         local v6only = frame_hex({ ok = true, kind = "addresses", outcome = "found", canonical = "six.nss.test",
             addresses = { { address = "fd66::6", ttl = 50 } }, source = "dns", validation = "unvalidated" })
         local e = pt(t, { { "n3", "six.nss.test", "2" } }, { fake = "hex:" .. v6only })[1]
-        expect(t, e, NSS.NOTFOUND, E.ENOENT, H.HOST_NOT_FOUND, "nothing left after the filter")
+        t:assert_eq(e.reply and e.reply.outcome, "found", "the stand-in said found")
+        same_list(t, addresses_of(e.reply), { "fd66::6" }, "only the unrequested family arrived")
+        expect(t, e, NSS.NOTFOUND, E.ENOENT, H.NO_DATA, "nothing left after the filter")
     end)
 
 -- ---------------------------------------------------------------------------
