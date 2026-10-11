@@ -1,10 +1,10 @@
 -- resolvd §4.4 "Scope routing", with PSPU §6.7 "Scopes" and the parts of
--- "Routing" resolvd meets — which scope each candidate goes to: the
+-- "Routing" — which scope each candidate goes to: the
 -- exclusive step, the longest search domain and its tie-break, the
 -- reverse subnet, the default-route claimant, the fallback scope, and
 -- that a candidate's every attempt stays with its scope. The serverless
--- cases (a scope that is up with no servers), where resolvd and PSPU part
--- company, are in resolvd-routing-serverless.test.lua.
+-- cases (a scope that is up with no servers) are in
+-- resolvd-routing-serverless.test.lua.
 --
 -- Harness: the scripted gateway (helpers.gateway) with its DNS server
 -- (helpers.dns), and a whole Peios (helpers.network). Scopes are made
@@ -183,7 +183,8 @@ local set_up = false
 local function configure(t, cfg, what)
     local a, b = cfg.dummy0 or {}, cfg.dummy1 or {}
     apply({ { PROFILE.dummy0, table.unpack(profile_values(a)) },
-            { PROFILE.dummy1, table.unpack(profile_values(b)) } })
+            { PROFILE.dummy1, table.unpack(profile_values(b)) },
+            { [[Profiles\default]], { "Dns.Default", "dword", cfg.eth0_default == false and 0 or 1 } } })
     if not set_up then
         apply({
             { [[Rules\Interface\r5-d0]], { "Interface.Equal", "multi", { "dummy0" } },
@@ -215,9 +216,18 @@ local function configure(t, cfg, what)
                 return false
             end
         end
+        -- Profile changes may briefly restart DHCP. A serverless target
+        -- must still have its bound, routed lease; otherwise an unrelated
+        -- local send failure could masquerade as correct no-query routing.
+        local ei = ns and network.iface(ns, "eth0")
+        if not (ei and network.bound(ei) and ei.level == "routed"
+            and network.has_address(ei, "10.77.0.50")) then
+            why = "eth0 bound and routed with 10.77.0.50"
+            return false
+        end
         local e = scope_of(s, "eth0")
         local servers = cfg.eth0 == false and {} or { SERVER.E }
-        if not (e and same(e.servers or {}, servers) and e.default_route == true and e.metric == 100) then
+        if not (e and same(e.servers or {}, servers) and e.default_route == (cfg.eth0_default ~= false) and e.metric == 100) then
             why = "eth0"
             return false
         end
@@ -437,8 +447,8 @@ test("step 3: a reverse name goes to the scope holding an address whose prefix c
 -- Step 4
 -- ---------------------------------------------------------------------------
 
-test("step 4: among the routable default-route claimants, the lowest metric takes the candidate, then the earliest",
-    { spec = "resolvd *engine-routing.step-default-route" }, function(t)
+test("step 4: among the up default-route claimants, the lowest metric takes the candidate, then the earliest",
+    { spec = "resolvd *engine-routing.serverless-scope-keeps-selection PSPU *nri-resolution.route-default-route-claimant" }, function(t)
         setup(t)
         -- dummy0 has the lowest metric of all but does not claim; dummy1
         -- claims at 200; eth0 (routed) claims at 100.
@@ -527,15 +537,15 @@ test("demotion does not move routing: a scope whose every server is demoted stil
     end)
 
 -- ---------------------------------------------------------------------------
--- No routable scope; the fallback scope
+-- No earlier routing winner or serverful ordinary scope; the fallback scope
 -- ---------------------------------------------------------------------------
 
 test("with no scope able to take a question and no fallback servers, it is unavailable at once, without a query",
     { spec = "PSPU *nri-resolution.no-scope-is-unavailable-without-query" }, function(t)
         setup(t)
         fallback(t, nil)
-        configure(t, { dummy0 = { addr = { "10.91.0.1/24" } }, dummy1 = {}, eth0 = false },
-            "no scope has a server")
+        configure(t, { dummy0 = { addr = { "10.91.0.1/24" } }, dummy1 = {}, eth0 = false, eth0_default = false },
+            "no scope has a server or claims the unmatched question")
         local before = #dns.queries(gw)
         local r = ask(t, "r7a.other.test")
         t:assert_eq(r.exit, 3, "unavailable")
@@ -551,13 +561,13 @@ test("with no scope able to take a question and no fallback servers, it is unava
         t:assert(#any == 0, "the gateway saw no question at all")
     end)
 
-test("with no routable scope the fallback scope takes the question: FallbackServers and ExtraSearchDomains; once an interface has a server the fallback takes nothing, and what was cached through it is not consulted",
-    { spec = "resolvd *engine-routing.step-fallback resolvd *engine-routing.fallback-unused-while-any-interface-has-a-server PSPU *nri-resolution.fallback-scope-from-registry PSPU *nri-resolution.route-fallback-only-without-interface-servers" },
+test("with no earlier claimant and no interface servers the fallback scope takes the question: FallbackServers and ExtraSearchDomains; once an interface has a server the fallback takes nothing, and what was cached through it is not consulted",
+    { spec = "resolvd *engine-routing.serverless-scope-keeps-selection PSPU *nri-resolution.fallback-scope-from-registry PSPU *nri-resolution.route-fallback-only-without-interface-servers" },
     function(t)
         setup(t)
         ZONE["r7c.fb.test"] = { { type = "A", ttl = 300, data = "10.77.0.87" } }
-        configure(t, { dummy0 = { addr = { "10.91.0.1/24" } }, dummy1 = {}, eth0 = false },
-            "no scope has a server")
+        configure(t, { dummy0 = { addr = { "10.91.0.1/24" } }, dummy1 = {}, eth0 = false, eth0_default = false },
+            "no scope has a server or claims the unmatched question")
         apply({ { "Dns", list_value("ExtraSearchDomains", { "fb.test" }) } })
         fallback(t, { SERVER.F })
 

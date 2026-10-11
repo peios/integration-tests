@@ -321,10 +321,17 @@ test("a timeout counts as failed and not answered",
 
 test("a transaction whose socket cannot connect is counted as sent and as failed, though nothing reached the wire",
     { spec = "resolvd *engine-counters.upstream-sent resolvd *engine-counters.upstream-failed" }, function(t)
-        -- The interface's server goes, and the fallback scope's only
-        -- server is an IPv6 address the machine has no route to.
+        -- Remove the interface's server and default DNS claim. Its
+        -- domains do not match this name, so the fallback scope wins;
+        -- its only server is an IPv6 address the machine has no route to.
         relese({ dns = false, options = DOMAINS })
-        serve_until_r(t, function(s) return #s.scopes[1].servers == 0 end, "eth0's scope has no server")
+        network.write(sut, "Profiles\\default", { ["Dns.Default"] = "dword:0" })
+        serve_until_r(t, function(s)
+            local sc = s.scopes[1]
+            local i = network.iface(network.status(sut), "eth0")
+            return sc and sc.interface == "eth0" and #sc.servers == 0 and sc.default_route == false
+                and i and network.bound(i) and i.level == "routed" and network.has_address(i, "10.77.0.50")
+        end, "eth0 is bound and routed, with no servers or default DNS claim", 45)
         network.write(sut, "Dns", { FallbackServers = "sz:fd99::53" })
         serve_until_r(t, function(s) return s.fallback_servers[1] == "fd99::53" end, "the fallback server is fd99::53")
         gw:forget()
@@ -340,6 +347,13 @@ test("a transaction whose socket cannot connect is counted as sent and as failed
         t:log("log: " .. tostring(line))
         t:assert(line ~= nil, "each failure is logged against the server")
         network.reg(sut, { "del", network.KEY .. "\\Dns", "FallbackServers" }):assert_ok()
+        network.reg(sut, { "del", network.KEY .. "\\Profiles\\default", "Dns.Default" }):assert_ok()
+        serve_until_r(t, function(s)
+            local sc = s.scopes[1]
+            local i = network.iface(network.status(sut), "eth0")
+            return sc and sc.interface == "eth0" and #sc.servers == 0 and sc.default_route == true
+                and i and network.bound(i) and i.level == "routed" and network.has_address(i, "10.77.0.50")
+        end, "eth0's default DNS claim follows its route again", 45)
     end)
 
 test("the counters are reset by a restart and by nothing else: flush leaves them",

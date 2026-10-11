@@ -5,8 +5,9 @@
 --
 -- Harness: the scripted gateway (helpers.gateway) and its DNS server
 -- (helpers.dns) at A = 10.77.0.1 and B = 10.77.0.2. The lease offers no
--- DNS server, so every question goes to the fallback scope, and each
--- test sets `FallbackServers` in the registry to the servers it needs:
+-- DNS server or domain; with its default DNS claim disabled, every
+-- question goes to the fallback scope. Each test sets `FallbackServers`
+-- in the registry to the servers it needs:
 -- the gateway's addresses, an IPv6 address the machine has no route to
 -- (2001:db8::53; the gateway sends no router advertisements), or the
 -- machine's own loopback, where nothing listens on port 53.
@@ -81,12 +82,20 @@ local function rstatus()
 end
 local function list(xs) return table.concat(xs or {}, ",") end
 
---- Set the fallback servers and wait until resolvd has them.
+--- Set the fallback servers; wait for resolvd and the unclaimed, routed lease.
 local function fallback(t, servers)
     network.write(sut, "Dns", { FallbackServers = "multi:" .. table.concat(servers, ",") })
-    t:assert(gw:serve({ timeout = 15, until_ = function()
-        return list(rstatus().fallback_servers) == list(servers)
-    end }), "resolvd's fallback servers are [" .. list(servers) .. "]")
+    t:assert(gw:serve({ timeout = 45, until_ = function()
+        local s = rstatus()
+        local sc
+        for _, candidate in ipairs(s.scopes or {}) do
+            if candidate.interface == "eth0" then sc = candidate end
+        end
+        local i = network.iface(network.status(sut), "eth0")
+        return list(s.fallback_servers) == list(servers)
+            and sc ~= nil and sc.default_route == false and #sc.servers == 0
+            and i and network.bound(i) and i.level == "routed" and network.has_address(i, "10.77.0.50")
+    end }), "resolvd's fallback servers are [" .. list(servers) .. "]; eth0 is routed, serverless and not a DNS default")
 end
 
 --- resolvd's log lines, newest first (as network.logs, for resolvd).
@@ -129,6 +138,7 @@ test("one server: each of the three attempts goes to it, one at a time, each fai
     { spec = "resolvd *engine-servers.transaction-timeout resolvd *engine-servers.timeout-fails-attempt resolvd *engine-servers.single-server-gets-every-attempt resolvd *engine-servers.attempts-per-candidate resolvd *engine-servers.third-failure-is-unavailable resolvd *engine-servers.attempts-sequential PSPU *nri-limits.per-server-timeout" },
     function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "netd bound a lease")
+        network.write(sut, "Profiles\\default", { ["Dns.Default"] = "dword:0" })
         fallback(t, { A })
         local c = rstatus().counters
         local outcome, elapsed = timed(t, "silent-1.tr.test")
