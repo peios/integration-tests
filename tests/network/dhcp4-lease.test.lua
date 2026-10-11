@@ -439,9 +439,8 @@ test("the prefix comes from a contiguous non-zero mask, otherwise from the addre
         t:assert_eq(v4()[LEASED].prefix, 24, "and /24 again")
     end)
 
--- PEI-1330: a malformed option 121 makes the whole ACK unusable (it is
--- ignored like any ACK that is not a lease). Asserted as it stands.
-test("classless routes are installed and override option 3; a malformed option 121 rejects the ACK",
+-- PEI-1330: discard a malformed optional route list, not the valid lease.
+test("classless routes override option 3; malformed option 121 is discarded and option 3 supplies the default",
     { spec = "netd *dhcp4-lease.routes" },
     function(t)
         bound()
@@ -470,15 +469,42 @@ test("classless routes are installed and override option 3; a malformed option 1
         t:assert_eq(got, "10.9.0.0/16 via 10.77.0.9", "option 3 ignored beside classless routes")
         t:assert_eq(iface().gateway, nil, "no IPv4 gateway")
 
-        -- Malformed: a prefix length of 33, and an entry cut short.
-        m = renewing()
-        to_renewing(reply(m, { yiaddr = OTHER, lease = 99, extra = { { 121, "\x21\x0a\x09\x00\x00\x00\x0a\x4d\x00\x09" } } }))
-        still_renewing(t, "option 121 with prefix length 33")
-        to_renewing(reply(m, { yiaddr = OTHER, lease = 99, extra = { { 121, "\x10\x0a\x09\x0a\x4d" } } }))
-        still_renewing(t, "option 121 cut short")
-        restore_from_renewing()
-        gw:serve({ timeout = 1 })
-        t:assert_eq(netd_routes(), "0.0.0.0/0 via 10.77.0.1", "the plain lease's default route only")
+        -- Each malformed ACK must bind a visibly different, short lease.
+        -- Include valid routes before a bad tail: no partial list may survive.
+        local malformed = {
+            { "prefix length 33", "\x21\x0a\x09\x00\x00\x00\x0a\x4d\x00\x09" },
+            { "entry cut short", "\x10\x0a\x09\x0a\x4d" },
+            { "valid routes followed by a truncated entry", routes .. "\x10\x0a\x09\x0a\x4d" },
+        }
+        for _, case in ipairs(malformed) do
+            m = renewing()
+            to_renewing(reply(m, { yiaddr = OTHER, lease = 99, router = "10.77.0.254",
+                extra = { { 121, case[2] } } }))
+            s = network.serve_until(gw, sut, function(i)
+                return network.bound(i) and network.has_address(i, OTHER) and not network.has_address(i, LEASED)
+            end, { iface = true, timeout = 10 })
+            assert(s, case[1] .. ": the otherwise-valid ACK was accepted")
+            local i = network.iface(s, "eth0")
+            t:assert(i.lease.expires_in > 0 and i.lease.expires_in <= 99, case[1] .. ": the ACK's short lease")
+            t:assert_eq(i.lease.server, gw.addr, case[1] .. ": the selected server")
+            t:assert_eq(i.gateway, "10.77.0.254", case[1] .. ": option 3 gateway")
+            local kernel = v4()
+            t:assert_eq(kernel[OTHER] and kernel[OTHER].prefix, 24, case[1] .. ": the ACK's /24 in the kernel")
+            t:assert_eq(kernel[LEASED], nil, case[1] .. ": the old kernel address is removed")
+            gw:serve({ timeout = 1 })
+            t:assert_eq(netd_routes(), "0.0.0.0/0 via 10.77.0.254",
+                case[1] .. ": only the option 3 default, no old or partially decoded classless routes")
+
+            -- A fresh transaction restores the ordinary lease. The client is
+            -- now at OTHER, so do not use to_renewing's LEASED destination.
+            m = renewing()
+            gw:send_udp4(MAC, OTHER, 67, 68, reply(m))
+            assert(network.serve_until(gw, sut, function(i)
+                return network.bound(i) and network.has_address(i, LEASED) and not network.has_address(i, OTHER)
+            end, { iface = true, timeout = 10 }), case[1] .. ": ordinary renewal succeeds")
+            gw:serve({ timeout = 1 })
+            t:assert_eq(netd_routes(), "0.0.0.0/0 via 10.77.0.1", "the plain lease's default route only")
+        end
     end)
 
 test("the options kept: DNS, domain, search list, hostname, MTU, broadcast and NTP, first occurrence winning",
