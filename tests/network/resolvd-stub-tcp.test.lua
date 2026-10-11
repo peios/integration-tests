@@ -59,7 +59,14 @@ dns.serve(gw, {
         end
     end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local STUB = "127.0.0.53"
 local SOCK = "/run/resolvd/resolv.sock"
@@ -333,8 +340,8 @@ test("a connection carries one query: what follows the first message is ignored,
         t:assert_eq(#asked("second.example.test"), 0, "the second never was")
     end)
 
-test("a query with the end of file already behind it gets no reply; one whose end of file comes later is answered",
-    { spec = "resolvd *stub-receive.tcp-query-then-half-close-dropped" }, function(t)
+test("a complete TCP query is answered whether its write half-close arrives before or after it is read",
+    { tags = { "pei-1358" }, spec = "resolvd *stub-receive.tcp-query-then-half-close-dropped" }, function(t)
         ready(t)
         dns.forget(gw)
         local pid = resolvd_pid()
@@ -349,11 +356,11 @@ test("a query with the end of file already behind it gets no reply; one whose en
         t:assert(ok, "query and shutdown written while resolvd was stopped: " .. tostring(err))
         t:assert_eq(sh.ret, 0, "shutdown(SHUT_WR)")
         local r = read_reply(fd, 4)
+        t:assert(r.reply and r.reply.id == 0x7501, "complete queued query answered")
+        t:assert(#asked("halfclose.example.test") >= 1, "the queued query was asked upstream")
+        local eof = ntfe.recv(sut, fd, 3000, 4096)
         sys.close(sut, fd)
-        t:log("query + EOF waiting: closed=" .. tostring(r.closed) .. ", " .. #r.bytes .. " bytes")
-        t:assert_eq(r.closed, "eof", "the connection is closed")
-        t:assert_eq(r.bytes, "", "without a reply")
-        t:assert_eq(#asked("halfclose.example.test"), 0, "and the query was never checked or asked")
+        t:assert_eq(eof, "", "the connection closes after the reply")
 
         -- The end of file after resolvd has read the query (its question
         -- has gone upstream; the answer is held 1.5 s).

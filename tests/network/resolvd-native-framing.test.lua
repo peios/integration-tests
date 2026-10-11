@@ -81,7 +81,14 @@ dns.serve(gw, {
         return nil
     end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 -- ---------------------------------------------------------------------------
 -- Local helpers
@@ -923,10 +930,9 @@ test("a connection that closes before its request is complete is dropped without
         end
     end)
 
--- PEI-1358: this is the documented current behaviour (the end of file
--- found with the request drops it); the test passes on it.
-test("a request with the end of file already behind it gets no reply; one whose end of file comes after resolvd read it is answered",
-    { spec = "resolvd *native-framing.request-then-half-close-dropped" }, function(t)
+-- PEI-1358: a write half-close must preserve a complete buffered request.
+test("a complete native request is answered whether its write half-close arrives before or after it is read",
+    { tags = { "pei-1358" }, spec = "resolvd *native-framing.request-then-half-close-dropped" }, function(t)
         ready(t)
         local fd
         with_resolvd_stopped(function()
@@ -934,9 +940,9 @@ test("a request with the end of file already behind it gets no reply; one whose 
             send_all(sut, fd, request({ query = "status" }))
             sut:syscall(NR_SHUTDOWN, fd, SHUT_WR)
         end)
-        local got, err = ntfe.recv(sut, fd, 3000, 4096)
-        t:log("status then SHUT_WR, both queued: read " .. (got and (#got .. " bytes") or tostring(err)))
-        t:assert_eq(got, "", "dropped: end of file, no reply")
+        t:assert(serve_until_readable(fd, 10), "a reply comes after the queued half-close")
+        local first = read_reply(sut, fd)
+        t:assert(first.reply and first.reply.kind == "status", "complete status request answered")
         sys.close(sut, fd)
 
         -- Read first, end of file later: answered.
