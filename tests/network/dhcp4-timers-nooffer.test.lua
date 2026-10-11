@@ -13,13 +13,9 @@
 -- Own VMs: each "nobody answered" costs about half a minute of silence,
 -- and the file edits Address.LinkLocal on the shipped profile.
 --
--- The warning is looked at with Address.LinkLocal off. With it on, the
--- fallback address is added at the report, and the full pass that the
--- kernel's address event causes rewrites every interface's warning from
--- the rule judgement (main.rs sync_links), so it would be gone before a
--- status poll could see it (PEI-1364); the first test therefore turns the
--- fallback off, and the second (with it on) asserts on the address and
--- the log.
+-- The warning must remain visible with fallback both off and on. Adding
+-- the fallback causes a full reconciliation pass, which must preserve the
+-- DHCP discovery state (PEI-1364).
 
 local peinit = require("helpers.peinit")
 local gateway = require("helpers.gateway")
@@ -32,7 +28,14 @@ peinit.claim(2)
 local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("NETD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/netd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 local nic = lan:nic(sut)
 
 local D = gateway.DHCP
@@ -106,9 +109,16 @@ end
 local function watch_until_discovers(n, extra, timeout)
     local polls, reached = {}, nil
     gw:serve({ timeout = timeout or 60, until_ = function()
+        local before = #discovers()
         local i = iface()
+        -- Status and the gateway capture are different channels. Drain
+        -- packets sent during the request and omit a sample straddling a
+        -- DISCOVER, rather than attributing its new warning to the old count.
+        gw:pump(0)
         local k = #discovers()
-        polls[#polls + 1] = { discovers = k, warning = i.warning, at = gw:now() }
+        if before == k then
+            polls[#polls + 1] = { discovers = k, warning = i.warning, at = gw:now() }
+        end
         if k >= n and not reached then reached = gw:now() end
         return reached ~= nil and gw:now() >= reached + extra
     end })
@@ -164,14 +174,13 @@ test("the fourth DISCOVER reports that nobody answered (the warning); a lease th
     end)
 
 -- ---------------------------------------------------------------------------
--- The fallback, once per client
+-- The fallback, once per unanswered acquisition
 -- ---------------------------------------------------------------------------
 
--- PEI-1331: the report is made at most once per client, so a client that
--- lost a lease falls back to a link-local address only the first time.
--- This test asserts that current behaviour.
-test("the report is made once in a client's life: a lease clears the fallback, and losing it does not fall back again",
-    { spec = "netd *dhcp4-timers.no-offer-once-per-client netd *dhcp4-lease.bound-clears-link-local-and-warning" },
+-- PEI-1331 is fixed in source: binding re-arms the report for a later
+-- unanswered acquisition. PEI-1364 keeps each report visible across full passes.
+test("the warning survives fallback reconciliation, clears on binding, and returns for a later unanswered acquisition",
+    { tags = { "pei-1364" }, spec = "netd *dhcp4-timers.no-offer-once-per-client netd *dhcp4-lease.bound-clears-link-local-and-warning" },
     function(t)
         bound()
         network.write(sut, PROFILE, { ["Address.LinkLocal"] = "dword:1" })
@@ -189,9 +198,10 @@ test("the report is made once in a client's life: a lease clears the fallback, a
             { timeout = 5 })
         t:log("link-local after the report: " .. table.concat(link_locals(), ","))
         t:assert(fell_back, "a link-local address after the fourth DISCOVER")
-        -- Evidence for the report (not asserted: §5.2 does not say how long
-        -- the warning lasts): what status shows with the fallback on.
-        t:log("warning with the fallback on: " .. tostring(iface().warning))
+        t:assert_eq(iface().warning, WARNING, "warning survives adding the fallback")
+        local r, err = network.call(sut, { query = "reconcile" })
+        t:assert(r and r.ok, "reconcile: " .. tostring(err))
+        t:assert_eq(iface().warning, WARNING, "warning survives an explicit full pass")
         t:assert(link_locals()[1]:match("/16$"), "at prefix 16")
         t:assert_eq(count_logged("interface eth0: no DHCP offer; link-local"), reports + 1, "the report was logged")
 
@@ -212,10 +222,10 @@ test("the report is made once in a client's life: a lease clears the fallback, a
         t:log(string.format("second round: %d DISCOVERs, secs %d..%d; link-locals: %s", #ds, ds[1].secs,
             ds[#ds].secs, table.concat(link_locals(), ",")))
         t:assert(#ds >= 4, "the client discovered four times again")
-        t:assert_eq(#link_locals(), 0, "no second fallback: the report is not made again (PEI-1331)")
-        t:assert_eq(count_logged("interface eth0: no DHCP offer; link-local"), reports + 1,
-            "no second `no DHCP offer` line")
-        t:assert_eq(iface().warning, nil, "and no warning")
+        t:assert_eq(#link_locals(), 1, "a new unanswered acquisition falls back again (PEI-1331)")
+        t:assert_eq(count_logged("interface eth0: no DHCP offer; link-local"), reports + 2,
+            "the second acquisition reported no offer")
+        t:assert_eq(iface().warning, WARNING, "the second unanswered acquisition has its warning")
         gw:dhcp({ pool = { LEASED }, lease = 3600 })
         bound()
     end)
