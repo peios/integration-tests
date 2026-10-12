@@ -95,14 +95,21 @@ local SERVICES = {
     -- pt-t-draining, the one whose definition is deleted while it runs,
     -- is not here: it is defined by its own test. It fires every three
     -- seconds and records each run, and every one of those registry
-    -- writes reaches peinit's registry watch as a reload — which re-arms
-    -- every timer from now and draws its jitter again. Defined from boot,
-    -- it kept pushing pt-t-jitter's firing out of reach.
+    -- writes reaches peinit's registry watch as a reload. The independent
+    -- timer-reload fixture covers preserving other armed deadlines under
+    -- those writes (PEI-1381).
     -- Yearly and not persistent: the one the clock is stepped under.
     oneshot("pt-t-yearly", { "timer:" .. YEARLY }, {
         { name = "TimerPersistent", type = "dword", data = 0 },
     }),
 }
+
+local binary = os.getenv("PEINIT_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    FILES["bin/peinit2"] = { f:read("*a"), exec = true }
+    f:close()
+end
 
 local vm = peinit.boot({
     name = "timers-gaps",
@@ -273,14 +280,13 @@ test("the figures status reports are the ones armed, and are given again after e
             ", acted at " .. again.last_fired_at)
     end)
 
-test("a reload re-arms from now, and status reports that arming rather than the one it replaced",
+test("an unchanged timer retains its pending jittered firing across reload",
     { spec = "peinit *evalt.what-is-reported-is-what-is-armed" },
     function(t)
         -- The case where the two can differ: a reload while an occurrence
-        -- has passed and its jitter has not. A reload re-arms every
-        -- trigger from now (§9.3), so that occurrence is dropped and the
-        -- next one armed. Wait for an arming with a jitter window wide
-        -- enough to land a reload in.
+        -- has passed and its jitter has not. Reload must keep that pending
+        -- firing (§9.3). Wait for an arming with a jitter window wide enough
+        -- to land a reload in.
         local window = wait_until(function()
             local entry = timer(status("pt-t-jitter"), EVERY_20)
             local now = guest_now()
@@ -297,10 +303,8 @@ test("a reload re-arms from now, and status reports that arming rather than the 
             "premise: the reload landed inside the jitter window (" .. reloaded_at ..
             " < " .. window.fires_at .. ")")
         local armed = timer(status("pt-t-jitter"), EVERY_20)
-        t:assert(epoch(armed.scheduled_at) > reloaded_at,
-            "status reports the occurrence the reload armed, after the reload, not the " ..
-            "dropped one: " .. armed.scheduled_at .. " / " .. armed.fires_at ..
-            " (before the reload: " .. window.scheduled_at .. " / " .. window.fires_at .. ")")
+        t:assert_eq(armed.scheduled_at, window.scheduled_at, "the pending occurrence is retained")
+        t:assert_eq(armed.fires_at, window.fires_at, "jitter is not drawn again")
 
         -- And the trigger fires at what status now says.
         local fired = next_firing(armed.last_fired_at)
@@ -335,7 +339,7 @@ test("when a trigger last fired is seeded at boot and kept across a reload, and 
         t:assert(timer(BOOT.jitter, YEARLY).last_fired_at == nil,
             "a non-persistent trigger reports no firing before peinit started, history or not")
 
-        -- Kept across a reload, which re-arms from now and reads no history.
+        -- Kept across a reload, which reads no history.
         vm:run("svctl --json reload-config"):assert_ok()
         t:assert_eq(timer(status("pt-t-seeded"), YEARLY).last_fired_at, seeded.last_fired_at,
             "a reload keeps it")
