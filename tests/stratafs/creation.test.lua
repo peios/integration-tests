@@ -125,7 +125,7 @@ test("a created object's descriptor is inherited from the create-stratum parent"
     end)
 
 test("supersede is validated as a removal and then a creation",
-    { spec = "PKM *create.supersede-is-removal-then-creation" }, function(t)
+    { spec = { "PKM *create.supersede-is-removal-then-creation", "PKM *create.supersede-regular-files-only" } }, function(t)
         -- Before anything is created the removal is validated: the
         -- target's provider must accept modification, or EROFS.
         stratafs.with(vm, "supersede-ro", {
@@ -220,7 +220,7 @@ test("a deferred deletion targets the object the descriptor resolved to",
     end)
 
 test("a deferred deletion is checked against the stratum the entry lives in",
-    { spec = "PKM *create.deferred-delete-checked-against-the-providing-stratum" },
+    { spec = { "PKM *create.deferred-delete-checked-against-the-providing-stratum", "PKM *create.deferred-delete-requires-writable-stratum" } },
     function(t)
         -- And at deletion time rather than only at arm: arm time could
         -- not do it, because which stratum provides the entry is
@@ -500,7 +500,7 @@ test("rmdir requires the merged directory to be empty",
     end)
 
 test("the emptiness check completes before any participant is enumerated",
-    { spec = "PKM *remove.rmdir-merged-emptiness" }, function(t)
+    { spec = { "PKM *remove.rmdir-merged-emptiness", "PKM *remove.access-before-emptiness" } }, function(t)
         -- Otherwise the emptiness test would be a disclosure channel: a
         -- caller who may not enumerate a protected participant could
         -- learn whether it holds anything by attempting rmdir and

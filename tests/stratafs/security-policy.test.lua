@@ -38,6 +38,33 @@ test("a copy-up carries the source's descriptor whole",
         end)
     end)
 
+test("materialised parents preserve each provider directory's descriptor",
+    { spec = "PKM *security.materialised-parents-use-provider-descriptor" }, function(t)
+        copying(t, "parent-descriptors", function(s)
+            local expected = {}
+            for path, right in pairs({ a = kacs.RIGHT.WRITE_ATTRIBUTES,
+                                      ["a/b"] = kacs.RIGHT.READ_EA }) do
+                local r = kacs.set_sd(vm, s:in_stratum("src", path),
+                    kacs.grant_all_but(right))
+                t:assert_eq(r.ret, 0, "the provider directory is marked")
+                expected[path] = kacs.get_sd(vm, s:in_stratum("src", path), FULL_SD)
+                t:assert(expected[path], "its descriptor reads back")
+                t:assert(sys.stat(vm, s:in_stratum("dest", path)) == nil,
+                    "the destination parent does not yet exist")
+            end
+            local child = kacs.get_sd(vm, s:in_stratum("src", "a/b/f"), FULL_SD)
+            t:assert_neq(expected.a, expected["a/b"], "the parents differ")
+            t:assert_neq(expected.a, child, "the first parent differs from the child")
+            t:assert_neq(expected["a/b"], child, "the second parent differs from the child")
+            t:assert(stratafs.try_write(vm, s:join("a", "b", "f"), "modified"),
+                "copy-up materialises both parents")
+            for path, descriptor in pairs(expected) do
+                t:assert_eq(kacs.get_sd(vm, s:in_stratum("dest", path), FULL_SD),
+                    descriptor, "each new parent carries its own provider's descriptor")
+            end
+        end, { ["a/b/f"] = "original" })
+    end)
+
 test("a copied-up object never receives an inherited descriptor",
     { spec = "PKM *security.copy-up-never-inherits-descriptor" }, function(t)
         -- Ordinary creation in a create stratum inherits from its

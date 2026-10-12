@@ -410,7 +410,7 @@ test("orphan recovery leaves alone what it cannot prove is an orphan",
     end)
 
 test("a published copy is independent of its source",
-    { spec = "PKM *copy-up.no-source-snapshot" }, function(t)
+    { spec = { "PKM *copy-up.no-source-snapshot", "PKM *copy-up.published-copy-independent" } }, function(t)
         -- Nothing blocks waiting for a quiescent source and nothing
         -- fails a copy-up merely because the source is being written.
         -- Once published, later modifications to the source are not
@@ -477,7 +477,7 @@ test("a copy-up is never observable in a partial state",
     end)
 
 test("any extended-attribute failure aborts the copy-up with EIO",
-    { spec = "PKM *copy-up.xattr-failure-aborts-with-eio" }, function(t)
+    { spec = { "PKM *copy-up.xattr-failure-aborts-with-eio", "PKM *copy-up.failure-leaves-no-entry" } }, function(t)
         -- No attribute is silently discarded. Any per-attribute failure
         -- aborts the copy-up, as does a listing that fails or exceeds
         -- XATTR_LIST_MAX; in every case the error reported is EIO,

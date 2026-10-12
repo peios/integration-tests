@@ -27,7 +27,7 @@ local function routed(t, name, body, entries)
 end
 
 test("the predicate reads no credentials, so a refused caller cannot copy up",
-    { spec = "PKM *write.accepts-modification" }, function(t)
+    { spec = { "PKM *write.accepts-modification", "PKM *write.routing-does-not-use-caller-rights" } }, function(t)
         -- Load-bearing: were the predicate to consider the caller's
         -- rights, a caller *refused* write access could still provoke a
         -- copy-up. The write would fail, but the copy would have been
