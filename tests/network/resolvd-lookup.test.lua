@@ -75,7 +75,14 @@ dns.serve(gw, {
     end,
 })
 
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 -- ---------------------------------------------------------------------------
 -- Local helpers
@@ -454,7 +461,7 @@ test("the chase moves at most 16 times, so a loop ends; and it uses only the tas
         t:log("17 CNAMEs: " .. show(r))
         t:assert_eq(r.outcome, "found", "17 CNAMEs: still found")
         t:assert_eq(#(r.addresses or {}), 0, "17 CNAMEs: the chase stops at the 16th target, a CNAME, so no address")
-        t:assert_eq(r.canonical, "dep17-0.example.test", "17 CNAMEs: no addresses, so canonical is the name asked")
+        t:assert_eq(r.canonical, "dep17-16.example.test", "17 CNAMEs: canonical is where the bounded chase stopped")
 
         H["loop-a.example.test"] = function(q, d)
             return reply(q, d, {
@@ -478,13 +485,14 @@ test("the chase moves at most 16 times, so a loop ends; and it uses only the tas
         end))
         t:assert_eq(r.outcome, "found", "a chain leaving the answer: found")
         t:assert_eq(#(r.addresses or {}), 0, "… with no addresses")
+        t:assert_eq(r.canonical, "nq-away.example.test", "the chased target is retained without addresses")
         t:assert_eq(#dns.queries(gw, function(e)
             return e.msg and e.msg.questions[1] and dns.same_name(e.msg.questions[1].name, "nq-away.example.test")
         end), 0, "no question is asked for the target")
     end)
 
-test("the tasks run independently and the reply waits for the last; addresses follow completion order, canonical the later family's chain, source the last found task's",
-    { spec = "resolvd *engine-lookup.tasks-independent-reply-after-last resolvd *engine-lookup.address-order-follows-completion resolvd *engine-lookup.canonical-name-rule resolvd *engine-lookup.source-of-last-found-task" }, function(t)
+test("tasks wait for both families; address order follows completion, metadata prefers A independently of timing",
+    { spec = "resolvd *engine-lookup.tasks-independent-reply-after-last resolvd *engine-lookup.address-order-follows-completion resolvd *engine-lookup.canonical-name-rule resolvd *engine-lookup.deterministic-source", tags = { "pei1349" } }, function(t)
         ready(t)
         -- Each family's answer is a chain of its own; one family's answer
         -- is held back a second.
@@ -509,7 +517,7 @@ test("the tasks run independently and the reply waits for the last; addresses fo
         t:log(string.format("AAAA held: %s; reply at %.3f, AAAA reply due %.3f", show(r), at, due["ord-v4first.example.test"] or -1))
         t:assert_eq(r.outcome, "found", "found")
         t:assert_eq(addrs(r), "10.77.0.71/60 fd77::71/60", "A finished first: its address comes first")
-        t:assert_eq(r.canonical, "oa6.example.test", "both produced addresses: canonical is the later (AAAA) chain's end")
+        t:assert_eq(r.canonical, "oa4.example.test", "both produced addresses: canonical prefers A even though AAAA finished last")
         t:assert_eq(r.source, "dns", "source: dns")
         t:assert(due["ord-v4first.example.test"] and at >= due["ord-v4first.example.test"],
             "the reply came only after the held AAAA answer was sent, though A was answered at once")
@@ -517,7 +525,7 @@ test("the tasks run independently and the reply waits for the last; addresses fo
         r = lookup("ord-v6first.example.test", "any")
         t:log("A held: " .. show(r))
         t:assert_eq(addrs(r), "fd77::72/60 10.77.0.72/60", "AAAA finished first: its address comes first")
-        t:assert_eq(r.canonical, "ob4.example.test", "canonical is the later (A) chain's end")
+        t:assert_eq(r.canonical, "ob4.example.test", "canonical prefers A even when it finished last")
 
         -- Different sources: A cached by an `inet` lookup, then `any`. The
         -- cached A task is done before the AAAA question goes out.
@@ -532,9 +540,9 @@ test("the tasks run independently and the reply waits for the last; addresses fo
         t:assert_eq(r.addresses[2] and r.addresses[2].address, "fd77::73", "… then the AAAA from dns")
         t:assert_eq(r.addresses[2].ttl, 60, "the AAAA's TTL is the record's, fresh from the server")
         t:assert(r.addresses[1].ttl <= 60, "the A's TTL is the cached one, lowered by its age")
-        t:assert_eq(r.source, "dns", "source is the last found task's: dns")
+        t:assert_eq(r.source, "cache", "source follows the preferred A result, not the last task")
 
-        -- The last task to finish is not found: source is the last *found*.
+        -- The failed family does not override metadata from a found result.
         r = lookup("src-cachelast.example.test", "inet")
         t:assert_eq(addrs(r), "10.77.0.74/60", "primed: A from dns")
         H["src-cachelast.example.test"] = function(q, d)
@@ -543,7 +551,7 @@ test("the tasks run independently and the reply waits for the last; addresses fo
         r = lookup("src-cachelast.example.test", "any")
         t:log("A cached, AAAA unavailable: " .. show(r))
         t:assert_eq(r.outcome, "found", "found")
-        t:assert_eq(r.source, "cache", "source is the last found task's (the cached A), not the unavailable AAAA's")
+        t:assert_eq(r.source, "cache", "source comes from the found A, not the unavailable AAAA")
 
         -- Nothing found: local.
         r = lookup("src-none.example.test", "any")
@@ -557,8 +565,8 @@ test("the tasks run independently and the reply waits for the last; addresses fo
         t:assert_eq(r.canonical, "Src-None2.Example.TEST", "no addresses: canonical is the name as parsed, without its trailing dot")
     end)
 
-test("a found with no addresses leaves canonical as the name asked, even after expansion; an unparseable name is notfound at once with canonical `.`; a lookup counts one query",
-    { spec = "resolvd *engine-lookup.canonical-unexpanded-without-addresses resolvd *engine-lookup.unparseable-name-canonical-root resolvd *engine-lookup.counts-one-query" }, function(t)
+test("a found with no addresses retains expansion; an unparseable name is notfound at once with canonical `.`; a lookup counts one query",
+    { spec = "resolvd *engine-lookup.canonical-expanded-without-addresses resolvd *engine-lookup.unparseable-name-canonical-root resolvd *engine-lookup.counts-one-query", tags = { "pei1349" } }, function(t)
         ready(t)
         -- printer.example.test has an A and no AAAA.
         local r = lookup("printer", "inet6")
@@ -566,9 +574,7 @@ test("a found with no addresses leaves canonical as the name asked, even after e
         t:assert(#asked("printer.example.test", AAAA) >= 1, "the expanded name was asked for AAAA")
         t:assert_eq(r.outcome, "found", "found (NODATA)")
         t:assert_eq(#(r.addresses or {}), 0, "no addresses")
-        -- The resolver as built; the PSPU known-bug test below asserts the
-        -- spec's view (the expanded name).
-        t:assert_eq(r.canonical, "printer", "canonical stays the name asked, not the expanded printer.example.test")
+        t:assert_eq(r.canonical, "printer.example.test", "canonical retains the expanded name without addresses")
         r = lookup("printer", "inet")
         t:log("printer, inet: " .. show(r))
         t:assert_eq(r.canonical, "printer.example.test", "with an address, canonical is the expanded name")
@@ -616,17 +622,41 @@ test("a found with no addresses leaves canonical as the name asked, even after e
     end)
 
 test("[PSPU] lookup canonical is the name the addresses belong to after expansion — also when the expanded name has none of the family",
-    { spec = "PSPU *nri-requests.lookup-canonical-name", tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-requests.lookup-canonical-name", tags = { "pei1349" } }, function(t)
         ready(t)
         local r = lookup("printer", "any")
         t:log("printer, any: " .. show(r))
         t:assert_eq(r.canonical, "printer.example.test", "expanded and found with an address: the expanded name")
         r = lookup("printer", "inet6")
         t:log("printer, inet6: " .. show(r))
-        -- PEI-1349: resolvd reports canonical "printer" (the name asked)
-        -- when the expanded name's answer has no address of the family.
         t:assert_eq(r.canonical, "printer.example.test",
             "expansion applied (printer.example.test answered, NODATA): canonical is the expanded name")
+    end)
+
+test("empty CNAME answers retain their target and metadata prefers the family with addresses",
+    { spec = "resolvd *engine-lookup.canonical-name-rule", tags = { "pei1349" } }, function(t)
+        ready(t)
+        H["empty-chain.example.test"] = function(q, d)
+            return reply(q, d, { rr(nil, CNAME, "empty-target.example.test") })
+        end
+        local r = lookup("empty-chain", "inet6")
+        t:assert_eq(r.outcome, "found", "CNAME-only result is found")
+        t:assert_eq(#r.addresses, 0, "no addresses")
+        t:assert_eq(r.canonical, "empty-target.example.test", "chased target survives without addresses")
+
+        H["v6-only.example.test"] = function(q, d)
+            if q.questions[1].type == A then
+                return reply(q, d, { rr(nil, CNAME, "empty-v4.example.test") })
+            end
+            return reply(q, d, { rr(nil, CNAME, "full-v6.example.test"),
+                rr("full-v6.example.test", AAAA, "fd77::82") })
+        end
+        r = lookup("v6-only.example.test", "inet")
+        t:assert_eq(r.canonical, "empty-v4.example.test", "prime the empty A result in cache")
+        r = lookup("v6-only.example.test", "any")
+        t:assert_eq(r.canonical, "full-v6.example.test", "address-producing AAAA takes precedence")
+        t:assert_eq(r.source, "dns", "source matches the selected AAAA result")
+        t:assert_eq(r.addresses[1].address, "fd77::82", "IPv6 address returned")
     end)
 
 test("the lookup reply is {ok, kind=addresses, outcome, canonical, addresses, source, validation}, each address exactly {address: string, ttl: uint}",
