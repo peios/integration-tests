@@ -135,6 +135,13 @@ local SERVICES = {
     }),
 }
 
+local binary = os.getenv("PEINIT_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    FILES["bin/peinit2"] = { f:read("*a"), exec = true }
+    f:close()
+end
+
 local vm = peinit.boot({
     name = "persist",
     files = peinit.merge(FILES, peinit.seed("pt-p", SERVICES)),
@@ -353,7 +360,7 @@ test("the timestamp is written when the start is initiated, not when the service
         t:assert_eq(last.type, "REG_QWORD", "as a REG_QWORD")
     end)
 
-test("a reload re-arms every timer from now and catches nothing up",
+test("a newly added timer arms from now and catches nothing up",
     { spec = "peinit *persist.a-reload-re-arms-from-now-with-no-catch-up" },
     function(t)
         -- The same definition that caught up at boot, introduced by a
