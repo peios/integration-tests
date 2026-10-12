@@ -307,6 +307,21 @@ test("every ring buffer is unmapped and its descriptor closed", {
     covered_by = "cargo:eventd eventd pipeline::tests::shutdown_joins_every_drain_and_releases_each_ring_it_returns",
 }, function() end)
 
+-- A fatal SQL error with control requests already queued, and a producer
+-- holding an unpublished permit, need deterministic scheduling inside the
+-- daemon. The host tests exercise the real writer and bounded handoff.
+test("a stopped event writer releases pending control requests", {
+    spec = "eventd *shutdown.a-stopped-event-writer-releases-pending-control-requests",
+    skip = true,
+    covered_by = "cargo:eventd eventd writer::tests::a_failed_writer_releases_all_pending_control_replies",
+}, function() end)
+
+test("writer exit handles blocked producers and late handoff publication", {
+    spec = "eventd *shutdown.a-stopped-event-writer-releases-pending-control-requests",
+    skip = true,
+    covered_by = "cargo:eventd eventd writer::tests::writer_exit_wakes_blocked_producers_and_releases_late_control_replies",
+}, function() end)
+
 -- Last: after a held shutdown has been killed with events left unread in
 -- the ring, the next eventd has twice ended Abandoned (ProcessUnkillable)
 -- when it was itself stopped (reported). Nothing follows it.
