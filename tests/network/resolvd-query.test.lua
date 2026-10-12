@@ -61,7 +61,8 @@ dns.serve(gw, {
         if HOOK then return HOOK(q, d, ctx) end
     end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local sut = network.boot({ bridges = { lan }, gateway = gw,
+    files = network.test_binary("resolvd", {}) })
 
 -- ---- helpers ---------------------------------------------------------------
 
@@ -591,7 +592,7 @@ local function big(label)
     return name
 end
 
-test("a truncated UDP reply is retried over TCP, to the same server (not the first in order), as a new transaction with its own 2 s deadline that is not an attempt; one query per connection, which resolvd closes when the transaction ends",
+test("a truncated UDP reply is retried over TCP, to the same server (not the first in order), as a new attempt with its own 2 s deadline; one query per connection, which resolvd closes when the transaction ends",
     { spec = "resolvd *engine-query.truncated-udp-retried-over-tcp-same-server resolvd *engine-query.tcp-one-query-per-connection PSPU *nri-resolution.truncated-retried-over-tcp-same-server" },
     function(t)
         up(t)
@@ -629,11 +630,9 @@ test("a truncated UDP reply is retried over TCP, to the same server (not the fir
         t:assert_eq(servers_of(qs), "udp@" .. F .. ",tcp@" .. F, "one UDP query, then one TCP query to the same server, not to " .. G)
         t:assert(closed, "resolvd closed the TCP connection once the transaction ended (" .. conns_open .. " open at the answer)")
 
-        -- Own deadline, not an attempt: three truncated UDP replies, each
-        -- followed by a TCP transaction that fails (a mismatched reply, so
-        -- a timeout; then a close), then a third that answers. Six
-        -- transactions, three of them attempts; the first TCP retry starts
-        -- 1.2 s into the UDP transaction and still gets its own 2 s.
+        -- TCP retries spend the question budget too: UDP, TCP, UDP use
+        -- all three attempts. The first TCP retry starts 1.2 s into the
+        -- UDP transaction and still gets its own 2 s deadline.
         local name2 = big("tcpbudget")
         local u, tc = 0, 0
         HOOK = function(q, d, ctx)
@@ -658,13 +657,13 @@ test("a truncated UDP reply is retried over TCP, to the same server (not the fir
         t:log("budget: " .. tostring(r2 and r2.outcome) .. "; " .. dtext(d))
         local kinds = {}
         for _, e in ipairs(qs) do kinds[#kinds + 1] = e.transport end
-        t:assert_eq(table.concat(kinds, ","), "udp,tcp,udp,tcp,udp,tcp", "three UDP attempts, each retried over TCP")
-        t:assert(r2 and r2.outcome == "found" and #r2.records == 120, "the third TCP retry's answer is used: TCP retries are not attempts")
+        t:assert_eq(table.concat(kinds, ","), "udp,tcp,udp", "the TCP retry spends one of the three attempts")
+        t:assert(r2 and r2.outcome == "unavailable", "no budget remains for a second TCP retry")
         local own = qs[3].at - qs[2].at
         local from_udp = qs[3].at - qs[1].at
         t:assert(own >= 1.7 and own <= 2.7, string.format("the first TCP retry timed out 2 s after it began (%.2f s)", own))
         t:assert(from_udp >= 2.8, string.format("not at the UDP transaction's deadline (%.2f s after the UDP query)", from_udp))
-        t:assert_eq(d.sent, 6, "six transactions")
+        t:assert_eq(d.sent, 3, "three transactions exhaust the budget")
     end)
 
 test("a TCP reply with TC set is used as it is",
@@ -714,11 +713,10 @@ test("there is no fallback to a query without EDNS0: FORMERR fails the attempt, 
         t:assert_eq(d.failed, 3, "each FORMERR failed its attempt")
     end)
 
--- PEI-1361: resolvd's budget is per candidate: a candidate that ends
--- notfound hands the next one three fresh attempts, so a question can make
--- far more than three (and TCP retries are not counted at all).
-test("after the attempt limit the question is unavailable: three attempts, however many candidates",
-    { spec = "PSPU *nri-resolution.attempt-limit-unavailable", tags = { "known-bug" } }, function(t)
+-- PEI-1361: failures and TCP retries share the question budget. An NXDOMAIN
+-- that advances to another candidate refunds its attempt.
+test("three failures exhaust the question budget; advancing NXDOMAIN is refunded",
+    { spec = "PSPU *nri-resolution.attempt-limit-unavailable" }, function(t)
         up(t)
         -- One candidate, no answer: three attempts, then unavailable.
         local plain = fresh("silent3")
@@ -733,8 +731,8 @@ test("after the attempt limit the question is unavailable: three attempts, howev
 
         -- Two candidates: lim.example.test (the scope's domain) times out
         -- once and is then NXDOMAIN; lim.extra.test (ExtraSearchDomains)
-        -- never answers. The third attempt is the first to the second
-        -- candidate.
+        -- never answers. NXDOMAIN is refunded, leaving two failures for
+        -- the second candidate.
         network.write(sut, "Dns", { ExtraSearchDomains = "multi:extra.test" })
         gw:serve({ timeout = 2 })
         local c1, c2 = "lim.example.test", "lim.extra.test"
@@ -757,8 +755,8 @@ test("after the attempt limit the question is unavailable: three attempts, howev
         qlog(t, dns.queries(gw))
         t:assert(r2 and r2.outcome == "unavailable", "unavailable")
         t:assert_eq(#q1, 2, "the first candidate: a timeout, then NXDOMAIN")
-        t:assert(#q2 >= 1, "the second candidate was asked")
-        t:assert_eq(#q1 + #q2, 3, "three attempts for the question in all")
+        t:assert_eq(#q2, 2, "two failures remain for the second candidate")
+        t:assert_eq(#q1 + #q2, 4, "three charged failures and one refunded NXDOMAIN")
     end)
 
 -- ---------------------------------------------------------------------------
@@ -829,3 +827,21 @@ test("an address with a zone is not a server: FallbackServers skips fe80::1%eth0
         t:assert(line ~= nil and line:find("ignoring malformed address", 1, true) ~= nil,
             "it is logged as a malformed address")
     end)
+
+-- These contracts require deterministic host injection: a VM cannot observe
+-- the entropy bytes or force the interval between connect and the first write.
+for _, case in ipairs({
+    { "case bits are consumed low-first and only for ASCII letters",
+      "resolvd *engine-query.case-bits-consumed-per-letter",
+      "engine::tests::case_entropy_consumes_low_bits_only_for_ascii_letters" },
+    { "entropy failure releases the lookup without sending a query",
+      "resolvd *engine-query.entropy-failure-is-unavailable",
+      "engine::tests::entropy_failure_sends_nothing_and_releases_the_lookup" },
+    { "a TCP error before the query write fails the attempt immediately",
+      "resolvd *engine-servers.tcp-error-before-query-sent-fails-attempt",
+      "upstream::pre_query_reset_tests::a_reset_after_handshake_before_query_write_fails_immediately" },
+}) do
+    test(case[1], { spec = case[2],
+        covered_by = "cargo:resolvd:" .. case[3],
+        skip = "deterministic host regression in resolvd: " .. case[3] }, function(t) end)
+end

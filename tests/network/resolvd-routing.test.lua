@@ -60,7 +60,8 @@ dns.serve(gw, { zone = ZONE, on = function(q, default, ctx)
     return hook(q, default, ctx, qn.name:lower())
 end })
 
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local sut = network.boot({ bridges = { lan }, gateway = gw,
+    files = network.test_binary("resolvd", {}) })
 
 -- ---------------------------------------------------------------------------
 -- Local helpers
@@ -512,8 +513,8 @@ test("every attempt for a candidate, and the TCP retry after a truncated reply, 
             t:assert(a == SERVER.A .. "/udp" or a == SERVER.A .. "/tcp", "asked only at 10.77.0.2: " .. a)
             if a:match("/tcp$") then tcp = tcp + 1 else udp = udp + 1 end
         end
-        t:assert_eq(udp, 3, "three UDP attempts")
-        t:assert(tcp >= 1, "and the TCP retries went to the same server (" .. tcp .. ")")
+        t:assert_eq(udp, 2, "two UDP attempts around one charged TCP retry")
+        t:assert_eq(tcp, 1, "the TCP retry spends the second attempt")
         fallback(t, nil)
     end)
 
