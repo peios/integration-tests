@@ -872,11 +872,14 @@ test("the transaction modes and the private-hive registration flag",
 -- ---- the backup stream -----------------------------------------------
 
 test("the backup record types and magic are what the stream carries",
-    { spec = "PKM *lcs-abi.backup-record-types" }, function(t)
+    { spec = "PKM *lcs-abi.backup-record-types", tags = { "pei772" } }, function(t)
         -- A hive holding one of everything the stream can carry: a
         -- layer (base is always written first), keys, path entries, a
         -- value and a blanket tombstone.
         local src = machine(function(s)
+            -- PEI-772: even an unused non-base layer once made backup EINVAL.
+            -- Omit Owner to cover the metadata-owner fallback as well.
+            s:seed_layer("Over", { precedence = 10, enabled = 1 })
             local k = s:key("Machine\\Software\\Test")
             s:value(k, "Plain", lcs.TYPE.DWORD, lcs.dword(1))
             s:blanket(k, "base")
