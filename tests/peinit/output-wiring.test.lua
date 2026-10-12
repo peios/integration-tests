@@ -13,6 +13,12 @@
 -- the submitter's own descriptor for the copy.
 
 local peinit = require("helpers.peinit")
+
+local function boot(opts)
+    opts.files = peinit.test_binary("peinit", opts.files)
+    return peinit.boot(opts)
+end
+
 peinit.claim(1)
 
 -- One gigabyte rather than the helper's two. Chapter 11 boots more
@@ -51,7 +57,7 @@ echo "pt-terminal-service-marker"
 while : ; do sleep 30; done
 ]]
 
-local vm = peinit.boot({
+local vm = boot({
     memory = MEM, cpus = CPUS,
     name = "wiring",
     files = peinit.merge(
