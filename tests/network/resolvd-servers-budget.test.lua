@@ -1,5 +1,7 @@
--- resolvd TRM §4.6: three attempts per question across search candidates.
--- The resolver must answer before the NSS shim's ten-second timeout.
+-- resolvd TRM §4.6: three attempts per question across search candidates,
+-- spent only by failures and TCP retries; a `notfound` answer that moves
+-- the question to its next candidate is not charged. The resolver must
+-- answer before the NSS shim's ten-second timeout.
 --
 -- Harness: the scripted gateway (helpers.gateway) is the one DNS server
 -- (helpers.dns, 10.77.0.1 from the lease). `ExtraSearchDomains` gives
@@ -7,9 +9,9 @@
 -- candidates. The gateway's hook counts the UDP attempts at each name
 -- and type: under one.test the first two attempts get no reply and the
 -- third gets NXDOMAIN (no SOA, so nothing is cached) 1.5 s late; under
--- two.test nothing is ever answered. The first candidate therefore uses
--- its three attempts and comes back notfound; the exhausted question
--- budget prevents sending the second candidate.
+-- two.test nothing is ever answered. The first candidate therefore makes
+-- three transactions: two timeouts (charged) and an NXDOMAIN (refunded).
+-- The second candidate gets the one attempt left, which times out.
 --
 -- Each test asks a different single label, so the counts are its own.
 --
@@ -93,15 +95,16 @@ local function udp(name, rtype)
     end)
 end
 
-test("the attempt limit spans search candidates: exhaustion prevents asking the next name",
+test("the attempt limit spans search candidates; a notfound answer does not spend it",
     { spec = "resolvd *engine-servers.limit-is-per-candidate" }, function(t)
         setup(t)
         local out, elapsed = timed(t, "resolv query pc A")
         t:assert(out:find("\nunavailable", 1, true), "the question is unavailable")
         local one, two = udp("pc.one.test"), udp("pc.two.test")
-        t:assert_eq(#one, 3, "three attempts at the first candidate, the third answered NXDOMAIN")
-        t:assert_eq(#two, 0, "the second candidate has no attempt budget left")
-        t:log(string.format("three attempts in %.2f s", elapsed))
+        t:assert_eq(#one, 3, "three transactions at the first candidate, the third answered NXDOMAIN")
+        t:assert_eq(#two, 1, "the second candidate gets the one attempt the two timeouts left")
+        t:assert(two[1].at > one[3].at, "the second candidate was asked after the first's NXDOMAIN")
+        t:log(string.format("four transactions, three charged, in %.2f s", elapsed))
     end)
 
 test("a question gets three attempts",
@@ -110,8 +113,9 @@ test("a question gets three attempts",
         local out = timed(t, "resolv query pq A")
         t:assert(out:find("\nunavailable", 1, true), "the question is unavailable")
         local n = #udp("pq.one.test") + #udp("pq.two.test")
-        -- PEI-1361: the budget applies to the entire question.
-        t:assert(n <= 3, "at most three attempts for the question (made " .. n .. ")")
+        -- PEI-1361: the budget applies to the entire question. One of the
+        -- transactions was answered NXDOMAIN, which is not a failed attempt.
+        t:assert(n - 1 <= 3, "at most three failed attempts for the question (made " .. n .. " transactions)")
     end)
 
 test("a slow upstream is reported by the resolver as unavailable before the shim's own timeout",
@@ -123,6 +127,6 @@ test("a slow upstream is reported by the resolver as unavailable before the shim
         gw:serve({ timeout = 4 })
         local n = #udp("sh.one.test", "A") + #udp("sh.two.test", "A")
         t:log(string.format("getent returned after %.2f s; resolvd made %d A attempts", elapsed, n))
-        t:assert(n <= 3, "the A question stayed within three attempts")
+        t:assert(n - 1 <= 3, "the A question stayed within three failed attempts")
         t:assert(elapsed < 9.8, string.format("resolvd answered within the shim's 10 s (getent took %.2f s)", elapsed))
     end)
