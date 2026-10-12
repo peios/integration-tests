@@ -34,12 +34,7 @@ local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
 local files = {}
-local binary = os.getenv("RESOLVD_TEST_BINARY")
-if binary then
-    local f = assert(io.open(binary, "rb"))
-    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
-    f:close()
-end
+files = network.test_binary("resolvd", files)
 local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 dns.serve(gw, { zone = {

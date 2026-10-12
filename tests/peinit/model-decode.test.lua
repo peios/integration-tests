@@ -38,14 +38,7 @@ peinit.claim(2) -- the probe machine, plus one boot of its own at the end
 local PROBE = [[Machine\System\Services\pt-probe]]
 
 local function boot(opts)
-    local binary = os.getenv("PEINIT_TEST_BINARY")
-    if binary then
-        local f = assert(io.open(binary, "rb"))
-        opts.files = peinit.merge(opts.files or {}, {
-            ["bin/peinit2"] = { f:read("*a"), exec = true },
-        })
-        f:close()
-    end
+    opts.files = peinit.test_binary("peinit", opts.files)
     return peinit.boot(opts)
 end
 

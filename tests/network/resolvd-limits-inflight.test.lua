@@ -42,14 +42,7 @@ dns.serve(gw, {
     end,
 })
 local files = {}
-for env, path in pairs({ RESOLVD_TEST_BINARY = "usr/sbin/resolvd", RESOLVD_TEST_SERVICE = "tmp/resolvd-service.reg" }) do
-    local source = os.getenv(env)
-    if source then
-        local f = assert(io.open(source, "rb"))
-        files[path] = { f:read("*a"), exec = env == "RESOLVD_TEST_BINARY" }
-        f:close()
-    end
-end
+files = network.test_binary("resolvd", files, true)
 local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local function rstatus()

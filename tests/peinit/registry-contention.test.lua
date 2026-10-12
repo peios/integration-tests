@@ -9,10 +9,7 @@ local kacs=require('helpers.kacs')
 local access=require('helpers.access')
 peinit.claim(1)
 local files={}
-local binary=os.getenv('LOREGD_TEST_BINARY')
-if binary then
- local f=assert(io.open(binary,'rb'));files['usr/sbin/loregd']={f:read('*a'),exec=true};f:close()
-end
+files = peinit.test_binary("loregd", files)
 local vm=peinit.boot({files=files})
 
 test('sibling opens and enumeration finish while a delete transaction stays active',function(t)

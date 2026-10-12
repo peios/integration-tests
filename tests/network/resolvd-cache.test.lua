@@ -102,12 +102,7 @@ dns.serve(gw, {
 })
 
 local files = {}
-local binary = os.getenv("RESOLVD_TEST_BINARY")
-if binary then
-    local f = assert(io.open(binary, "rb"))
-    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
-    f:close()
-end
+files = network.test_binary("resolvd", files)
 local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local function rstatus()

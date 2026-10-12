@@ -29,12 +29,7 @@ local gw = gateway.boot({ bridge = lan })
 local LEASE_NAME = "lease-name"
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600, options = { { 12, LEASE_NAME } } })
 local files = {}
-local binary = os.getenv("NETD_TEST_BINARY")
-if binary then
-    local f = assert(io.open(binary, "rb"))
-    files["usr/sbin/netd"] = { f:read("*a"), exec = true }
-    f:close()
-end
+files = network.test_binary("netd", files)
 local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local function kernel_name()

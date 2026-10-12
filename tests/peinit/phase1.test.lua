@@ -12,12 +12,7 @@ local peinit = require("helpers.peinit")
 peinit.claim(2)
 
 local files = {}
-local binary = os.getenv("PEINIT_TEST_BINARY")
-if binary then
-    local f = assert(io.open(binary, "rb"))
-    files["bin/peinit2"] = { f:read("*a"), exec = true }
-    f:close()
-end
+files = peinit.test_binary("peinit", files)
 local vm = peinit.boot({ files = files })
 
 test("the root writability probe leaves nothing behind",
