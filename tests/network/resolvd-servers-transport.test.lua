@@ -1,6 +1,6 @@
 -- resolvd TRM §4.6 "Servers, Attempts and Timeouts": the timeout, the
 -- attempt limit, and every transport failure that fails an attempt; the
--- TCP retry that is not an attempt; the fallback servers' demotion,
+-- TCP retry that consumes an attempt; the fallback servers' demotion,
 -- which status does not report. PSPU §6.B's per-server timeout.
 --
 -- Harness: the scripted gateway (helpers.gateway) and its DNS server
@@ -73,7 +73,14 @@ dns.serve(gw, {
 })
 local service = gw.ticks.dns
 
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local function rstatus()
     local s, err = network.call(sut, { query = "status" }, { path = SOCK })
@@ -232,8 +239,8 @@ test("TCP: a connection that is refused, or closed before a whole reply, fails t
         -- attempt goes to it either way.
         local outcome, elapsed = timed(t, "tcclose-5.tr.test")
         t:assert_eq(outcome, "unavailable", "every TCP retry closed unanswered: unavailable")
-        t:assert_eq(#asked("tcclose-5.tr.test", "udp"), 3, "three attempts over UDP")
-        t:assert_eq(#asked("tcclose-5.tr.test", "tcp"), 3, "each followed by its TCP retry, which was read and closed")
+        t:assert_eq(#asked("tcclose-5.tr.test", "udp"), 2, "two UDP attempts")
+        t:assert_eq(#asked("tcclose-5.tr.test", "tcp"), 1, "one TCP retry consumes the remaining attempt")
         t:assert(elapsed < 1.5, string.format("each close failed the attempt at once (%.2f s)", elapsed))
 
         -- Refused: close the gateway's listener, so a SYN to port 53 is reset.
@@ -241,13 +248,13 @@ test("TCP: a connection that is refused, or closed before a whole reply, fails t
         gw.dns_listener = nil
         -- Drain what the first half left queued on the gateway's packet
         -- socket (a late SYN of its last connection, under load) before
-        -- forgetting, or it is counted below as a fourth refused attempt.
+        -- forgetting, or it could be counted as another refused attempt.
         gw:pump(300)
         gw:forget()
         outcome, elapsed = timed(t, "tcrst-6.tr.test")
         gw.dns_listener = assert(ntfe.tcp_listen(gw.vm, "::", 53))
         t:assert_eq(outcome, "unavailable", "every TCP retry refused: unavailable")
-        t:assert_eq(#asked("tcrst-6.tr.test", "udp"), 3, "three attempts over UDP")
+        t:assert_eq(#asked("tcrst-6.tr.test", "udp"), 2, "two UDP attempts")
         -- The last SYN can still be queued on the gateway's packet socket
         -- when the question ends; read it before counting.
         gw:pump(300)
@@ -266,11 +273,11 @@ test("TCP: a connection that is refused, or closed before a whole reply, fails t
                 end
             end
         end
-        t:assert_eq(syns, 3, "three connection attempts (distinct source ports), each refused")
+        t:assert_eq(syns, 1, "one TCP connection attempt, refused")
         t:assert(elapsed < 1.5, string.format("each refusal failed the attempt at once (%.2f s)", elapsed))
     end)
 
-test("the TCP retry after a truncated reply has its own 2 s deadline and is not one of the three attempts",
+test("the TCP retry has its own 2 s deadline and spends one of the three attempts",
     { spec = "resolvd *engine-servers.tcp-retry-not-an-attempt" }, function(t)
         gw.ticks.dns = function(g)   -- held UDP replies only; TCP is never read
             local now, keep = g.vm:clock():get(), {}
@@ -281,14 +288,10 @@ test("the TCP retry after a truncated reply has its own 2 s deadline and is not 
         gw.ticks.dns = service
         t:assert_eq(outcome, "unavailable", "unavailable")
         local q = asked("tcslow-7.tr.test", "udp")
-        t:assert_eq(#q, 3, "three UDP attempts: the TCP retries were not counted against them")
-        local gaps = { q[2].at - q[1].at, q[3].at - q[2].at }
-        t:log(string.format("gaps %.2f s, %.2f s; question %.2f s", gaps[1], gaps[2], elapsed))
-        for i, g in ipairs(gaps) do
-            -- TC lands 1 s after the query; the retry then waits its own
-            -- 2 s, so the next attempt comes ~3 s after the last, not at
-            -- the UDP transaction's 2 s deadline.
-            t:assert(g >= 2.8 and g <= 3.6, string.format("gap %d: %.2f s, the TC delay plus the TCP retry's 2 s", i, g))
-        end
-        t:assert(elapsed >= 8.5 and elapsed <= 10.5, string.format("unavailable after ~9 s (%.2f s)", elapsed))
+        t:assert_eq(#q, 2, "UDP, TCP, UDP exhaust the question's three attempts")
+        local gap = q[2].at - q[1].at
+        t:log(string.format("gap %.2f s; question %.2f s", gap, elapsed))
+        -- The first TC reply arrives after 1 s; its TCP retry gets 2 s.
+        t:assert(gap >= 2.8 and gap <= 3.6, string.format("TCP kept its own deadline: %.2f s", gap))
+        t:assert(elapsed >= 3.5 and elapsed <= 5.5, string.format("unavailable after ~4 s (%.2f s)", elapsed))
     end)
