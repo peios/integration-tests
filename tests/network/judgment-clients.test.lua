@@ -17,11 +17,10 @@
 -- so the old lease's address and the old SLAAC address are seen to go
 -- before any new answer could bring them back.
 --
--- The conflict: a tie written at runtime is refused (§3.2), so it is
--- written, refused, and then netd is restarted. A generation taken at
--- startup is not checked for ties (§2.1), so the restarted netd judges
--- eth0 against the tie and meets the conflict.
---
+-- The conflict: accept two tied rules that only match a future dummy
+-- interface, then load that interface. New facts can meet a conflict in
+-- an already accepted generation; startup ties on existing links refuse.
+
 -- Own VMs: the tests rewrite the interface layer and restart netd.
 
 local peinit = require("helpers.peinit")
@@ -35,7 +34,14 @@ local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
 gw:router({ prefixes = { { prefix = "fd77::", len = 64 } } })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("NETD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/netd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local KEY = network.KEY
 
@@ -266,51 +272,60 @@ test("an IGNOREd interface is left exactly as it is: what netd gave it stays, an
             { timeout = 10, interval = 0.25, desc = "the foreign address removed once joined" })
     end)
 
-test("a conflict ignores the interface, attributes it to both rules, warns, and logs once",
-    { spec = "netd *judgment.conflict-ignores-and-names-both" }, function(t)
-        local s, i = settled()
-        local ifid = i.ifid
+test("a newly appearing interface can conflict with an accepted generation and warns once",
+    { spec = "netd *judgment.conflict-ignores-and-names-both", tags = { "pei1333" } }, function(t)
+        local _, initial = wait_for(function() return true end, "status", 60)
+        IDX = initial.index
+        settled()
         apply({
             { [[Profiles\rival]] },
-            { [[Rules\Interface\rival]], { "Interface.Kind.Equal", "sz", "wired" }, { "Priority", "dword", 10 },
+            { [[Rules\Interface\future-a]], { "Interface.Equal", "sz", "dummy0" }, { "Priority", "dword", 20 },
+                { "Actions", "multi", { "JOIN(default)" } } },
+            { [[Rules\Interface\future-b]], { "Interface.Equal", "sz", "dummy0" }, { "Priority", "dword", 20 },
                 { "Actions", "multi", { "JOIN(rival)" } } },
         })
-        wait_for(function(st) return st.refusal == "rules rival vs wired tie on interface eth0" end,
-            "refused at runtime")
-        gw:forget()
         network.restart_netd(sut)
-        s, i = wait_for(function(_, i) return i.rule == "rival vs wired" end, "the restarted netd meets the conflict")
+        local s = settled("future-only ties do not refuse startup")
+        t:assert_eq(s.refusal, nil, "the generation is accepted with no matching interface present")
+        gw:forget()
+        local loaded = sut:run("modprobe dummy numdummies=1")
+        t:assert_eq(loaded.exit_code, 0, "a new dummy interface appears: " .. loaded.stderr)
+        local i
+        wait_until(function()
+            s = network.status(sut)
+            i = network.iface(s, "dummy0")
+            return i and i.rule == "future-a vs future-b"
+        end, { timeout = 20, interval = 0.25, desc = "the new interface meets the existing tie" })
+        local ifid = i.ifid
         for _ = 1, 3 do
             local r = network.call(sut, { query = "reconcile" })
             t:assert(r and r.ok, "a full pass")
         end
         gw:serve({ timeout = 4 })
-        s, i = wait_for(function() return true end, "status")
-        t:log("conflict: " .. show(s))
-        t:assert(i.verdict == nil, "no verdict")
-        t:assert(i.profile == nil, "no profile: IGNORE")
-        t:assert_eq(i.warning, "rules rival vs wired tie; the interface is ignored", "the warning")
-        t:assert(s.refusal == nil, "taken at startup, not refused")
-        t:assert_eq(#asks(), 0, "no DHCPv4 client")
-        t:assert(has4("10.77.0.50"), "IGNORE: the address netd gave it stays")
-        local rule, verdict
+        s = network.status(sut)
+        i = network.iface(s, "dummy0")
+        t:assert(i.verdict == nil and i.profile == nil, "conflict has no verdict or profile")
+        t:assert_eq(i.warning, "rules future-a vs future-b tie; the interface is ignored", "the warning")
+        t:assert_eq(s.refusal, nil, "new facts do not retroactively refuse the accepted generation")
+        t:assert_eq(i.lease, nil, "no DHCP client for the conflicted interface")
+        t:assert_eq(#asks(), 0, "no extra DHCP traffic")
+        t:assert(has4("10.77.0.50"), "the unaffected eth0 keeps its address")
         wait_until(function()
-            rule = network.get(sut, [[Interfaces\]] .. ifid .. [[\Status]], "Rule")
-            verdict = network.get(sut, [[Interfaces\]] .. ifid .. [[\Status]], "Verdict")
-            return rule == "rival vs wired" and verdict == nil
-        end, { timeout = 10, interval = 0.25, desc = "Status Rule names both, Verdict removed" })
+            return network.get(sut, [[Interfaces\]] .. ifid .. [[\Status]], "Rule") == "future-a vs future-b"
+                and network.get(sut, [[Interfaces\]] .. ifid .. [[\Status]], "Verdict") == nil
+        end, { timeout = 10, interval = 0.25, desc = "inventory attributes both conflicting rules" })
         local warned = 0
         for _, l in ipairs(network.logs(sut, { take = 400 })) do
-            if l:find("rules rival vs wired tie; ignoring it", 1, true) then
+            if l:find("rules future-a vs future-b tie; ignoring it", 1, true) then
                 warned = warned + 1
-                t:log("log: " .. l)
                 t:assert(l:find("warn:", 1, true) ~= nil, "a warning")
             end
         end
-        t:assert_eq(warned, 1, "logged once, the first time, over several passes")
-
-        delkey([[Rules\Interface\rival]])
+        t:assert_eq(warned, 1, "logged only once over repeated passes")
+        local removed = sut:run("modprobe -r dummy")
+        t:assert_eq(removed.exit_code, 0, "test interface removed")
+        delkey([[Rules\Interface\future-a]])
+        delkey([[Rules\Interface\future-b]])
         delkey([[Profiles\rival]])
-        s, i = settled("joined again once the tie is gone")
-        t:assert(i.warning == nil, "the warning is gone")
+        settled("unaffected interface stays joined")
     end)

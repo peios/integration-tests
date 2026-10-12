@@ -31,7 +31,14 @@ local gw = gateway.boot({ bridge = lan })
 -- Silent from the start: the boot's first DISCOVERs are recorded and
 -- never answered, so no lease can exist when netd reports READY=1.
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600, silent = true })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("NETD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/netd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 -- ---------------------------------------------------------------------------
 -- Local instruments
@@ -244,11 +251,10 @@ local TIE = {
     },
 }
 
-test("a tie present at startup is judged per interface as a conflict, not a refused generation",
-    { spec = "netd *startup.tie-at-startup-is-a-conflict-not-a-refusal" }, function(t)
-        -- PEI-1333: the same tie written at runtime refuses the generation
-        -- (the last good one stands), but at startup it is taken. This
-        -- asserts the documented current behaviour of both halves.
+test("a tie present at startup refuses the generation to an empty policy",
+    { spec = "netd *startup.tie-at-startup-refuses", tags = { "pei1333" } }, function(t)
+        -- Runtime retains the last good generation; startup has no prior
+        -- generation and must use the empty-policy backstop.
         apply(TIE)
         local runtime
         wait_until(function()
@@ -268,17 +274,13 @@ test("a tie present at startup is judged per interface as a conflict, not a refu
         dump(t, lines)
         t:log(string.format("after restart: refusal=%s verdict=%s rule=%s warning=%s",
             tostring(s.refusal), tostring(i.verdict), tostring(i.rule), tostring(i.warning)))
-        t:assert_eq(s.refusal, nil, "at startup the generation is not refused")
-        t:assert(find(lines, "3 rule tree(s), 3 profile(s), ") ~= nil,
-            "the startup generation holds both tie rules and their profiles")
-        t:assert_eq(find(lines, "interface layer refused"), nil, "nothing is logged as refused")
-        t:assert_eq(i.verdict, nil, "eth0 has no verdict")
-        t:assert_eq(i.rule, "pt-tie-a vs pt-tie-b", "attributed to the two tied rules")
-        t:assert_eq(i.warning, "rules pt-tie-a vs pt-tie-b tie; the interface is ignored",
-            "with the conflict warning")
-        t:assert(find(lines, "interface eth0: rules pt-tie-a vs pt-tie-b tie; ignoring it") ~= nil,
-            "and the warning is logged")
-        t:assert_eq(i.lease, nil, "an ignored interface gets no DHCP client")
+        t:assert_eq(s.refusal, "rules pt-tie-a vs pt-tie-b tie on interface eth0",
+            "startup checks the same current-interface facts as runtime")
+        t:assert(find(lines, "interface layer refused") ~= nil, "the refusal is logged")
+        t:assert_eq(i.verdict, nil, "the empty-policy backstop has no explicit verdict")
+        t:assert_eq(i.rule, "backstop", "the refused generation is not active")
+        t:assert_eq(i.warning, nil, "the interface is not judged against the conflicting generation")
+        t:assert_eq(i.lease, nil, "the empty policy starts no DHCP client")
 
         -- Put it back: both rules off in one generation, then gone.
         apply({ keys = {
