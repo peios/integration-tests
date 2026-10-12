@@ -763,17 +763,10 @@ dns.serve(gw, {
 })
 local files = build_pt_nss()
 -- Optional signed candidates replace only the two modules in the disposable boot.
-for env, path in pairs({
-    NSS_NET_TEST_BINARY = "usr/lib/x86_64-linux-peios/libnss_peios_net.so.2",
-    NSS_IDENTITY_TEST_BINARY = "usr/lib/x86_64-linux-peios/libnss_peios.so.2",
-}) do
-    local binary = os.getenv(env)
-    if binary then
-        local f = assert(io.open(binary, "rb"))
-        files[path] = { f:read("a"), exec = true }
-        f:close()
-    end
-end
+files = peinit.test_files(files, {
+    NSS_NET_TEST_BINARY = { path = "usr/lib/x86_64-linux-peios/libnss_peios_net.so.2", exec = true },
+    NSS_IDENTITY_TEST_BINARY = { path = "usr/lib/x86_64-linux-peios/libnss_peios.so.2", exec = true },
+})
 local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 -- ---------------------------------------------------------------------------

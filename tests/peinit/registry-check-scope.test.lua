@@ -18,12 +18,7 @@ local files = peinit.seed("pt-registry-checks", {
     definition("pt-unsupported-assert", "Asserts", [[Machine\System\Services\pt-target\EnvVars]]),
     definition("pt-target", "Conditions", [[Machine\System\Init]]),
 })
-local binary = os.getenv("PEINIT_TEST_BINARY")
-if binary then
-    local f = assert(io.open(binary, "rb"))
-    files["bin/peinit2"] = { f:read("*a"), exec = true }
-    f:close()
-end
+files = peinit.test_binary("peinit", files)
 local vm = peinit.boot({ name = "registry-check-scope", files = files })
 local function status(name)
     local result = vm:run("svctl --json status " .. name)

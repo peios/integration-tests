@@ -23,6 +23,22 @@ local M = {}
 M.CONTROL = "/run/netd/control.sock"
 M.KEY = [[Machine\System\Network]]
 
+--- Select one network daemon's optional candidate. A service registry seed is
+--- staged only for tests that explicitly request it; tests still apply it.
+function M.test_binary(name, files, with_service)
+    assert(name == "netd" or name == "resolvd", "unknown network test binary")
+    local prefix = name:upper()
+    local mappings = {
+        [prefix .. "_TEST_BINARY"] = { path = "usr/sbin/" .. name, exec = true },
+    }
+    if with_service then
+        mappings[prefix .. "_TEST_SERVICE"] = {
+            path = "tmp/" .. name .. "-service.reg", exec = false,
+        }
+    end
+    return peinit.test_files(files, mappings)
+end
+
 --- A provium bridge whose host-side name is unique to this run.
 ---
 --- provium names the host's bridge after the Lua name, and each TAP after

@@ -21,12 +21,7 @@ local files = peinit.seed("pt-timer-reload", {
     timer_service("pt-reload-slow", SLOW, 0, 10),
     timer_service("pt-reload-writer", "*-*-* *:*:0/3 UTC", 1, 0),
 })
-local binary = os.getenv("PEINIT_TEST_BINARY")
-if binary then
-    local f = assert(io.open(binary, "rb"))
-    files["bin/peinit2"] = { f:read("*a"), exec = true }
-    f:close()
-end
+files = peinit.test_binary("peinit", files)
 local vm = peinit.boot({ name = "timer-reload", files = files })
 local function timer(name)
     local result = vm:run("svctl --json status " .. name)

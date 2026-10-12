@@ -135,12 +135,7 @@ local SERVICES = {
     }),
 }
 
-local binary = os.getenv("PEINIT_TEST_BINARY")
-if binary then
-    local f = assert(io.open(binary, "rb"))
-    FILES["bin/peinit2"] = { f:read("*a"), exec = true }
-    f:close()
-end
+FILES = peinit.test_binary("peinit", FILES)
 
 local vm = peinit.boot({
     name = "persist",

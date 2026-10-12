@@ -37,12 +37,7 @@ gw:router({ lifetime = 1800, prefixes = {
     { prefix = "fd78::", len = 64, L = false, valid = 86400, preferred = 14400 },
 } })
 local files = {}
-local binary = os.getenv("NETD_TEST_BINARY")
-if binary then
-    local f = assert(io.open(binary, "rb"))
-    files["usr/sbin/netd"] = { f:read("*a"), exec = true }
-    f:close()
-end
+files = network.test_binary("netd", files)
 local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 -- ---------------------------------------------------------------------------

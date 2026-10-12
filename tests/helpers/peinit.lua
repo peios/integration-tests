@@ -220,6 +220,36 @@ function M.merge(...)
     return out
 end
 
+--- Add optional host artifacts to a disposable boot's files. Each mapping is
+--- ENV_NAME = { path = "guest/relative/path", exec = true/false }. Unset
+--- variables leave the shipped artifact alone; unreadable candidates fail.
+--- Return a copy so reusing a seed table cannot carry an earlier override.
+function M.test_files(files, mappings)
+    local out = M.merge(files or {})
+    for env, spec in pairs(mappings) do
+        local source = os.getenv(env)
+        if source then
+            local file, err = io.open(source, "rb")
+            assert(file, env .. ": " .. tostring(err))
+            local bytes, read_err = file:read("*a")
+            file:close()
+            assert(bytes, env .. ": " .. tostring(read_err))
+            out[spec.path] = { bytes, exec = spec.exec == true }
+        end
+    end
+    return out
+end
+
+--- Replace one peinit-profile service with its explicitly selected candidate.
+function M.test_binary(name, files)
+    local paths = { peinit = "bin/peinit2", trustd = "usr/sbin/trustd",
+        loregd = "usr/sbin/loregd" }
+    local path = assert(paths[name], "unknown peinit test binary: " .. tostring(name))
+    return M.test_files(files, {
+        [name:upper() .. "_TEST_BINARY"] = { path = path, exec = true },
+    })
+end
+
 --- Declare the file's peak: how many of this suite's VMs it has alive
 --- at once, file-scope and test-scope together.
 ---

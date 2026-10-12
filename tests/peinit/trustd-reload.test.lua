@@ -4,12 +4,7 @@ peinit.claim(1)
 local files = {}
 -- Validate a signed candidate before package publication, or use the image's
 -- shipped binary for normal release regression runs.
-local binary = os.getenv("TRUSTD_TEST_BINARY")
-if binary then
-    local f = assert(io.open(binary, "rb"))
-    files["usr/sbin/trustd"] = { f:read("*a"), exec = true }
-    f:close()
-end
+files = peinit.test_binary("trustd", files)
 local vm = peinit.boot({ files = files })
 
 test("service reload recomposes trust without replacing the daemon", function(t)
