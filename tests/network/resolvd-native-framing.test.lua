@@ -3,7 +3,7 @@
 -- connection, the size checks and the order they are made in, the exact
 -- error replies, how unknown keys are skipped, what a connection that ends
 -- early or takes too long gets, the cap on connections still sending, and
--- the reply that is never checked against the ceiling.
+-- the bounded reply payload.
 --
 -- Harness: the scripted gateway (helpers.gateway) with its DNS server
 -- (helpers.dns), and a whole Peios (helpers.network). Requests go out as
@@ -14,8 +14,8 @@
 -- gateway's DNS server holds some names unanswered on purpose.
 --
 -- Non-obvious:
--- * Several claims are about what one read finds: the trailing-bytes
---   ceiling, an end of file already waiting behind a request, 257
+-- * Several claims need bytes queued together: trailing data, an end
+--   of file already waiting behind a request, 257
 --   connections accepted at once. The agent sends those with resolvd
 --   stopped (kill(2) SIGSTOP from the agent, as peinit/output-fairness
 --   does), so every byte and every connection is queued before resolvd
@@ -404,7 +404,7 @@ end
 -- ---------------------------------------------------------------------------
 
 test("the native door is a SOCK_STREAM socket at /run/resolvd/resolv.sock carrying a 4-byte little-endian length and a MessagePack map each way, one request and one reply per connection",
-    { spec = "PSPU *nri-native.stream-socket-at-configured-path PSPU *nri-native.length-prefixed-messagepack-framing PSPU *nri-native.length-is-little-endian PSPU *nri-native.one-request-per-connection" },
+    { spec = "PSPU *nri-native.stream-socket-at-configured-path PSPU *nri-native.length-prefixed-messagepack-framing PSPU *nri-native.length-is-little-endian PSPU *nri-native.one-request-per-connection", tags = { "pei-1346-close" } },
     function(t)
         ready(t)
         local st = assert(sys.stat(sut, SOCK), "stat " .. SOCK)
@@ -454,9 +454,9 @@ test("the native door is a SOCK_STREAM socket at /run/resolvd/resolv.sock carryi
         send_all(sut, fd, request({ query = "status" }) .. request({ query = "flush" }))
         local first = read_reply(sut, fd)
         t:assert(first.reply and first.reply.kind == "status", "the first request is answered")
-        local after = ntfe.recv(sut, fd, 2000, 4096)
-        t:log("after the first reply: " .. (after and (#after .. " bytes") or "nothing"))
-        t:assert_eq(after, "", "and then end of file: no second reply")
+        local after, err = ntfe.recv(sut, fd, 2000, 4096)
+        t:log("after the first reply: " .. (after and (#after .. " bytes") or tostring(err)))
+        t:assert(after == "" or err == sys.E.CONNRESET, "closed after one reply; unread second frame may reset")
         sys.close(sut, fd)
     end)
 
@@ -793,8 +793,8 @@ test("a length above 65 536 is refused with request too large, before any payloa
         end
     end)
 
-test("more than 65 540 bytes buffered is request too large; bytes after a complete request are ignored while the total stays within it",
-    { spec = "resolvd *native-framing.buffered-bytes-ceiling resolvd *native-framing.trailing-bytes-ignored" },
+test("trailing bytes never count against the first request length ceiling",
+    { spec = "resolvd *native-framing.buffered-bytes-ceiling resolvd *native-framing.trailing-bytes-ignored", tags = { "pei-1346", "pei-1346-close" } },
     function(t)
         ready(t)
         local status = request({ query = "status" })
@@ -805,7 +805,9 @@ test("more than 65 540 bytes buffered is request too large; bytes after a comple
                 send_all(sut, fd, bytes)
             end)
             local r = read_reply(sut, fd)
-            r.eof = r.body and at_eof(sut, fd)
+            local after, err = ntfe.recv(sut, fd, 1500, 64)
+            r.closed = after == "" or err == sys.E.CONNRESET
+            t:log("close after trailing bytes: " .. tostring(err or after))
             sys.close(sut, fd)
             t:log(string.format("%s (%d bytes): ok=%s kind=%s error=%s", label, #bytes, tostring(r.reply and r.reply.ok),
                 tostring(r.reply and r.reply.kind), tostring(r.reply and r.reply.error)))
@@ -816,61 +818,44 @@ test("more than 65 540 bytes buffered is request too large; bytes after a comple
         t:assert(r.reply and r.reply.kind == "status", "a few trailing bytes are ignored")
         r = burst("status + junk to 65 540 in all", status .. string.rep("j", 65540 - #status))
         t:assert(r.reply and r.reply.kind == "status", "trailing bytes up to 65 540 in all are ignored")
-        -- One byte more, and the buffered total is over the ceiling.
+        -- Extra bytes are outside the first frame, even beyond the ceiling.
         r = burst("status + junk to 65 541 in all", status .. string.rep("j", 65541 - #status))
-        t:assert_eq(r.reply and r.reply.error, "request too large", "65 541 bytes buffered: request too large (PEI-1346)")
-        t:assert(r.eof, "and the connection is closed")
+        t:assert(r.reply and r.reply.kind == "status", "trailing bytes beyond the ceiling are ignored")
+        t:assert(r.closed, "and the connection is closed")
         -- The largest legal request, plus one byte.
         r = burst("a 65 536-byte request + 1 byte", frame(status_of_size(65536)) .. "j")
-        t:assert_eq(r.reply and r.reply.error, "request too large", "65 540 + 1: request too large")
+        t:assert(r.reply and r.reply.kind == "status", "an exactly maximum-size request is still accepted with trailing bytes")
     end)
 
--- PEI-1346 is this behaviour; the TRM documents it, so the test passes.
-test("resolvd reads what the client has sent before looking at the length: an oversized payload's first bytes are read, and a legal request in an over-long burst is refused",
-    { spec = "resolvd *native-framing.payload-read-before-length-check" }, function(t)
+test("resolvd reads only the header of an oversized request and only one legal frame",
+    { spec = "resolvd *native-framing.payload-read-before-length-check", tags = { "pei-1346" } }, function(t)
         ready(t)
-        local function burst(bytes)
+        for _, case in ipairs({ { 70000, 1000 }, { 0x7fffffff, 80000 } }) do
+            local bytes = string.pack("<I4", case[1]) .. string.rep("x", case[2])
             local r = measured_burst(bytes)
             t:log(r.note)
-            t:assert_eq(r.queued, #bytes, "every byte was queued before resolvd ran")
-            return r
+            t:assert_eq(r.queued, #bytes, "every byte queued before resolvd ran")
+            t:assert_eq(r.reply and r.reply.error, "request too large", "refused")
+            t:assert_eq(r.read, 4, "only the header read, no payload")
         end
-        -- An oversized length with 1 000 payload bytes behind it: all
-        -- 1 004 are read, then the length is refused.
-        local r = burst(string.pack("<I4", 70000) .. string.rep("x", 1000))
-        t:log(string.format("length 70000 + 1000 bytes: %s; resolvd read %d bytes", tostring(r.reply and r.reply.error), r.read))
-        t:assert_eq(r.reply and r.reply.error, "request too large", "refused")
-        t:assert_eq(r.read, 1004, "but only after reading all 1 004 bytes sent")
-        -- A 2 GB length with 80 000 bytes behind it: read in 4 096-byte
-        -- chunks until more than 65 540 are buffered (17 chunks, 69 632
-        -- bytes), refused before the length is looked at.
-        r = burst(string.pack("<I4", 0x7fffffff) .. string.rep("x", 80000))
-        t:log(string.format("length 2^31-1 + 80000 bytes: %s; resolvd read %d bytes", tostring(r.reply and r.reply.error), r.read))
-        t:assert_eq(r.reply and r.reply.error, "request too large", "refused")
-        t:assert_eq(r.read, 69632, "after reading 17 chunks of 4 096 bytes")
-        -- A legal status request followed in the same burst by 70 000
-        -- bytes: refused although its length is within the ceiling.
         local status = request({ query = "status" })
-        r = burst(status .. string.rep("j", 70000))
-        t:log("status + 70000 trailing bytes: " .. tostring(r.reply and (r.reply.kind or r.reply.error)))
-        t:assert_eq(r.reply and r.reply.error, "request too large", "a legal request in an over-long burst is refused")
-        t:assert_eq(r.read, 69632, "by the first check: 17 chunks read, the request never decoded")
+        local bytes = status .. string.rep("j", 70000)
+        local r = measured_burst(bytes)
+        t:log(r.note)
+        t:assert_eq(r.queued, #bytes, "the legal frame and all trailing bytes were queued")
+        t:assert(r.reply and r.reply.kind == "status", "a legal frame in a long burst is accepted")
+        t:assert_eq(r.read, #status, "only the first frame is read")
     end)
 
--- PEI-1346: resolvd reads everything the client has sent (here all 65 004
--- bytes) before it looks at the length.
 test("a request whose length exceeds the ceiling is refused without reading its payload",
-    { spec = "PSPU *nri-native.oversized-request-refused-unread", tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-native.oversized-request-refused-unread", tags = { "pei-1346" } }, function(t)
         ready(t)
         local payload = 65000
         local r = measured_burst(string.pack("<I4", 0x7fffffff) .. string.rep("x", payload))
-        local read = r.read
         t:log(r.note)
         t:assert_eq(r.queued, 4 + payload, "every byte was queued before resolvd ran")
-        t:log(string.format("length 2^31-1 + %d bytes: %s; resolvd read %d bytes", payload,
-            tostring(r.reply and r.reply.error), read))
         t:assert_eq(r.reply and r.reply.error, "request too large", "refused with an error reply")
-        t:assert(read < 4 + payload, "without reading the payload (resolvd read " .. read .. " bytes)")
+        t:assert_eq(r.read, 4, "exactly the four-byte header consumed")
     end)
 
 -- PEI-1355: oversized native replies become a bounded protocol error.
@@ -920,10 +905,9 @@ test("a connection that closes before its request is complete is dropped without
         end
     end)
 
--- PEI-1358: this is the documented current behaviour (the end of file
--- found with the request drops it); the test passes on it.
-test("a request with the end of file already behind it gets no reply; one whose end of file comes after resolvd read it is answered",
-    { spec = "resolvd *native-framing.request-then-half-close-dropped" }, function(t)
+-- Reading exactly one frame also preserves a complete request followed by EOF.
+test("a complete request is answered with either an early or late write-half close",
+    { spec = "resolvd *native-framing.request-then-half-close-dropped", tags = { "pei-1346" } }, function(t)
         ready(t)
         local fd
         with_resolvd_stopped(function()
@@ -931,9 +915,9 @@ test("a request with the end of file already behind it gets no reply; one whose 
             send_all(sut, fd, request({ query = "status" }))
             sut:syscall(NR_SHUTDOWN, fd, SHUT_WR)
         end)
-        local got, err = ntfe.recv(sut, fd, 3000, 4096)
-        t:log("status then SHUT_WR, both queued: read " .. (got and (#got .. " bytes") or tostring(err)))
-        t:assert_eq(got, "", "dropped: end of file, no reply")
+        local early = read_reply(sut, fd)
+        t:assert(early.reply and early.reply.kind == "status", "the complete request before EOF is answered")
+        t:assert(at_eof(sut, fd), "connection closes after its reply")
         sys.close(sut, fd)
 
         -- Read first, end of file later: answered.
