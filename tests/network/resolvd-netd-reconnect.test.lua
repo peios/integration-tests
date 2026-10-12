@@ -1,6 +1,6 @@
 -- resolvd §3.2 "After a loss" — when an established channel is dropped,
 -- the next attempt is 0.5 s later and, while attempts keep failing, the
--- ones after it come 0.5, 1, 2, 4, 8 and then 10 s apart; none of those
+-- ones after it come 1, 2, 4, 8 and then 10 s apart; none of those
 -- failures is logged as `netd not reachable`.
 --
 -- Harness: the scripted gateway (helpers.gateway) and a whole Peios
@@ -12,8 +12,8 @@
 -- listener and closes the connection — a loss, logged by resolvd (L) —
 -- so the attempts after it fail. It starts listening again at a chosen
 -- moment between two scheduled attempts; the connection arrives at the
--- next one. The attempts after a loss fall at L + 0.5, 1, 2, 4, 8, 16,
--- 26 s; each case measures one of them. Times are the guest's wall
+-- next one. The attempts after a loss fall at L + 0.5, 1.5, 3.5, 7.5, 15.5,
+-- 25.5, 35.5 s; each case measures one of them. Times are the guest's wall
 -- clock, which eventd stamps log lines with.
 --
 -- Own VMs: resolvd runs against a stand-in netd. resolvd is restarted
@@ -25,13 +25,21 @@ local network = require("helpers.network")
 local unixsock = require("helpers.unixsock")
 local ntfe = require("helpers.ntfe")
 local sys = require("helpers.sys")
+local msgpack = require("helpers.msgpack")
 
 peinit.claim(2)
 
 local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local ASIDE = "/run/netd/control.pt-aside.sock"
 local SOCK_SDDL = "O:SYG:SYD:(A;;GA;;;SY)(A;;GRGWGX;;;WD)"
@@ -111,12 +119,24 @@ local function accept(timeout_ms)
     return { fd = fd, at = at }
 end
 
+--- A complete snapshot, not merely connect(), resets the retry sequence.
+local function snapshot(t, c, marker)
+    local payload = msgpack.encode({ ok = true, kind = "snapshot", hostname = marker, scopes = msgpack.array({}) })
+    local frame = string.pack("<I4", #payload) .. payload
+    local sent = ntfe.send(sut, c.fd, frame)
+    t:assert_eq(sent.ret, #frame, "snapshot sent")
+    wait_until(function()
+        local s = network.call(sut, { query = "status" }, { path = "/run/resolvd/resolv.sock" })
+        return s and s.hostname == marker
+    end, { timeout = 5, interval = 0.05, desc = "snapshot applied" })
+end
+
 local conn, start
 
 -- ---------------------------------------------------------------------------
 
-test("after a loss the attempts come 0.5 s after it, then 0.5, 1, 2, 4 and 8 s apart, then every 10 s; no `netd not reachable` warning for any of them",
-    { spec = "resolvd *netd-reconnect.sequence-after-loss resolvd *netd-reconnect.no-unreachable-warning-after-loss" },
+test("after a loss the attempts come 0.5 s after it, then 1, 2, 4 and 8 s apart, then every 10 s; no `netd not reachable` warning for any of them",
+    { spec = "resolvd *netd-reconnect.sequence-after-loss resolvd *netd-reconnect.no-unreachable-warning-after-loss", tags = { "pei-1350" } },
     function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "netd bound")
         local r = sys.rename(sut, network.CONTROL, ASIDE)
@@ -127,11 +147,12 @@ test("after a loss the attempts come 0.5 s after it, then 0.5, 1, 2, 4 and 8 s a
         conn = accept(15000)
         t:assert(conn, "resolvd connected to the stand-in")
 
-        -- Attempts after a loss at L: L+0.5, +1, +2, +4, +8, +16, +26.
-        local cases = { { 0.2, 0, 0.5 }, { 0.75, 0.5, 1.0 }, { 1.5, 1.0, 2.0 }, { 3, 2.0, 4.0 },
-            { 6, 4.0, 8.0 }, { 12, 8.0, 16.0 }, { 21, 16.0, 26.0 } }
+        -- A snapshot resets each case to the same sequence after a healthy channel.
+        local cases = { { 0.2, 0, 0.5 }, { 1.0, 0.5, 1.5 }, { 2.5, 1.5, 3.5 }, { 5.5, 3.5, 7.5 },
+            { 11.5, 7.5, 15.5 }, { 20.5, 15.5, 25.5 }, { 30.5, 25.5, 35.5 } }
         for _, c in ipairs(cases) do
             local x, prev, want = c[1], c[2], c[3]
+            snapshot(t, conn, "pt-reconnect-" .. tostring(want))
             fake.staged = listener(STAGE)
             local since = now()
             clear()
