@@ -1,6 +1,6 @@
 -- netd TRM §8.4 — the hostname: which name netd uses (the registry's
 -- `Hostname`, else a lease's option 12 where the profile takes it), that
--- it is passed to the kernel unchecked, when sethostname(2) is called, and
+-- it follows the shared one-label rule, when sethostname(2) is called, and
 -- that netd never unsets a name.
 --
 -- The kernel's name is read from /proc/sys/kernel/hostname, netd's from
@@ -12,8 +12,8 @@
 -- lease in place without touching anything else.
 --
 -- Order matters and the tests share the pair: lease name, registry name
--- (and its precedence), a name the kernel refuses, a change made behind
--- netd's back, then removing every source.
+-- (and its precedence), invalid names and DHCP announcements, a change
+-- made behind netd's back, then removing every source.
 --
 -- The first-joined-interface-in-index-order rule needs two leases on two
 -- interfaces; that is `hostname-order`.
@@ -26,12 +26,16 @@ peinit.claim(2)
 
 local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
--- PEI-1334: a lease's name is passed to the kernel unchecked, so the
--- gateway offers one the one-label rule would refuse (an underscore and
--- dots).
-local LEASE_NAME = "lease_name.example"
+local LEASE_NAME = "lease-name"
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600, options = { { 12, LEASE_NAME } } })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("NETD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/netd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local function kernel_name()
     return (sut:read_file("/proc/sys/kernel/hostname"):gsub("%s+$", ""))
@@ -91,27 +95,66 @@ test("the name is the registry's Hostname when set, else the option 12 of a leas
         kernel_becomes(t, "registry-name", "and a set one wins again")
     end)
 
-test("the name goes to the kernel as written; one the kernel refuses is logged and tried again at the next pass",
-    { spec = "netd *hostname.passed-as-written" }, function(t)
-        -- The one-label rule (letters, digits, inner hyphens) is not applied.
-        local unchecked = "Not_One.Label"
-        network.write(sut, network.KEY, { Hostname = "sz:" .. unchecked })
-        kernel_becomes(t, unchecked, "a registry name outside the one-label rule is set as written")
-        -- The lease name of the first test was outside it too (PEI-1334).
+test("invalid registry names retain the applied name, warn once, and do not fall through to DHCP",
+    { spec = "netd *hostname.passed-as-written", tags = { "pei-1334" } }, function(t)
+        local previous = kernel_name()
+        for _, name in ipairs({ "Not_One.Label", "LocalHost", string.rep("x", 64), "bad name" }) do
+            local before = count_logged(" refused: ")
+            network.write(sut, network.KEY, { Hostname = "sz:" .. name })
+            wait_until(function() return count_logged(" refused: ") > before end,
+                { timeout = 15, interval = 0.1, desc = "invalid registry name refused" })
+            t:assert_eq(kernel_name(), previous, "invalid registry name does not change the kernel or select the lease")
+            t:assert_eq(netd_name(), previous, "status retains the applied name")
+            local count = count_logged(" refused: ")
+            full_pass(t)
+            full_pass(t)
+            t:assert_eq(count_logged(" refused: "), count, "the same invalid candidate is not logged every pass")
+        end
+        network.write(sut, network.KEY, { Hostname = "sz:  Registry-Trimmed  " })
+        kernel_becomes(t, "Registry-Trimmed", "valid registry names use the shared whitespace normalization")
+    end)
 
-        local long = string.rep("x", 70)
-        local line = "sethostname(" .. long .. "): "
-        network.write(sut, network.KEY, { Hostname = "sz:" .. long })
-        t:assert(wait_until(function()
-            gw:serve({ timeout = 0 })
-            return count_logged(line) >= 1
-        end, { timeout = 15, interval = 0.25, desc = "the refusal to be logged" }), "a 70-byte name is refused and logged")
-        local n = count_logged(line)
-        t:assert_eq(kernel_name(), unchecked, "the kernel keeps the last name it took")
-        t:assert_eq(netd_name(), unchecked, "and netd reports the name it last set, not the refused one")
-        full_pass(t)
-        t:assert(wait_until(function() return count_logged(line) > n end,
-            { timeout = 10, interval = 0.25, desc = "the retry" }), "the next pass tries it again and logs it again")
+test("invalid DHCP hostnames are refused and a later valid offered name is adopted",
+    { tags = { "pei-1334" } }, function(t)
+        network.reg(sut, { "del", network.KEY, "Hostname" }):assert_ok()
+        kernel_becomes(t, LEASE_NAME, "return to the valid offered name")
+        for i, name in ipairs({ "bad.name", "bad name", "LocalHost", string.rep("x", 64), "bad\nname" }) do
+            local lease = 3500 - i * 100
+            local before = count_logged(" refused: ")
+            gw:dhcp({ pool = { "10.77.0.50" }, lease = lease, options = { { 12, name } } })
+            renew(t)
+            t:assert(network.serve_until(gw, sut, function(iface)
+                return network.bound(iface) and iface.lease.expires_in <= lease
+            end, { iface = "eth0", timeout = 15 }), "renewal with invalid name was taken")
+            wait_until(function() return count_logged(" refused: ") > before end,
+                { timeout = 10, interval = 0.1, desc = "invalid offered name refused" })
+            t:assert_eq(kernel_name(), LEASE_NAME, "the prior valid hostname survives the invalid offer")
+            t:assert_eq(netd_name(), LEASE_NAME, "invalid offer is not published as the applied hostname")
+        end
+        gw:dhcp({ pool = { "10.77.0.50" }, lease = 2800, options = { { 12, "  New-Lease  " } } })
+        renew(t)
+        kernel_becomes(t, "New-Lease", "a subsequent valid lease name is normalized and adopted")
+    end)
+
+test("DHCP announcements omit invalid registry names and normalize valid names",
+    { tags = { "pei-1334" } }, function(t)
+        for _, case in ipairs({ { "bad.announce", false }, { "  Announce-Good  ", "Announce-Good" } }) do
+            network.write(sut, network.KEY, { Hostname = "sz:" .. case[1] })
+            full_pass(t)
+            network.write(sut, [[Profiles\default]], { ["Hostname.Announce"] = "dword:0" })
+            full_pass(t)
+            gw:forget()
+            network.write(sut, [[Profiles\default]], { ["Hostname.Announce"] = "dword:1" })
+            local request
+            t:assert(gw:serve({ timeout = 20, until_ = function()
+                local requests = gw:dhcp_messages(gateway.DHCP.REQUEST)
+                request = requests[#requests]
+                return request ~= nil
+            end }), "a restarted client sent a DHCP request")
+            t:assert_eq(request.opt[12], case[2] or nil, "option 12 contains only a validated registry hostname")
+            t:assert(network.serve_until(gw, sut, network.bound, { iface = "eth0", timeout = 20 }), "bound after restart")
+        end
+        network.write(sut, [[Profiles\default]], { ["Hostname.Announce"] = "dword:0" })
     end)
 
 test("sethostname is called only when netd's own name changes, never to undo another's change",
