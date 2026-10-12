@@ -105,8 +105,10 @@ local function restart()
 end
 
 --- A native request whose answer needs the network: sent, then the
---- gateway pumped until the reply is whole.
-local function ask(req, timeout)
+--- gateway pumped until the reply is whole. An optional observation
+--- ends the pump as soon as it returns a value, without waiting for the
+--- final DNS answer; the value is returned second.
+local function ask(req, timeout, observe)
     local unixsock = require("helpers.unixsock")
     local msgpack = require("helpers.msgpack")
     local fd = assert(unixsock.socket(sut, unixsock.AF_UNIX, unixsock.SOCK.STREAM))
@@ -114,18 +116,25 @@ local function ask(req, timeout)
     assert(c.ret == 0, "connect: " .. unixsock.errname(c.errno))
     local p = msgpack.encode(req)
     ntfe.send(sut, fd, string.pack("<I4", #p) .. p)
-    local buf, reply = "", nil
+    local buf, reply, observed = "", nil, nil
     gw:serve({ timeout = timeout or 20, until_ = function()
+        if observe then
+            observed = observe()
+            if observed then return true end
+        end
         local chunk = ntfe.recv(sut, fd, 20, 65536)
         if chunk and #chunk > 0 then buf = buf .. chunk end
         if #buf >= 4 then
             local len = string.unpack("<I4", buf)
-            if #buf >= 4 + len then reply = msgpack.decode(buf:sub(5, 4 + len)); return true end
+            if #buf >= 4 + len then
+                reply = msgpack.decode(buf:sub(5, 4 + len))
+                return observe == nil
+            end
         end
         return false
     end })
     sys.close(sut, fd)
-    return reply
+    return reply, observed
 end
 
 --- resolvd's log lines newer than `since` (guest ns), oldest first, each
@@ -444,7 +453,8 @@ test("the reservation's descriptor grants SYSTEM and resolvd's service SID, and 
 -- ---------------------------------------------------------------------------
 
 test("a restarted resolvd has an empty cache, no demoted servers and zeroed counters",
-    { spec = "resolvd *service.restart-empties-cache resolvd *service.restart-clears-demotions" }, function(t)
+    { spec = "resolvd *service.restart-empties-cache resolvd *service.restart-clears-demotions",
+      tags = { "pei1404" } }, function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "eth0 bound")
         wait_until(function()
             local s = rstatus()
@@ -452,9 +462,15 @@ test("a restarted resolvd has an empty cache, no demoted servers and zeroed coun
         end, { timeout = 30, interval = 0.25, desc = "resolvd's eth0 scope with its server" })
         local a = ask({ query = "resolve", name = "www.svc.test", type = 1 })
         t:assert(a and a.outcome == "found", "www.svc.test answered by the server")
-        local f = ask({ query = "resolve", name = "fail.svc.test", type = 1 })
-        t:log("fail.svc.test: " .. json.encode(f))
-        local before = rstatus()
+        -- PEI-1404: capture the transient precondition inside the pump.
+        -- Waiting for all lookup attempts first lets demotion expire (or
+        -- another good reply clear it) before the later status request.
+        -- This test needs a demoted server, not a completed failed lookup.
+        local _, before = ask({ query = "resolve", name = "fail.svc.test", type = 1 }, 10, function()
+            local s = rstatus()
+            if s.scopes[1] and same(s.scopes[1].demoted, { "10.77.0.1" }) then return s end
+        end)
+        t:assert(before, "observed the SERVFAILing server demoted while pumping replies")
         t:log("before: cache " .. before.cache_entries .. " demoted " .. json.encode(before.scopes[1].demoted)
             .. " counters " .. json.encode(before.counters))
         t:assert(before.cache_entries >= 1, "the answer is cached")
