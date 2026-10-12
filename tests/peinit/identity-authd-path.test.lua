@@ -41,6 +41,8 @@ local vm = peinit.boot({
         { path = [[Machine\System\Services]] },
         resident("pt-authd-local", "LocalService"),
         resident("pt-authd-network", "NetworkService"),
+        resident("pt-authd-service", "Service"),
+        resident("pt-authd-service-case", "sErViCe"),
         on_demand("pt-authd-ondemand", "LocalService"),
         on_demand("pt-authd-system", "SYSTEM"),
         on_demand("pt-authd-stranger", "pt-nobody"),
@@ -276,4 +278,31 @@ test("an unreachable authority fails every non-SYSTEM start and no SYSTEM one",
         local restored = vm:run("svctl status pt-authd-ondemand").stdout
         t:assert(not restored:find("parent_setup_failure", 1, true),
             "and it succeeds again once the socket is back: " .. restored)
+    end)
+
+-- Independent SHA-1/UTF-16LE vectors, not values learned from the guest.
+test("Service names a distinct virtual user and retains the Service logon groups",
+    { spec = {
+        "peinit *token.service-selects-its-own-virtual-account",
+        "PGSS Logon *attestation.peios-service-is-a-virtual-account",
+    } }, function(t)
+        local expected = {
+            ["pt-authd-service"] = "S-1-5-80-1526200206-3012773061-2409533177-722596919-2546624002",
+            ["pt-authd-service-case"] = "S-1-5-80-1548069521-2607972917-1500230190-3254004314-3710524378",
+        }
+        for name, sid in pairs(expected) do
+            local token = token_of(pid_of(name))
+            t:assert_eq(token.principal.user, sid, name .. " has its own user SID")
+            t:assert(token.groups[sid], "the service SID is also a group")
+            for _, group in ipairs({ "S-1-1-0", "S-1-5-11", "S-1-2-0", "S-1-5-6" }) do
+                t:assert(token.groups[group], "derived Service logon group " .. group)
+            end
+            t:assert(logon_sid(token), "the token belongs to its own logon session")
+            t:assert(not token.groups["S-1-5-18"], "no SYSTEM membership")
+            t:assert(not token.groups["S-1-5-19"], "no LocalService membership")
+        end
+        local shared = token_of(pid_of("pt-authd-local"))
+        t:assert_eq(shared.principal.user, "S-1-5-19", "LocalService is a shared user")
+        t:assert(shared.groups["S-1-5-80-1322559470-233204500-3057515935-1864350087-205673815"],
+            "the shared account retains the distinct service group")
     end)

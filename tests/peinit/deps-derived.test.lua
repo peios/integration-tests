@@ -70,6 +70,7 @@ local SEED = {
 
     -- Needs the authority because its own identity is not SYSTEM.
     oneshot("pt-d-token", { LOCAL_SERVICE }),
+    oneshot("pt-d-service", { { name = "Identity", type = "sz", data = "Service" } }),
 
     -- Needs it because its hooks do, even though the service itself is
     -- SYSTEM: the hook materialises a token of its own.
@@ -174,6 +175,7 @@ test("a service that needs the authority gains a Requires on each provider of au
     {
         spec = {
             "peinit *derived.a-service-needing-the-authority-gains-a-requires-on-each-authn-provider",
+            "peinit *token.service-orders-after-the-authority",
             "peinit *derived.hooks-running-as-a-non-system-identity-also-need-the-edge",
             "peinit *derived.a-provider-never-gains-a-dependency-on-its-own-role",
         },
@@ -183,6 +185,8 @@ test("a service that needs the authority gains a Requires on each provider of au
         t:assert(dependents,
             "peinit knows something depends hard on the staged authority: " .. tostring(raw))
         local warning = dependents
+        t:assert(warning:find("pt-d-service", 1, true),
+            "Service identity gained the authority edge: " .. warning)
 
         -- Identity, not declaration: nothing in the seed names
         -- pt-d-authority. The edge exists because these services cannot
