@@ -2,7 +2,7 @@
 -- loopback-only source rule, the 4 096-byte read buffer, where replies
 -- go, the checks a query passes or fails at the door (FORMERR, NOTIMP,
 -- dropped) and the error replies' exact shape, what an accepted query
--- contributes (class, flags and EDNS ignored; escaped labels re-parsed),
+-- contributes (IN class only; wire labels preserved; flags and EDNS ignored),
 -- and which stub queries are counted. With them, the PSPU §6.8 door
 -- anchors that are about the same checks. TCP connections are
 -- resolvd-stub-tcp.test.lua; replies to accepted queries are
@@ -55,7 +55,14 @@ dns.serve(gw, {
     },
     soa = { name = "example.test", data = { minimum = 30 } },
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local STUB = "127.0.0.53"
 local SOCK = "/run/resolvd/resolv.sock"
@@ -146,6 +153,24 @@ local function exchange(bytes, timeout)
     local got = recv_serving(fd, timeout)
     sys.close(sut, fd)
     return got and dns.decode(got), got
+end
+
+--- A framed TCP exchange through the same parser.
+local function exchange_tcp(bytes)
+    local fd = assert(ntfe.tcp_connect(sut, STUB, 53, 3000))
+    assert(ntfe.send(sut, fd, string.pack(">I2", #bytes) .. bytes))
+    local buf = ""
+    local function whole() return #buf >= 2 and #buf >= 2 + string.unpack(">I2", buf) end
+    gw:serve({ timeout = 10, until_ = function()
+        local got, err = ntfe.recv(sut, fd, 20, 65536)
+        if got then buf = buf .. got end
+        return whole() or got == "" or (not got and err ~= "timeout")
+    end })
+    sys.close(sut, fd)
+    if whole() then
+        local raw = buf:sub(3, 2 + string.unpack(">I2", buf))
+        return dns.decode(raw), raw
+    end
 end
 
 --- The gateway's logged questions whose name is `name` (case-insensitive).
@@ -419,21 +444,22 @@ test("the error replies carry an OPT of the query's own size, DO clear, no optio
 
 -- ---- what an accepted query contributes ----------------------------------
 
-test("an accepted query's class is not looked at: any class is answered as IN",
-    { spec = "resolvd *stub-receive.class-ignored" }, function(t)
+test("unsupported query classes receive NOTIMP without an upstream query",
+    { spec = "resolvd *stub-receive.unsupported-class-notimp", tags = { "pei1353" } }, function(t)
         ready(t)
-        dns.forget(gw)
-        local q = dns.encode({ id = 0x5C01, rd = true,
-            questions = { { name = "chaos.example.test", type = "A", class = dns.CLASS.CH } } })
-        local m = exchange(q)
-        t:assert(m, "a CH-class query is answered")
-        t:assert_eq(m.rcode, dns.RCODE.NOERROR, "NOERROR")
-        t:assert_eq(m.questions[1].class, dns.CLASS.CH, "the question is echoed as asked, class CH")
-        t:assert(m.answers[1] and m.answers[1].data == "10.77.0.81" and m.answers[1].class == dns.CLASS.IN,
-            "with the IN record of the same name")
-        local up = asked("chaos.example.test")
-        t:assert(#up >= 1, "the name went upstream")
-        t:assert_eq(up[1].msg.questions[1].class, dns.CLASS.IN, "asked upstream as IN")
+        for _, exchange_on in ipairs({ exchange, exchange_tcp }) do
+            for _, class in ipairs({ 3, 4, 255 }) do
+                dns.forget(gw)
+                local q = dns.encode({ id = 0x5C00 + class, rd = true,
+                    questions = { { name = "chaos.example.test", type = "A", class = class } } })
+                local m = exchange_on(q)
+                t:assert(m, "unsupported class is answered")
+                t:assert_eq(m.rcode, dns.RCODE.NOTIMP, "NOTIMP")
+                t:assert_eq(m.questions[1].class, class, "question class echoed unchanged")
+                t:assert_eq(#m.answers, 0, "no IN records substituted")
+                t:assert_eq(#asked("chaos.example.test"), 0, "no upstream query")
+            end
+        end
     end)
 
 test("RD, CD, DO and EDNS options in an accepted query are not looked at",
@@ -462,72 +488,49 @@ test("RD, CD, DO and EDNS options in an accepted query are not looked at",
         end
     end)
 
-test("a label holding a dot or an unprintable byte is asked as a different name",
-    { spec = "resolvd *stub-receive.escaped-labels-asked-as-different-name" }, function(t)
-        ready(t)
-        dns.forget(gw)
-        -- One wire label "foo.bar", under example.test.
-        local m = exchange(dns.encode({ id = 0x5E01, rd = true,
-            questions = { { name = { "foo.bar", "example", "test" }, type = "A" } } }))
-        t:assert(m and m.id == 0x5E01, "answered")
-        -- One label holding byte 0x01.
-        local m2 = exchange(dns.encode({ id = 0x5E02, rd = true,
-            questions = { { name = { "x\1y", "example", "test" }, type = "A" } } }))
-        t:assert(m2 and m2.id == 0x5E02, "answered")
+local function same_labels(a, b)
+    if #a ~= #b then return false end
+    for i, label in ipairs(a) do
+        if label:lower() ~= b[i]:lower() then return false end
+    end
+    return true
+end
 
-        local seen = {}
-        for _, e in ipairs(foreign_questions()) do
-            local labels = wire_labels(e.raw)
-            for i, l in ipairs(labels) do labels[i] = l:lower() end
-            seen[#seen + 1] = labels
-            t:log("upstream asked: [" .. table.concat(labels, "|") .. "]")
+local function assert_wire_question(t, labels, id, exchange_on)
+    dns.forget(gw)
+    local m, raw = exchange_on(dns.encode({ id = id, rd = true,
+        questions = { { name = labels, type = "A" } } }))
+    t:assert(m and m.id == id, "wire name answered")
+    t:assert(same_labels(wire_labels(raw), labels), "question labels echoed unchanged")
+    local found = false
+    for _, e in ipairs(foreign_questions()) do
+        if same_labels(wire_labels(e.raw), labels) then found = true end
+    end
+    t:assert(found, "upstream received original label bytes and boundaries")
+end
+
+test("dots, backslashes and binary bytes retain their wire labels",
+    { spec = "resolvd *stub-receive.wire-labels-preserved", tags = { "pei1353" } }, function(t)
+        ready(t)
+        local labels = {
+            { "foo.bar", "example", "test" },
+            { "x\\y", "example", "test" },
+            { "x\0\1\255y", "example", "test" },
+        }
+        for i, name in ipairs(labels) do
+            assert_wire_question(t, name, 0x5E00 + i, exchange)
         end
-        local function was_asked(want)
-            for _, l in ipairs(seen) do
-                if table.concat(l, "\0") == table.concat(want, "\0") then return true end
-            end
-            return false
-        end
-        t:assert(was_asked({ "foo\\", "bar", "example", "test" }),
-            "`foo.bar` became two labels, `foo\\` and `bar`: the escaped dot is a label boundary")
-        t:assert(not was_asked({ "foo.bar", "example", "test" }), "the three-label name was never asked")
-        t:assert(was_asked({ "x\\001y", "example", "test" }),
-            "byte 0x01 became the four bytes `\\001` in the label")
+        assert_wire_question(t, { "tcp.dot\\\1", "example", "test" }, 0x5E10, exchange_tcp)
     end)
 
-test("when escaping takes a label past 63 bytes or the name past 255, the answer is notfound",
-    { spec = "resolvd *stub-receive.escaped-label-overlong-is-notfound" }, function(t)
+test("wire-valid binary names are not rejected by presentation length",
+    { spec = "resolvd *stub-receive.wire-lengths-preserved", tags = { "pei1353" } }, function(t)
         ready(t)
-        dns.forget(gw)
-        -- 16 bytes of 0xC3: 64 once each is written \195.
-        local m = exchange(dns.encode({ id = 0x5F01, rd = true,
-            questions = { { name = { string.rep("\xC3", 16), "example", "test" }, type = "A" } } }))
-        t:assert(m and m.id == 0x5F01, "answered")
-        t:assert_eq(m.rcode, dns.RCODE.NXDOMAIN, "a 16-byte label of 0xC3 is NXDOMAIN (notfound)")
-        -- 15 bytes of 0xC3 (60 escaped) stays within a label: asked upstream.
-        local m15 = exchange(dns.encode({ id = 0x5F02, rd = true,
-            questions = { { name = { string.rep("\xC3", 15), "example", "test" }, type = "A" } } }))
-        t:assert(m15 and m15.id == 0x5F02, "the 15-byte label is answered too")
-        -- Five 15-byte labels of 0x01: 81 bytes on the wire, 306 escaped.
+        assert_wire_question(t, { string.rep("\xC3", 16), "example", "test" }, 0x5F01, exchange)
+        assert_wire_question(t, { string.rep("\xC3", 63), "example", "test" }, 0x5F02, exchange)
         local long = {}
         for i = 1, 5 do long[i] = string.rep("\1", 15) end
-        local m5 = exchange(dns.encode({ id = 0x5F03, rd = true,
-            questions = { { name = long, type = "A" } } }))
-        t:assert(m5 and m5.id == 0x5F03, "answered")
-        t:assert_eq(m5.rcode, dns.RCODE.NXDOMAIN, "a name past 255 bytes once escaped is NXDOMAIN (notfound)")
-
-        local up = foreign_questions()
-        local n15, n16, nlong = 0, 0, 0
-        for _, e in ipairs(up) do
-            local l = wire_labels(e.raw)[1] or ""
-            t:log("upstream asked, first label " .. #l .. " bytes: " .. l)
-            if l == string.rep("\\195", 15) then n15 = n15 + 1 end
-            if l == string.rep("\\195", 16) then n16 = n16 + 1 end
-            if l:find("\\001", 1, true) then nlong = nlong + 1 end
-        end
-        t:assert(n15 >= 1, "the 15-byte label went upstream escaped (the control)")
-        t:assert_eq(n16, 0, "the 16-byte label was never asked")
-        t:assert_eq(nlong, 0, "the long name was never asked")
+        assert_wire_question(t, long, 0x5F03, exchange)
     end)
 
 -- ---- counting --------------------------------------------------------------
@@ -542,6 +545,7 @@ test("every accepted stub query counts in `queries`; refused ones do not",
             dns.encode({ id = 4, opcode = 2, questions = { { name = "localhost", type = "A" } } }), -- NOTIMP
             dns.encode({ id = 5, questions = {} }),                                         -- FORMERR
             dns.encode({ id = 6, questions = { { name = "localhost", type = "A" }, { name = "localhost", type = "A" } } }),
+            dns.encode({ id = 7, questions = { { name = "localhost", type = "A", class = dns.CLASS.CH } } }),
         }
         local nl = assert(ntfe.udp_bind(sut, LEASED, 0))
         local fd = udp()
@@ -561,9 +565,9 @@ test("every accepted stub query counts in `queries`; refused ones do not",
         until delta == 1 or attempt == 3
         sys.close(sut, fd); sys.close(sut, nl)
         t:assert_eq(delta, 1,
-            "six refused messages, one non-loopback query and one accepted query move `queries` by one")
+            "seven refused messages, one non-loopback query and one accepted query move `queries` by one")
 
-        -- And each accepted one counts, including one whose name does not parse.
+        -- Each accepted wire name counts once, including binary labels.
         local d2
         attempt = 0
         repeat
@@ -575,11 +579,11 @@ test("every accepted stub query counts in `queries`; refused ones do not",
             ntfe.send(sut, fd2, probe(0x6202))
             ntfe.send(sut, fd2, probe(0x6203))
             local n = 0
-            while n < 3 and ntfe.recv(sut, fd2, 2000, 65536) do n = n + 1 end
+            while n < 3 and recv_serving(fd2, 10) do n = n + 1 end
             sys.close(sut, fd2)
             t:assert_eq(n, 3, "three accepted queries answered")
             d2 = rstatus().counters.queries - before
             t:log(string.format("attempt %d: queries moved by %d", attempt, d2))
         until d2 == 3 or attempt == 3
-        t:assert_eq(d2, 3, "three accepted queries, one of a name that does not parse, count three")
+        t:assert_eq(d2, 3, "three accepted queries, including a binary name, count three")
     end)
