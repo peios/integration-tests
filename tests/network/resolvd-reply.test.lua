@@ -47,7 +47,14 @@ dns.serve(gw, {
     soa = { name = "example.test", data = { minimum = 30 } },
     on = function(q, d, ctx) if HOOK then return HOOK(q, d, ctx) end end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 -- ---- the gateway's levers -------------------------------------------------
 
@@ -600,65 +607,45 @@ test("a datagram that does not decode — garbage, or a reply longer than the 4 
         not_used(t, r4, qs4, d4, good4, "garbage")
     end)
 
-test("a non-matching datagram ends nothing by itself — no count, no demotion, no answer — but it costs the transaction its socket, so the real reply right behind it is lost and the transaction times out at 2 s, failing and demoting the server",
-    { spec = "resolvd *engine-reply.non-matching-reply-ignored resolvd *engine-reply.non-matching-udp-datagram-becomes-timeout" },
+test("a non-matching UDP datagram leaves the original socket and deadline available for the real reply",
+    { spec = "resolvd *engine-reply.non-matching-reply-ignored resolvd *engine-reply.non-matching-udp-datagram-becomes-timeout", tags = { "pei-1338" } },
     function(t)
         up(t)
         local name, good = fresh("window")
-        local n = 0
+        local pending
         HOOK = function(q, d, ctx)
             if not dns.same_name(qname(q) or "", name) then return nil end
-            n = n + 1
-            if n == 1 then
-                -- A wrong-ID copy first, then the genuine reply.
-                local bad = { id = (d.id + 1) & 0xFFFF, qr = true, rd = d.rd, ra = true, questions = questions_of(q),
-                              answers = { { name = qname(q), type = "A", ttl = 60, data = BOGUS } }, edns = d.edns }
-                send_reply(ctx, dns.encode(bad))
-                return d
-            end
-            d.delay = 1          -- the retry's answer waits a second, so the demotion can be seen
-            return d
+            local bad = { id = (d.id + 1) & 0xFFFF, qr = true, rd = d.rd, ra = true, questions = questions_of(q),
+                          answers = { { name = qname(q), type = "A", ttl = 60, data = BOGUS } }, edns = d.edns }
+            send_reply(ctx, dns.encode(bad))
+            pending = { ctx = ctx, reply = d }
+            return false
         end
         t:assert_eq(demoted(), "", "the server starts healthy")
         dns.forget(gw)
         local c0 = counters()
         local a = ask({ query = "resolve", name = name, type = A, no_cache = true })
-        gw:serve({ timeout = 10, until_ = function() return #dns.queries(gw, is(name)) >= 1 end })
+        gw:serve({ timeout = 10, until_ = function() return pending ~= nil end })
         gw:pump(100)
-        local first_at = dns.queries(gw, is(name))[1].at
-        local mid = counters()
-        local mid_dem = demoted()
-        local answered_yet = take(a)
-        local elapsed = gw.vm:clock():get() - first_at
-        local dm = delta(c0, mid)
-        t:log(string.format("inside the window (%.2f s after the query): %s, demoted [%s], answer %s",
-            elapsed, dtext(dm), mid_dem, tostring(answered_yet and answered_yet.outcome)))
-        t:assert(elapsed < 1.9, "still inside the transaction's 2 s")
-        t:assert_eq(dm.answered, 0, "neither datagram counted as answered")
-        t:assert_eq(dm.failed, 0, "nothing counted as failed")
-        t:assert_eq(mid_dem, "", "the server is not demoted for it")
-        t:assert(answered_yet == nil, "the question is not answered by either datagram")
-        t:assert_eq(#dns.queries(gw, is(name)), 1, "and not asked again yet")
-
-        gw:serve({ timeout = 10, until_ = function() return #dns.queries(gw, is(name)) >= 2 end })
-        local at_retry = counters()
-        local retry_dem = demoted()
-        local dr = delta(c0, at_retry)
-        t:log(string.format("at the retry: %s, demoted [%s]", dtext(dr), retry_dem))
+        local dm = delta(c0, counters())
+        local elapsed = gw.vm:clock():get() - dns.queries(gw, is(name))[1].at
+        t:assert(elapsed < 1.9, "still inside the original 2 s deadline")
+        t:assert_eq(dm.answered, 0, "unmatched datagram does not count as answered")
+        t:assert_eq(dm.failed, 0, "unmatched datagram does not count as failed")
+        t:assert_eq(demoted(), "", "the server remains healthy")
+        t:assert(take(a) == nil, "the unmatched datagram does not answer the question")
+        send_reply(pending.ctx, dns.encode(pending.reply))
         local r = finish(a, 10)
         HOOK = nil
-        local qs = dns.queries(gw, is(name))
-        qlog(t, qs)
-        local gap = qs[2].at - qs[1].at
-        t:assert(gap >= 1.7 and gap <= 2.6, string.format("the retry came at the 2 s deadline (%.2f s)", gap))
-        t:assert_eq(dr.failed, 1, "the deadline failed the transaction")
-        t:assert_eq(dr.answered, 0, "the genuine first reply was never matched")
-        t:assert_eq(retry_dem, SERVER, "the server is demoted")
-        t:assert(r and r.outcome == "found" and texts(r) == good, "the retry's answer is used")
-        t:assert_eq(demoted(), "", "and its NOERROR lifts the demotion")
+        local d = delta(c0, counters())
+        t:assert(r and r.outcome == "found" and texts(r) == good, "the later matching reply answers the question")
+        t:assert_eq(#dns.queries(gw, is(name)), 1, "no retry was needed")
+        t:assert_eq(d.answered, 1, "only the matching reply is counted")
+        t:assert_eq(d.failed, 0, "no failure")
+        t:assert_eq(demoted(), "", "no demotion")
     end)
 
-test("a non-matching TCP reply also ends in a timeout",
+test("a non-matching TCP reply without a matching replacement still reaches the original deadline",
     { spec = "resolvd *engine-reply.non-matching-tcp-reply-becomes-timeout" }, function(t)
         up(t)
         local name, good = fresh("tcpbad")
@@ -695,14 +682,17 @@ test("a non-matching TCP reply also ends in a timeout",
 -- PSPU §6.7
 -- ---------------------------------------------------------------------------
 
--- PEI-1338: resolvd closes a UDP transaction's socket on the first datagram
--- read, matched or not, so a mismatched datagram ahead of the real reply
--- costs the transaction: the real reply is lost, the question waits out the
--- 2 s deadline, the server is demoted, and it is asked again.
+-- An invalid reply must not consume the connection needed by the valid reply.
 test("a reply whose ID, question or case does not match is ignored, not a failure: the real reply right behind it is used",
-    { spec = "PSPU *nri-resolution.mismatched-reply-ignored", tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-resolution.mismatched-reply-ignored", tags = { "pei-1338" } }, function(t)
         up(t)
         local kinds = {
+            { "garbage", function() return "invalid" end },
+            { "qr", function(rep) rep.qr = false end },
+            { "type", function(rep) rep.questions[1].type = AAAA end },
+            { "class", function(rep) rep.questions[1].class = 3 end },
+            { "no-question", function(rep) rep.questions = {} end },
+            { "two-questions", function(rep) rep.questions[2] = rep.questions[1] end },
             { "id", function(rep) rep.id = (rep.id + 1) & 0xFFFF end },
             { "question", function(rep) rep.questions[1].name = "other.example.test" end },
             { "case", function(rep)
@@ -722,8 +712,8 @@ test("a reply whose ID, question or case does not match is ignored, not a failur
                 if n == 1 then
                     local bad = { id = d.id, qr = true, rd = d.rd, ra = true, questions = questions_of(q),
                                   answers = { { name = qname(q), type = "A", ttl = 60, data = BOGUS } }, edns = d.edns }
-                    k[2](bad)
-                    send_reply(ctx, dns.encode(bad))
+                    local raw = k[2](bad)
+                    send_reply(ctx, raw or dns.encode(bad))
                 end
                 return d
             end
@@ -742,5 +732,38 @@ test("a reply whose ID, question or case does not match is ignored, not a failur
         for _, x in ipairs(results) do
             t:assert_eq(x.queries, 1, "mismatched " .. x.kind .. ": the real reply behind it answers the first query")
             t:assert_eq(x.failed, 0, "mismatched " .. x.kind .. ": no failure counted")
+        end
+    end)
+
+
+test("TCP ignores invalid frames and accepts a matching frame on the same connection, including before EOF",
+    { spec = "resolvd *engine-reply.non-matching-tcp-reply-becomes-timeout", tags = { "pei-1338" } }, function(t)
+        up(t)
+        for _, close in ipairs({ false, true }) do
+            local name, good = fresh(close and "tcp-follow-close" or "tcp-follow")
+            HOOK = function(q, d, ctx)
+                if not dns.same_name(qname(q) or "", name) then return nil end
+                if ctx.transport == "udp" then d.tc, d.answers = true, {}; return d end
+                local bad = { id = (d.id + 1) & 0xFFFF, qr = true, questions = questions_of(q) }
+                local raw = dns.encode(bad)
+                local frames = string.pack(">I2", #raw) .. raw .. string.pack(">I2", 3) .. "bad"
+                local sent = ntfe.send(gw.vm, ctx.fd, frames)
+                t:assert_eq(sent.ret, #frames, "small invalid frames sent: " .. tostring(sent.errno))
+                d.close = close
+                return d
+            end
+            dns.forget(gw)
+            local c0 = counters()
+            local r = resolve(name, A)
+            HOOK = nil
+            local d = delta(c0, counters())
+            local qs = dns.queries(gw, is(name))
+            qlog(t, qs)
+            t:assert(r and r.outcome == "found" and texts(r) == good, "matching TCP answer is retained")
+            t:assert_eq(#qs, 2, "only the initial UDP and TCP retry")
+            t:assert_eq(qs[2].transport, "tcp", "answer on TCP")
+            t:assert_eq(d.failed, 0, "invalid frames cause no failure")
+            t:assert_eq(d.answered, 2, "UDP truncation and matching TCP reply only")
+            t:assert_eq(demoted(), "", "server stays healthy")
         end
     end)

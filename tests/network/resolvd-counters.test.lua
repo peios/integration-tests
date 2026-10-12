@@ -292,9 +292,8 @@ test("a SERVFAIL reply counts as answered and as failed",
 
 test("a reply that does not match is not answered: its transaction times out and fails",
     { spec = "resolvd *engine-counters.upstream-answered" }, function(t)
-        -- PEI-1338: any datagram on the upstream socket ends the
-        -- transaction, so the mismatch becomes a 2 s timeout and a
-        -- demotion; this asserts the TRM's present behaviour.
+        -- No matching replacement arrives on the first transaction, so
+        -- its unchanged 2 s deadline still expires and demotes the server.
         behave["odd.example.test"] = function(n, _, default)
             if n == 1 then default.id = default.id ~ 1 end
             return default
