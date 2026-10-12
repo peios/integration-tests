@@ -120,6 +120,10 @@ int main(void)
     struct shared *s = mmap(NULL, sizeof(*s), PROT_READ | PROT_WRITE,
                             MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (s == MAP_FAILED) fail("shared state");
+    atomic_init(&s->ready, 0);
+    atomic_init(&s->done, 0);
+    atomic_init(&s->failed, 0);
+    atomic_init(&s->batches, 0);
     uint64_t initial_tail = load_pos(map, 72), final_tail;
     pid_t producer = fork();
     if (producer < 0) fail("fork");
@@ -180,5 +184,6 @@ int main(void)
     printf("batches=%u accepted=%lu discarded=%lu wraps=%llu\n", batches,
            accepted, discarded, (unsigned long long)((final_tail - initial_tail) / capacity));
     return bad || !WIFEXITED(status) || WEXITSTATUS(status) || atomic_load(&s->failed) ||
-           batches != BATCHES || accepted < 256 || final_tail - initial_tail < capacity * 32;
+           batches != BATCHES || accepted < 256 || !discarded ||
+           final_tail - initial_tail < capacity * 32;
 }
