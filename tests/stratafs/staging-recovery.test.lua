@@ -38,6 +38,63 @@ local function with_image(t, case, entry, body)
     if not ok then error(err, 0) end
 end
 
+for _, case in ipairs({ "orphan-file", "orphan-dir" }) do
+    test("a staging-prefix lookup physically recovers " .. case,
+        { spec = "PKM *resolution.staging-prefix-triggers-recovery" }, function(t)
+            with_image(t, case, ".stratafs-stage-dead", function(merged, raw)
+                local st, errno = sys.stat(vm, merged .. "/ordinary-missing")
+                t:assert(not st and errno == sys.E.NOENT)
+                t:assert(sys.stat(vm, raw), "an ordinary lookup leaves the orphan in place")
+
+                -- A different, absent staging name must scan the entire parent;
+                -- neither enumeration nor a lookup of the orphan itself occurs.
+                st, errno = sys.stat(vm, merged .. "/.stratafs-stage-probe")
+                t:assert(not st and errno == sys.E.NOENT)
+                st, errno = sys.stat(vm, raw)
+                t:assert(not st and errno == sys.E.NOENT,
+                    "lookup physically removed the dead owner's backing entry")
+            end)
+        end)
+end
+
+for _, bound_mounter in ipairs({ false, true }) do
+    test("recovery needs no list grant to " .. (bound_mounter and "mounter or caller" or "caller"),
+        { spec = "PKM *security.staging-recovery-uses-mounter" }, function(t)
+            with_image(t, "orphan-file", ".stratafs-stage-dead", function(merged, raw)
+                local parent = raw:match("^(.*)/[^/]+$")
+                t:assert_eq(kacs.set_sd(vm, parent,
+                    kacs.grant_all_but(kacs.RIGHT.LIST_DIRECTORY)).ret, 0)
+                kacs.as_dacl_bound(t, vm, function(worker)
+                    local fd, errno = kacs.open(worker, parent, {
+                        access = kacs.RIGHT.LIST_DIRECTORY,
+                        options = kacs.CREATE_OPT.DIRECTORY,
+                    })
+                    if fd then sys.close(worker, fd) end
+                    t:assert(not fd and errno == sys.E.ACCES,
+                        "ordinary directory reads are denied to this principal")
+                    local observer = "/recovery-bound-mounter"
+                    local mounted = false
+                    local ok, err = pcall(function()
+                        if bound_mounter then
+                            stratafs.mount(worker, { at = observer, strata = {
+                                { path = parent:match("^(.*)/[^/]+$"), flags = { "create" } },
+                            } })
+                            mounted = true
+                            merged = observer .. "/orphan-file"
+                        end
+                        local st, e = sys.stat(worker, merged .. "/.stratafs-stage-probe")
+                        t:assert(not st and e == sys.E.NOENT)
+                        st, e = sys.stat(vm, raw)
+                        t:assert(not st and e == sys.E.NOENT,
+                            "the scoped recovery scan removed the orphan without LIST_DIRECTORY")
+                    end)
+                    if mounted then stratafs.umount(worker, observer) end
+                    if not ok then error(err, 0) end
+                end)
+            end)
+        end)
+end
+
 test("a refused emptiness check does not remove orphans",
     { spec = "PKM *remove.rmdir-staging-recovery" }, function(t)
         with_image(t, "orphan-file", ".stratafs-stage-dead", function(merged, raw)

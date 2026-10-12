@@ -21,6 +21,18 @@ python3 tests/fixtures/build-staging-orphans.py
 
 The builder verifies each marker's raw bytes before replacing the fixture.
 
+## `corrupt-descriptor.img`
+
+A 1 MiB ext2 image containing a regular file and directory with malformed
+`security.peios.sd` bytes, plus healthy and missing-descriptor controls.
+The corruption is installed offline; the guest never relaxes the canonical
+xattr write restriction. StrataFS tests exercise both synthesis policies,
+the corrupt-descriptor open audit and merged-directory validation.
+
+Rebuild with `python3 tests/fixtures/build-corrupt-descriptor.py`. The builder
+uses a temporary image and verifies both stored values before replacing the
+fixture. Each native case mounts a fresh writable copy.
+
 ## `ext2-nofiletype.img`
 
 A 1 MiB ext2 filesystem **without the `filetype` feature**, so its
