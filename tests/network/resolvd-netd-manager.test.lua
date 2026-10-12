@@ -37,7 +37,14 @@ local gw = gateway.boot({ bridge = lan })
 local LEASE = { pool = { "10.77.0.50" }, lease = 3600, dns = { "10.77.0.1" },
     options = { { 119, gateway.opt.names({ "lease.test" }) } } }
 gw:dhcp(LEASE)
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 dns.serve(gw, { zone = {
     ["www.example.test"] = { { type = "A", ttl = 300, data = "10.77.9.1" } },
@@ -404,8 +411,8 @@ test("a manager may drop a subscriber it cannot write to: netd lets go of one th
         t:assert(gone, "after the next snapshot netd has let it go")
     end)
 
-test("subscribe needs the query right: refused (no NETWORK_QUERY for Everyone), resolvd connects, is refused, and reconnects about every 0.5 s, logging three lines each time; granted, it stays",
-    { spec = "PSPU *nri-manager.subscribe-requires-network-query resolvd *netd-reconnect.refusal-reconnects-every-half-second" },
+test("subscribe needs the query right: refused (no NETWORK_QUERY for Everyone), resolvd connects, is refused, and reconnects with growing backoff; granted, it stays",
+    { spec = "PSPU *nri-manager.subscribe-requires-network-query resolvd *netd-reconnect.refusal-reconnects-every-half-second", tags = { "pei-1350" } },
     function(t)
         control_security(NETWORK_CONTROL)
         -- The control object follows ControlSecurity at the next connection.
@@ -423,7 +430,7 @@ test("subscribe needs the query right: refused (no NETWORK_QUERY for Everyone), 
         local refusals = matching(lines, "resolvd: warn: netd refused the subscription: access denied")
         local losses = matching(lines, "resolvd: warn: lost the netd channel; reconnecting")
         t:log(string.format("%d connections, %d refusals, %d losses", #subs, #refusals, #losses))
-        t:assert(#subs >= 8, "about two connections a second")
+        t:assert_eq(#subs, 4, "connections at startup, +0.5, +1.5 and +3.5 seconds")
         t:assert(math.abs(#refusals - #subs) <= 1 and math.abs(#losses - #subs) <= 1,
             "each connection refused and lost")
         local gaps = {}
@@ -431,7 +438,8 @@ test("subscribe needs the query right: refused (no NETWORK_QUERY for Everyone), 
         t:log("gaps: " .. table.concat(gaps, " "))
         for i = 2, #subs do
             local g = subs[i].ts - subs[i - 1].ts
-            t:assert(g > 0.4 and g < 0.8, string.format("gap %d is about 0.5 s (%.3f)", i - 1, g))
+            local want = 0.5 * 2 ^ (i - 2)
+            t:assert(g > want - 0.15 and g < want + 0.35, string.format("gap %d doubles to %.1f s (%.3f)", i - 1, want, g))
         end
         -- Grant Everyone the query right (and nothing else): the next
         -- attempt is kept.
@@ -450,9 +458,7 @@ test("subscribe needs the query right: refused (no NETWORK_QUERY for Everyone), 
     end)
 
 test("PSPU: the resolver reconnects with backoff whenever the connection is lost; a refusal is a loss, so the gaps should grow (0.5 s doubling)",
-    { spec = "PSPU *nri-manager.reconnect-with-backoff", tags = { "known-bug" } }, function(t)
-        -- PEI-1350: each refused connection is a successful connect, which
-        -- resets the backoff, so resolvd reconnects every 0.5 s forever.
+    { spec = "PSPU *nri-manager.reconnect-with-backoff", tags = { "pei-1350" } }, function(t)
         control_security(NETWORK_CONTROL)
         sut:run("sleep 1")
         local since = now()
@@ -464,7 +470,7 @@ test("PSPU: the resolver reconnects with backoff whenever the connection is lost
         for i = 2, #subs do gaps[#gaps + 1] = string.format("%.2f", subs[i].ts - subs[i - 1].ts) end
         t:log(#subs .. " connections in 6 s; gaps " .. table.concat(gaps, " "))
         -- 0.5, 1, 2, 4: at most five connections in six seconds.
-        t:assert(#subs <= 5, "the backoff grows between refused connections")
+        t:assert(#subs >= 3 and #subs <= 5, "retries occur and back off between refused connections")
         t:assert(#subs < 3 or (subs[3].ts - subs[2].ts) > 1.5 * (subs[2].ts - subs[1].ts),
             "the second gap is longer than the first")
         pcall(wait_until, function() return rstatus().netd end, { timeout = 15, interval = 0.25 })

@@ -1,6 +1,6 @@
 -- resolvd §3.2 — reconnection from startup: the backoff sequence when
 -- netd is not there, the one `netd not reachable` warning, a failure at
--- connect counting as a failed attempt, a success resetting the backoff,
+-- connect counting as a failed attempt, a snapshot resetting the backoff,
 -- and what resolvd answers before it has ever had a snapshot.
 --
 -- Harness: the scripted gateway (helpers.gateway) with its DNS server
@@ -25,6 +25,7 @@ local network = require("helpers.network")
 local unixsock = require("helpers.unixsock")
 local ntfe = require("helpers.ntfe")
 local sys = require("helpers.sys")
+local msgpack = require("helpers.msgpack")
 local dns = require("helpers.dns")
 
 peinit.claim(2)
@@ -32,7 +33,14 @@ peinit.claim(2)
 local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 dns.serve(gw, { zone = {
     ["www.example.test"] = { { type = "A", ttl = 60, data = "10.77.0.80" } },
@@ -153,8 +161,23 @@ local function accept(timeout_ms)
     return { fd = fd, at = at }
 end
 
+--- A complete snapshot, not merely connect(), resets the retry sequence.
+local function snapshot(t, c, marker)
+    local payload = msgpack.encode({ ok = true, kind = "snapshot", hostname = marker, scopes = msgpack.array({}) })
+    local frame = string.pack("<I4", #payload) .. payload
+    local sent = ntfe.send(sut, c.fd, frame)
+    t:assert_eq(sent.ret, #frame, "snapshot sent")
+    wait_until(function()
+        local s = network.call(sut, { query = "status" }, { path = "/run/resolvd/resolv.sock" })
+        return s and s.hostname == marker
+    end, { timeout = 5, interval = 0.05, desc = "snapshot applied" })
+end
+
 local function move_netd_aside(t)
     if fake.moved then return end
+    t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "netd bound")
+    wait_until(function() return sys.stat(sut, "/run/eventd/query.sock") ~= nil end,
+        { timeout = 15, interval = 0.1, desc = "eventd query socket ready" })
     local r = sys.rename(sut, network.CONTROL, ASIDE)
     t:assert(r.ret == 0, "netd's socket moved aside: " .. sys.errname(r.errno or 0))
     fake.moved = true
@@ -318,8 +341,8 @@ test("before its first snapshot resolvd has no scopes: synthetic and static name
         network.delete(sut, "Dns\\Hosts")
     end)
 
-test("a success resets the backoff: grown to 10 s before it, the first retry after the next loss is 0.5 s",
-    { spec = "resolvd *netd-reconnect.success-resets-backoff" }, function(t)
+test("a good snapshot resets the backoff: grown to 10 s before it, the first retry after the next loss is 0.5 s",
+    { spec = "resolvd *netd-reconnect.success-resets-backoff", tags = { "pei-1350", "pei-1350-reset" } }, function(t)
         move_netd_aside(t)
         -- Fail long enough for the backoff to reach its ceiling, then
         -- let the attempt at +25.5 s succeed.
@@ -330,6 +353,7 @@ test("a success resets the backoff: grown to 10 s before it, the first retry aft
         t:assert(c, "connected")
         t:log(string.format("connected at +%.3f after a first attempt that failed", c.at - t0))
         t:assert(c.at - t0 > 25.3 and c.at - t0 < 26, "at +25.5 s: the backoff had reached 10 s")
+        snapshot(t, c, "pt-backoff-reset")
         -- Lose the channel with nothing listening; listen again 0.25 s on.
         local since = now()
         stage()   -- the path is cleared; a listener waits beside it
@@ -348,5 +372,26 @@ test("a success resets the backoff: grown to 10 s before it, the first retry aft
         t:assert(listened - lost.ts < 0.45, "listening began before +0.5 s")
         t:assert(again.at - lost.ts > 0.35 and again.at - lost.ts < 0.9, "the first retry came 0.5 s after the loss")
         sys.close(sut, again.fd)
+        clear()
+    end)
+
+test("accepting then closing before a snapshot does not reset the backoff",
+    { tags = { "pei-1350" } }, function(t)
+        move_netd_aside(t)
+        clear()
+        listen()
+        sut:run(RESTART, { timeout = 30 }):assert_ok()
+        local c = accept(5000)
+        t:assert(c, "initial connection")
+        for _, delay in ipairs({ 0.5, 1, 2 }) do
+            local before = now()
+            sys.close(sut, c.fd)
+            c = accept(math.floor((delay + 2) * 1000))
+            t:assert(c, "reconnected after early loss")
+            local gap = c.at - before
+            t:log(string.format("accept-close gap %.3f s, expected %.1f", gap, delay))
+            t:assert(gap > delay - 0.15 and gap < delay + 0.4, "early loss preserves the growing delay")
+        end
+        sys.close(sut, c.fd)
         clear()
     end)
