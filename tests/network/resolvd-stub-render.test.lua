@@ -2,8 +2,8 @@
 -- DNS reply: the header and question, each outcome, the CNAME for an
 -- expanded name, EDNS, the UDP size limit and truncation, the reply that
 -- cannot be encoded, and TCP carrying the whole answer. With them, the
--- PSPU §6.8 rendering requirements, which resolvd meets except one: an
--- empty answer at an expanded name has no CNAME (PEI-1348).
+-- PSPU §6.8 rendering requirements, including the expansion CNAME on
+-- an empty found answer (PEI-1348).
 --
 -- Harness: the scripted gateway (helpers.gateway) leases 10.77.0.50 and
 -- is the DNS server; helpers.dns answers from a zone, and its `on` hook
@@ -73,6 +73,7 @@ dns.serve(gw, {
                                    { type = "A", ttl = 60, data = "10.77.0.82" } },
         ["printer.example.test"] = { { type = "A", ttl = 50, data = "10.77.0.90" },
                                      { type = "A", ttl = 40, data = "10.77.0.91" } },
+        ["no-soa.example.test"] = { { type = "A", ttl = 60, data = "10.77.0.92" } },
         ["ten.example.test"] = a_records("ten.example.test", 10, 70),
         ["mid.example.test"] = a_records("mid.example.test", 20, 71),
         ["big.example.test"] = a_records("big.example.test", 100, 72),
@@ -83,6 +84,9 @@ dns.serve(gw, {
         local n = (q.questions[1] and q.questions[1].name or ""):lower()
         if n == "bits.example.test" then
             default.aa, default.ad, default.cd, default.ra = true, true, true, false
+            return default
+        elseif n == "no-soa.example.test" then
+            default.authority = {}
             return default
         elseif n == "fail.example.test" then
             default.rcode = dns.RCODE.SERVFAIL
@@ -97,7 +101,14 @@ dns.serve(gw, {
         end
     end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local STUB = "127.0.0.53"
 local SOCK = "/run/resolvd/resolv.sock"
@@ -293,19 +304,52 @@ test("an answer found at an expanded name begins with a CNAME from the name aske
         t:assert_eq(m2.answers[1].type, dns.TYPE.A, "an A record")
     end)
 
-test("a found with no records at an expanded name is an empty NOERROR, with no CNAME",
-    { spec = "resolvd *stub-render.expanded-nodata-has-no-cname" }, function(t)
+test("expanded NODATA carries a CNAME whose negative TTL ages on cache hits",
+    { spec = "resolvd *stub-render.expanded-nodata-has-no-cname", tags = { "pei-1348" } }, function(t)
         search_domain(t)
+        local flushed = network.call(sut, { query = "flush" }, { path = SOCK })
+        t:assert(flushed and flushed.ok, "cache flushed for a fresh negative answer")
+        dns.forget(gw)
         local m, raw = udp_exchange(query("PrInTeR", "AAAA", { id = 0x0501 }))
         t:assert(m, "answered")
-        t:log("printer AAAA -> " .. hex(raw))
         t:assert_eq(m.rcode, dns.RCODE.NOERROR, "NOERROR")
-        t:assert_eq(header(raw).an, 0, "an empty answer section: no CNAME") -- PEI-1348 (the spec wants one)
-        t:assert_eq(header(raw).ns, 0, "and an empty authority section")
+        t:assert_eq(header(raw).an, 1, "the expansion CNAME is the only answer")
+        local c = m.answers[1]
+        t:assert(c.type == dns.TYPE.CNAME and c.name == "PrInTeR"
+            and dns.same_name(c.data, "printer.example.test"), "the requested name points to the expanded name")
+        t:assert_eq(c.ttl, 30, "fresh CNAME uses the SOA-derived negative lifetime")
+        t:assert_eq(header(raw).ns, 0, "authority rendering is unchanged")
+        t:assert_eq(#asked("printer.example.test"), 1, "one upstream query")
+        gw:serve({ timeout = 1.1 })
+        local cached = tcp_exchange(query("pRiNtEr", "AAAA", { id = 0x0502 }))
+        t:assert(cached and #cached.answers == 1, "cached NODATA over TCP also has its CNAME")
+        local cc = cached.answers[1]
+        t:assert(cc.type == dns.TYPE.CNAME and cc.name == "pRiNtEr"
+            and dns.same_name(cc.data, "printer.example.test"), "cached reply preserves its own question case")
+        t:assert(cc.ttl > 0 and cc.ttl < 30, "cached CNAME uses the remaining negative lifetime")
+        t:assert_eq(#asked("printer.example.test"), 1, "cache hit sends no new upstream query")
+
+        local direct = udp_exchange(query("printer.example.test", "AAAA"))
+        t:assert(direct and direct.rcode == dns.RCODE.NOERROR and #direct.answers == 0,
+            "an unexpanded empty found answer stays empty")
+    end)
+
+test("expanded NODATA without an SOA gets a zero-TTL CNAME and is not cached",
+    { tags = { "pei-1348" } }, function(t)
+        search_domain(t)
+        dns.forget(gw)
+        for i = 1, 2 do
+            local m = udp_exchange(query("no-soa", "AAAA"))
+            t:assert(m and m.rcode == dns.RCODE.NOERROR and #m.answers == 1, "one CNAME")
+            local c = m.answers[1]
+            t:assert(c.type == dns.TYPE.CNAME and dns.same_name(c.data, "no-soa.example.test"), "expansion target")
+            t:assert_eq(c.ttl, 0, "no invented cache lifetime")
+        end
+        t:assert_eq(#asked("no-soa.example.test"), 2, "uncacheable negative answers are asked again")
     end)
 
 test("an answer at an expanded name begins with a CNAME from the question name, records or not",
-    { spec = "PSPU *nri-stub.expanded-answer-begins-with-cname", tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-stub.expanded-answer-begins-with-cname", tags = { "pei-1348" } }, function(t)
         search_domain(t)
         local m = udp_exchange(query("PrInTeR", "A", { id = 0x0601 }))
         t:assert(m and m.answers[1] and m.answers[1].type == dns.TYPE.CNAME
@@ -313,7 +357,6 @@ test("an answer at an expanded name begins with a CNAME from the question name, 
             "found with records at printer.example.test: the answer begins with the CNAME")
         local m2 = udp_exchange(query("PrInTeR", "AAAA", { id = 0x0602 }))
         t:assert(m2 and m2.rcode == dns.RCODE.NOERROR, "printer AAAA is found (NODATA) at printer.example.test")
-        -- PEI-1348: resolvd sends an empty NOERROR with no CNAME when the expanded name has no records.
         t:assert(m2.answers[1] and m2.answers[1].type == dns.TYPE.CNAME
             and m2.answers[1].name == "PrInTeR" and dns.same_name(m2.answers[1].data, "printer.example.test"),
             "found without records at printer.example.test: the answer begins with the CNAME")
