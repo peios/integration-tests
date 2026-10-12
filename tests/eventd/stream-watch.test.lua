@@ -85,6 +85,51 @@ end
 -- Commit generations
 -- ---------------------------------------------------------------------------
 
+test("DISTINCT watch values follow first occurrence in commit order", {
+    spec = "eventd *stream.watch-records-follow-store-order",
+    tags = { "pei1237" },
+}, function(t)
+    local m = eventd.marker("distinctorder")
+    local c = stream("LOGS FROM " .. m .. " DISTINCT message STREAM")
+    logs({
+        { origin = m, is_error = false, message = "Zulu" },
+        { origin = m, is_error = false, message = "alpha" },
+        { origin = m, is_error = false, message = "ZULU" },
+        { origin = m, is_error = false, message = "middle" },
+    })
+    local got = take(c, 3)
+    finish(c)
+    t:assert_eq(table.concat(field(got, "message"), ","), "Zulu,alpha,middle",
+        "first value representation and insertion order survive grouping")
+end)
+
+test("watch records retain commit order despite timestamps and initial sorting/pagination", {
+    spec = "eventd *stream.watch-records-follow-store-order",
+    tags = { "pei1237" },
+}, function(t)
+    local m = eventd.marker("order")
+    local base = eventd.guest_ns(vm) - 60 * 1000000000
+    logs({
+        { origin = m, is_error = false, message = "a", timestamp = base },
+        { origin = m, is_error = false, message = "b", timestamp = base + 1 },
+        { origin = m, is_error = false, message = "c", timestamp = base + 2 },
+    })
+    eventd.wait_rows(vm, "LOGS FROM " .. m .. " SINCE 1h ago", function(rs) return #rs == 3 end)
+    local c, initial = stream("LOGS FROM " .. m .. " SINCE 1h ago SORT message DESC SKIP 1 TAKE 1 STREAM")
+    t:assert_eq(#initial, 1, "initial set is paginated")
+    t:assert_eq(initial[1].message, "b", "initial set is sorted before pagination")
+    logs({
+        { origin = m, is_error = false, message = "first", timestamp = base + 20 },
+        { origin = m, is_error = false, message = "second", timestamp = base + 10 },
+        { origin = m, is_error = false, message = "third", timestamp = base + 30 },
+    })
+    local got = take(c, 3)
+    finish(c)
+    t:assert_eq(#got, 3, "watch ignores initial SKIP and TAKE")
+    t:assert_eq(table.concat(field(got, "message"), ","), "first,second,third",
+        "watch follows stored order, not timestamp or message sort")
+end)
+
 -- "eventd keeps a monotonic u64 commit generation counter for each
 --  streamable store: one for the event store as a whole, and one for the
 --  log store." / "Metric queries do not stream, so the metric store has
