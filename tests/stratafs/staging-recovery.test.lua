@@ -42,7 +42,10 @@ test("a refused emptiness check does not remove orphans",
     { spec = "PKM *remove.rmdir-staging-recovery" }, function(t)
         with_image(t, "orphan-file", ".stratafs-stage-dead", function(merged, raw)
             local parent = raw:match("^(.*)/[^/]+$")
-            t:assert_eq(kacs.set_sd(vm, parent, kacs.deny_all()).ret, 0)
+            -- Keep traversal and deletion allowed: the refused right is
+            -- specifically the list access required by the emptiness scan.
+            t:assert_eq(kacs.set_sd(vm, parent,
+                kacs.grant_all_but(kacs.RIGHT.LIST_DIRECTORY)).ret, 0)
             kacs.as_dacl_bound(t, vm, function(worker)
                 local r = sys.unlink(worker, merged, sys.AT_REMOVEDIR)
                 t:assert_eq(r.errno, sys.E.ACCES, "access is checked before recovery")
