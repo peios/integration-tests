@@ -31,7 +31,8 @@ local gw = gateway.boot({ bridge = lan })
 -- Silent from the start: the boot's first DISCOVERs are recorded and
 -- never answered, so no lease can exist when netd reports READY=1.
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600, silent = true })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local sut = network.boot({ bridges = { lan }, gateway = gw,
+    files = network.test_binary("netd", {}) })
 
 -- ---------------------------------------------------------------------------
 -- Local instruments
@@ -302,13 +303,10 @@ test("a tie present at startup is judged per interface as a conflict, not a refu
 -- Restart
 -- ---------------------------------------------------------------------------
 
-test("a restarted netd removes the leased address and default route and drops to link until its INIT-REBOOT is answered, then puts both back",
+test("a restarted netd preserves its installed IPv4 address and route while INIT-REBOOT confirms them",
     { spec = "netd *startup.restart-reacquires-the-lease" }, function(t)
-        -- PEI-1365: a restarted netd holds no lease until the INIT-REBOOT
-        -- is answered, so its first pass desires no leased address and
-        -- deletes it and the default route, readiness drops to link, and
-        -- the ACK adds both back (routed again). Asserted as it is today;
-        -- when PEI-1365 is fixed this test and TRM §2.1 change together.
+        -- Hold the ACK at the gateway while checking the provisional state.
+        -- The same successful ACK must not delete or re-add the address.
         local before = rebind(t, "bound before the restart")
         local index = network.iface(before, "eth0").index
         local fd = rtnl_listen()
@@ -316,6 +314,11 @@ test("a restarted netd removes the leased address and default route and drops to
         gw:forget()
         local mark = guest_ns()
         network.restart_netd(sut)
+        local pending = network.iface(network.status(sut), "eth0")
+        t:assert_eq(pending.lease, nil, "the address is not a fabricated confirmed lease")
+        t:assert_eq(network.ipv4(pending)[1], "10.77.0.50/24", "address survives before any ACK")
+        t:assert_eq(pending.gateway, "10.77.0.1", "route survives before any ACK")
+        t:assert_eq(pending.level, "routed", "readiness survives before any ACK")
         local s = network.serve_until(gw, sut, network.bound, { iface = "eth0", timeout = 60 })
         t:assert(s, "the restarted netd binds again")
         gw:serve({ timeout = 2 })
@@ -336,46 +339,48 @@ test("a restarted netd removes the leased address and default route and drops to
             "the client began with an INIT-REBOOT for the old address")
         t:assert_eq(network.ipv4(network.iface(s, "eth0"))[1], "10.77.0.50/24", "the same address")
 
-        -- The kernel saw the address and the default route go, then come
-        -- back (PEI-1365).
-        local function at(kind, what, from)
-            for k = from or 1, #mine do
-                if what == "address" and mine[k] == kind .. " 10.77.0.50/24 on " .. index then return k end
-                -- A default route has no RTA_DST, so its destination reads "-".
-                local dst = mine[k]:match("^" .. kind .. " (%S+)/0 via 10%.77%.0%.1 dev " .. index .. "$")
-                if what == "default" and (dst == "-" or dst == "0.0.0.0") then return k end
-            end
+        for _, event in ipairs(mine) do
+            t:assert(not event:match("^DELADDR 10%.77%.0%.50/24 "), "no leased address deletion")
+            t:assert(not event:match("^NEWADDR 10%.77%.0%.50/24 "), "no redundant address replacement")
+            t:assert(not event:match("^DELROUTE .*via 10%.77%.0%.1 "), "no leased route deletion")
+            t:assert(not event:match("^NEWROUTE .*via 10%.77%.0%.1 "), "no redundant route replacement")
         end
-        local del_addr = at("DELADDR", "address")
-        t:assert(del_addr, "the leased address was deleted")
-        local new_addr = del_addr and at("NEWADDR", "address", del_addr + 1)
-        local new_route = del_addr and at("NEWROUTE", "default", del_addr + 1)
-        t:assert(new_addr, "and added back after its deletion")
-        t:assert(new_route, "and the default route added back after it")
-        -- The kernel drops the default route with the address and sends no
-        -- DELROUTE for it, so its going is shown by netd's plan below: the
-        -- first pass deletes it, and the pass after the lease adds it,
-        -- which netd plans only for a route the kernel no longer has.
-
-        -- netd's own account: the deletion is planned before any lease,
-        -- readiness drops to link, and the lease brings routed back.
-        local DEFAULT = "Route { index: " .. index .. ", destination: 0.0.0.0, prefix: 0, gateway: Some(10.77.0.1)"
-        local i_del = find(lines, "applying [DelAddress(")
-        local i_link = find(lines, "machine readiness is link")
-        local i_lease = find(lines, "interface eth0: lease 10.77.0.50/24 from 10.77.0.1")
-        local i_add = i_lease and find(lines, "applying [AddAddress(", i_lease)
-        local i_routed = i_lease and find(lines, "machine readiness is routed", i_lease)
-        t:log(string.format("log: delete=%s link=%s lease=%s add=%s routed=%s", tostring(i_del),
-            tostring(i_link), tostring(i_lease), tostring(i_add), tostring(i_routed)))
-        t:assert(i_del and i_lease and i_del < i_lease, "the first pass deleted the address before the lease came")
-        t:assert(lines[i_del].msg:find("DelRoute(" .. DEFAULT, 1, true) ~= nil,
-            "and the default route with it")
-        t:assert(i_link and i_lease and i_link < i_lease, "readiness dropped to link before the lease")
-        t:assert(i_add and lines[i_add].msg:find("AddRoute(" .. DEFAULT, 1, true) ~= nil,
-            "after the lease netd added the address and the default route back")
-        t:assert(i_routed ~= nil, "and was routed again after it")
-        t:assert_eq(network.status(sut).level, "routed", "the machine is routed again")
+        t:assert(not find(lines, "machine readiness is link"), "no readiness drop during revalidation")
+        t:assert_eq(network.status(sut).level, "routed", "the machine remains routed")
     end)
+
+-- A failed INIT-REBOOT is a result even though it emits no Action::Lost:
+-- the client never held a lease in this process. Do not preserve old state
+-- through a NAK or the transition to fresh discovery.
+for _, outcome in ipairs({ "nak", "timeout" }) do
+    test("restart provisional IPv4 state ends on " .. outcome, {
+        spec = "netd *startup.restart-reacquires-the-lease",
+    }, function(t)
+        rebind(t, "bound before failed revalidation")
+        gw:forget()
+        if outcome == "nak" then
+            gw:dhcp({ pool = { "10.77.0.99" }, on = {
+                discover = function() return false end,
+            } })
+        else
+            gw:dhcp({ silent = true })
+        end
+        network.restart_netd(sut)
+        t:assert_eq(network.ipv4(ifstatus())[1], "10.77.0.50/24", "retained until the outcome")
+        local lost = network.serve_until(gw, sut, function(status)
+            local i = network.iface(status, "eth0")
+            return i and #network.ipv4(i) == 0 and i.gateway == nil
+        end, { timeout = 30, interval = 0.1 })
+        t:assert(lost, "the old address and default route are removed after " .. outcome)
+        t:assert_eq(network.iface(lost, "eth0").lease, nil, "no lease was invented")
+        gw:serve({ timeout = 2, until_ = function()
+            return #gw:dhcp_messages(gateway.DHCP.DISCOVER) > 0
+        end })
+        local discovers = gw:dhcp_messages(gateway.DHCP.DISCOVER)
+        t:assert(#discovers > 0, "fresh discovery follows the failed revalidation")
+        rebind(t, "normal discovery recovers after " .. outcome)
+    end)
+end
 
 -- ---------------------------------------------------------------------------
 -- The startup sequence
