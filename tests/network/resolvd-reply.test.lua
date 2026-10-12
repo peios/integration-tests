@@ -312,8 +312,8 @@ test("an NXDOMAIN's answer records are not taken",
         t:assert_eq(#(r.records or {}), 0, "the record riding on the NXDOMAIN is discarded")
     end)
 
-test("answer records are not checked against the question: another name's record and another type come back, and are cached with the answer",
-    { spec = "resolvd *engine-reply.records-not-checked-against-question" }, function(t)
+test("unrelated names and types are dropped and their zero TTL cannot prevent caching",
+    { spec = "resolvd *engine-reply.records-match-question", tags = { "pei1352" } }, function(t)
         up(t)
         local name = "unchecked.example.test"
         ZONE[name] = { { type = "A", ttl = 60, data = "10.77.0.84" } }
@@ -321,8 +321,8 @@ test("answer records are not checked against the question: another name's record
             if not dns.same_name(qname(q) or "", name) then return nil end
             d.answers = {
                 { name = qname(q), type = "A", ttl = 60, data = "10.77.0.84" },
-                { name = "elsewhere.example.test", type = "A", ttl = 60, data = BOGUS },
-                { name = qname(q), type = "MX", ttl = 60, data = { 10, "mx.example.test" } },
+                { name = "elsewhere.example.test", type = "A", ttl = 0, data = BOGUS },
+                { name = qname(q), type = "MX", ttl = 0, data = { 10, "mx.example.test" } },
             }
             return d
         end
@@ -330,14 +330,83 @@ test("answer records are not checked against the question: another name's record
         HOOK = nil
         t:log("unchecked: " .. texts(r) .. " names " .. names(r))
         t:assert(r and r.ok and r.outcome == "found", "found")
-        t:assert_eq(texts(r), "10.77.0.84," .. BOGUS .. ",10 mx.example.test", "all three, in order")
-        t:assert_eq(r.records[2].name, "elsewhere.example.test", "the unrelated owner name is returned")
-        t:assert_eq(r.records[3].type, MX, "the unasked type is returned")
+        t:assert_eq(texts(r), "10.77.0.84", "only the requested owner and type")
+        t:assert_eq(#r.records, 1, "unrelated records are dropped")
         local again = resolve(name, A, { cache = true })
         t:log("again: " .. tostring(again and again.source) .. " " .. texts(again))
         t:assert_eq(again.source, "cache", "the second ask is a cache hit")
-        t:assert_eq(texts(again), "10.77.0.84," .. BOGUS .. ",10 mx.example.test", "cached with the answer")
+        t:assert_eq(texts(again), "10.77.0.84", "only relevant records are cached")
         t:assert_eq(#dns.queries(gw, is(name)), 1, "asked upstream once")
+    end)
+
+test("only the requested CNAME chain reaches native and stub clients",
+    { spec = "resolvd *engine-reply.records-match-question", tags = { "pei1352" } }, function(t)
+        up(t)
+        local name, target = "filtered-alias.example.test", "filtered-target.example.test"
+        HOOK = function(q, d)
+            if not dns.same_name(qname(q) or "", name) then return nil end
+            d.rcode = dns.RCODE.NOERROR
+            d.answers = {
+                { name = "unrelated.example.test", type = "A", ttl = 0, data = BOGUS },
+                { name = target, type = "A", ttl = 60, data = "10.77.0.86" },
+                { name = qname(q), type = "CNAME", ttl = 40, data = target },
+                { name = target, type = "AAAA", ttl = 0, data = "fd77::99" },
+            }
+            return d
+        end
+        local r = resolve(name, A)
+        t:assert_eq(#r.records, 2, "only target A and the connecting CNAME survive")
+        t:assert_eq(texts(r), "10.77.0.86," .. target, "survivors retain server order")
+        local fd = assert(ntfe.udp_connect(sut, "127.0.0.53", 53))
+        ntfe.send(sut, fd, dns.encode(dns.query(name, "A", { id = 0x5352 })))
+        local got
+        gw:serve({ timeout = 10, until_ = function() got = ntfe.recv(sut, fd, 0, 4096); return got ~= nil end })
+        sys.close(sut, fd)
+        local m = got and dns.decode(got)
+        t:assert(m and m.rcode == dns.RCODE.NOERROR, "stub reply")
+        t:assert_eq(#m.answers, 2, "stub also excludes unrelated records")
+        t:assert_eq(m.answers[1].data, "10.77.0.86", "the relevant address")
+
+        local cname = resolve(name, dns.TYPE.CNAME)
+        t:assert_eq(#cname.records, 1, "explicit CNAME returns only the requested CNAME")
+        local any = resolve(name, dns.TYPE.ANY)
+        t:assert_eq(#any.records, 1, "ANY includes only records at the queried owner")
+        HOOK = nil
+    end)
+
+test("negative cache lifetime requires an IN SOA enclosing the effective name",
+    { spec = "resolvd *engine-cache.negative-lifetime-from-soa", tags = { "pei1352" } }, function(t)
+        up(t)
+        local function soa(name, ttl, class)
+            return { name = name, type = "SOA", ttl = ttl, class = class or dns.CLASS.IN,
+                data = { minimum = 30 } }
+        end
+        local cases = {
+            { authority = { soa("other.test", 30) }, cached = false },
+            { authority = { soa("example.test", 30, dns.CLASS.CH) }, cached = false },
+            { authority = { soa("ample.test", 30) }, cached = false },
+            { authority = { soa("other.test", 0), soa("example.test", 30) }, cached = true },
+            { authority = { soa("other.test", 30) }, alias = "missing.other.test", cached = true },
+        }
+        for i, case in ipairs(cases) do
+            local name = "soa-scope-" .. i .. ".example.test"
+            dns.forget(gw)
+            HOOK = function(q, d)
+                if not dns.same_name(qname(q) or "", name) then return nil end
+                d.rcode, d.answers, d.authority = dns.RCODE.NXDOMAIN, {}, case.authority
+                if case.alias then
+                    d.answers = { { name = qname(q), type = "CNAME", ttl = 60, data = case.alias } }
+                end
+                return d
+            end
+            local first = resolve(name, A, { cache = true })
+            local again = resolve(name, A, { cache = true })
+            HOOK = nil
+            t:assert_eq(first.outcome, "notfound", "negative answer")
+            t:assert_eq(#first.records, 0, "NXDOMAIN carries no native answer records")
+            t:assert_eq(again.source, case.cached and "cache" or "dns", "SOA scope/class determines cacheability")
+            t:assert_eq(#dns.queries(gw, is(name)), case.cached and 1 or 2, "upstream query count")
+        end
     end)
 
 test("the authority and additional sections are not returned",
