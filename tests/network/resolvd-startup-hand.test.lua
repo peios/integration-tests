@@ -2,7 +2,7 @@
 -- READY=1 and what is open when it is sent, readiness without netd, a
 -- notify socket that cannot be reached, the fatal steps (the native
 -- socket, the stub listener, poll), a signal leaving the socket behind,
--- the random generator's seed, and (§9.1) errors on a listening socket.
+-- kernel query entropy, and (§9.1) errors on a listening socket.
 --
 -- Harness: the scripted gateway (helpers.gateway) with its DNS server
 -- (helpers.dns), and a whole Peios (helpers.network). peinit does not
@@ -17,13 +17,9 @@
 -- hand-run process, the agent's own child. (A probe setting and reading
 -- the limit of the service's process in one call was refused, EACCES.)
 --
--- The generator's seed: eight known bytes are bind-mounted over
--- /dev/urandom while the hand-run resolvd starts, and the DNS ids and
--- 0x20 case patterns of its first upstream queries are computed here
--- with the engine's xorshift64* (engine.rs `random`, `send`) and
--- compared. With an empty file there instead, the read fails and the
--- seed is the wall clock in nanoseconds: the window around the exec is
--- searched for the seed that produces the observed queries.
+-- Query entropy: replacing /dev/urandom with fixed bytes must not give
+-- restarted resolvers identical query streams; an empty replacement must
+-- not prevent queries either. The daemon uses getrandom for each attempt.
 --
 -- Own VMs: the resolvd service is stopped, netd is stopped once, files
 -- are mounted over /dev/urandom, and a SYSTEM-owned socket is left at
@@ -158,58 +154,6 @@ local function stop_service(name)
     sut:run("svctl stop " .. name):assert_ok()
     wait_until(function() return peinit.pid_of_comm(sut, name) == nil end,
         { timeout = 30, interval = 0.25, desc = name .. " stopped" })
-end
-
--- ---------------------------------------------------------------------------
--- The generator (engine.rs: xorshift64*, two draws per transaction)
--- ---------------------------------------------------------------------------
-
-local MUL = 0x2545F4914F6CDD1D
-
-local function draw(x)
-    x = x ~ (x >> 12)
-    x = x ~ (x << 25)
-    x = x ~ (x >> 27)
-    return x, x * MUL
-end
-
---- The (id, name) of the next `n` transactions from a generator in
---- state `x`, for the lowercase names `names[k]`.
-local function predict(x, names)
-    local out = {}
-    for k, name in ipairs(names) do
-        local id, bits
-        x, id = draw(x)
-        x, bits = draw(x)
-        local used = 0
-        local sent = name:gsub("%a", function(c)
-            if used == 64 then x, bits = draw(x); used = 0 end
-            local flip = bits & 1 == 1
-            bits = bits >> 1
-            used = used + 1
-            return flip and c:upper() or c
-        end)
-        out[k] = { id = id & 0xFFFF, name = sent }
-    end
-    return out
-end
-
---- Every UDP question the gateway has logged, oldest first, as
---- {id, name (as sent)}.
-local function questions()
-    local out = {}
-    for _, q in ipairs(dns.queries(gw, function(e) return e.transport == "udp" end)) do
-        if q.msg and q.msg.questions[1] then
-            out[#out + 1] = { id = q.msg.id, name = q.msg.questions[1].name }
-        end
-    end
-    return out
-end
-
-local function lower_names(qs)
-    local out = {}
-    for k, q in ipairs(qs) do out[k] = q.name:lower() end
-    return out
 end
 
 -- ---------------------------------------------------------------------------
@@ -437,73 +381,38 @@ test("an accept that fails is logged at warn and the loop goes on",
     end)
 
 -- ---------------------------------------------------------------------------
--- The generator
+-- Query entropy
 -- ---------------------------------------------------------------------------
 
-test("the generator is seeded from eight bytes of /dev/urandom, or from the wall clock in nanoseconds when it cannot be read",
-    { spec = "resolvd *startup.generator-seeded-from-urandom" }, function(t)
-        local SEED = "\x11\x22\x33\x44\x55\x66\x77\x88"
-        sut:write_file("/tmp/pt-seed", SEED)
+test("query entropy comes from the kernel on each attempt, independent of the urandom path",
+    { spec = "resolvd *startup.entropy-from-kernel-per-query" }, function(t)
+        sut:write_file("/tmp/pt-seed", "\x11\x22\x33\x44\x55\x66\x77\x88")
         sut:write_file("/tmp/pt-empty", "")
-        t:assert(network.serve_until(gw, sut, function(i) return network.bound(i) end, { iface = true, timeout = 60 }), "bound")
-
-        -- urandom: the seed is those eight bytes, little-endian.
-        dns.forget(gw)
-        sut:run("mount --bind /tmp/pt-seed /dev/urandom"):assert_ok()
-        local ok, err = pcall(with_resolvd, t, {}, function()
-            sut:run("umount /dev/urandom"):assert_ok()
-            t:assert(ask({ query = "resolve", name = "seed-a.hand.test", type = 1 }).outcome == "found", "seed-a answered")
-            t:assert(ask({ query = "resolve", name = "seed-b.hand.test", type = 1 }).outcome == "found", "seed-b answered")
-        end)
-        sut:run("umount /dev/urandom 2>/dev/null; true")
-        if not ok then error(err, 0) end
-        local seen = questions()
-        local want = predict(string.unpack("<I8", SEED) | 1, lower_names(seen))
-        for k, q in ipairs(seen) do
-            t:log(string.format("query %d: id %d name %s; predicted id %d name %s", k, q.id, q.name, want[k].id, want[k].name))
-        end
-        t:assert(#seen >= 2, "two or more queries were sent")
-        for k = 1, #seen do
-            t:assert_eq(seen[k].id, want[k].id, "query " .. k .. "'s id is the seeded generator's")
-            t:assert_eq(seen[k].name, want[k].name, "query " .. k .. "'s 0x20 pattern is the seeded generator's")
-        end
-
-        -- No urandom: the seed is the time of the read, in ns.
-        dns.forget(gw)
-        sut:run("mount --bind /tmp/pt-empty /dev/urandom"):assert_ok()
-        ok, err = pcall(with_resolvd, t, {}, function()
-            sut:run("umount /dev/urandom"):assert_ok()
-            t:assert(ask({ query = "resolve", name = "clock-a.hand.test", type = 1 }).outcome == "found", "clock-a answered")
-            t:assert(ask({ query = "resolve", name = "clock-b.hand.test", type = 1 }).outcome == "found", "clock-b answered")
-        end, { pre = "date +%s%N > /tmp/pt-t0; " })
-        sut:run("umount /dev/urandom 2>/dev/null; true")
-        if not ok then error(err, 0) end
-        seen = questions()
-        t:assert(#seen >= 2, "two or more queries were sent")
-        local names = lower_names(seen)
-        local t0 = assert(tonumber(sut:read_file("/tmp/pt-t0"):match("%d+")), "exec time")
-        t:assert(predict(string.unpack("<I8", SEED) | 1, names)[1].id ~= seen[1].id or
-            predict(string.unpack("<I8", SEED) | 1, names)[1].name ~= seen[1].name, "not the old seed")
-        -- Search the 300 ms after the exec (the read is step 5 of startup).
-        local found, candidates = {}, 0
-        local id1 = seen[1].id
-        for s = t0, t0 + 300000000 do
-            local x = s | 1
-            local _, out = draw(x)
-            if out & 0xFFFF == id1 then
-                candidates = candidates + 1
-                local p = predict(x, names)
-                local all = true
-                for k = 1, #seen do
-                    if p[k].id ~= seen[k].id or p[k].name ~= seen[k].name then all = false; break end
+        t:assert(network.serve_until(gw, sut, function(i) return network.bound(i) end,
+            { iface = true, timeout = 60 }), "bound")
+        local streams = {}
+        for _, file in ipairs({ "/tmp/pt-seed", "/tmp/pt-seed", "/tmp/pt-empty" }) do
+            dns.forget(gw)
+            sut:run("mount --bind " .. file .. " /dev/urandom"):assert_ok()
+            local ok, err = pcall(with_resolvd, t, {}, function()
+                for _, name in ipairs({ "seed-a.hand.test", "seed-b.hand.test" }) do
+                    local answer = ask({ query = "resolve", name = name, type = 1 })
+                    t:assert(answer and answer.outcome == "found", name .. " answered")
                 end
-                if all then found[#found + 1] = s end
+            end)
+            sut:run("umount /dev/urandom 2>/dev/null; true")
+            if not ok then error(err, 0) end
+            local stream = {}
+            for _, q in ipairs(dns.queries(gw)) do
+                local name = q.msg and q.msg.questions[1] and q.msg.questions[1].name
+                if name and (dns.same_name(name, "seed-a.hand.test") or dns.same_name(name, "seed-b.hand.test")) then
+                    stream[#stream + 1] = tostring(q.msg.id) .. ":" .. name
+                end
             end
+            t:assert(#stream >= 2, "both queries reached the gateway")
+            streams[#streams + 1] = table.concat(stream, "|")
         end
-        t:log(string.format("exec at %d ns; %d candidate seeds by the first id; matches: %s", t0, candidates,
-            table.concat((function() local o = {} for _, s in ipairs(found) do o[#o + 1] = tostring(s) .. " (+" .. (s - t0) .. " ns)" end return o end)(), ", ")))
-        t:assert(#found >= 1, "a wall-clock seed shortly after the exec produces every query's id and 0x20 pattern")
-        t:assert(found[1] - t0 < 300000000, "within the startup window")
+        t:assert(streams[1] ~= streams[2], "identical urandom files cannot seed an identical query stream")
     end)
 
 -- ---------------------------------------------------------------------------
