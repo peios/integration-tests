@@ -66,7 +66,7 @@ end
 
 -- Fields --------------------------------------------------------------
 
-test("a key record's own name is informational; the path entry is authoritative",
+test("QUERY_KEY_INFO rejects a stored name that does not fold to the resolved leaf",
     { spec = "PKM *key.field.name-is-informational" }, function(t)
         local s = fixture()
         local w = worker()
@@ -76,9 +76,14 @@ test("a key record's own name is informational; the path entry is authoritative"
             "the source's key record carries a different name")
         local fd = open(t, w, TEST .. "\\Authoritative")
         local info = lcs.query_key_info(s, w, fd)
-        t:assert_eq(info.ret, 0, "key info: " .. sys.errname(info.errno or 0))
-        t:assert_eq(info.name, "Authoritative",
-            "the name a caller sees is the path entry's, not the key record's")
+        t:assert_eq(info.errno, sys.E.IO, "a differently-folded source name is malformed metadata")
+        local probe = lcs.query_key_info(s, w, fd, { name_len = 0 })
+        t:assert_eq(probe.errno, sys.E.IO, "a size probe also validates source metadata")
+        s.store.keys[wrong_name_key].name = "aUTHORITATIVE"
+        info = lcs.query_key_info(s, w, fd)
+        t:assert_eq(info.ret, 0, "consistent source spelling is accepted")
+        t:assert_eq(info.name, "aUTHORITATIVE", "the matching stored spelling is preserved")
+        s.store.keys[wrong_name_key].name = "NotTheName"
         sys.close(w, fd)
         done(w)
     end)
