@@ -408,16 +408,9 @@ test("for the base layer, a key any enabled layer holds exists",
         if r.ret >= 0 then sys.close(w, r.ret) end
     end)
 
--- KNOWN BUG (kernel 0.21.0-alpha8, PEI-1375). For a named layer the kernel skips
--- the existing-path finisher altogether and runs the missing-key flow,
--- counting on the source's ALREADY_EXISTS to turn it back into an open
--- (source_create.c, pkm_lcs_reg_create_key_layer_owns_entry). The
--- missing-key flow checks KEY_CREATE_SUB_KEY on the parent first, so a
--- caller who may open the layer's key but not create beside it is
--- refused EACCES for a key that, by §5.5.2's own definition, exists.
+-- PEI-1375: existing named-layer entries take the normal open path.
 test("a named layer's existing entry is opened as reg_open_key would open it",
-    { spec = "PKM *reg-syscall.create-key.named-layer-creates-its-own-entry",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *reg-syscall.create-key.named-layer-creates-its-own-entry" }, function(t)
         -- Overlay holds `Kid`, so for Overlay the key exists and the
         -- create "behaves as reg_open_key": what it needs is what an open
         -- needs, not KEY_CREATE_SUB_KEY on a parent it is not creating
@@ -449,12 +442,9 @@ test("a named layer's existing entry is opened as reg_open_key would open it",
         end)
     end)
 
--- KNOWN BUG (kernel 0.21.0-alpha8, PEI-1375), the same cause as the case above.
--- With no race, an open asks the source to create nothing; §5.5.2's
--- Races paragraph covers a concurrent creator, not this.
+-- Without a concurrent creator, opening an existing entry writes nothing.
 test("a create naming the layer that holds the entry asks the source to create nothing",
-    { spec = "PKM *reg-syscall.create-key.named-layer-creates-its-own-entry",
-      tags = { "known-bug" } }, function(t)
+    { spec = "PKM *reg-syscall.create-key.named-layer-creates-its-own-entry" }, function(t)
         local first = lcs.create_key(src, w, { path = TEST_PATH .. "\\Twice", layer = "Overlay" })
         t:assert(first.ret >= 0, "Overlay's entry is created: " .. sys.errname(first.errno or 0))
         if first.ret >= 0 then sys.close(w, first.ret) end
@@ -466,6 +456,57 @@ test("a create naming the layer that holds the entry asks the source to create n
         if again.ret >= 0 then sys.close(w, again.ret) end
         t:assert_eq(#src:served(lcs.OP.CREATE_ENTRY, mark), 0,
             "behaving as reg_open_key, it sends the source no CREATE_ENTRY")
+    end)
+
+test("an existing named entry opens relatively with case-insensitive layer spelling",
+    { spec = "PKM *reg-syscall.create-key.named-layer-creates-its-own-entry" }, function(t)
+        token.as_principal(t, vm, {}, function(w2)
+            local parent = lcs.open_key(src, w2, -1, TEST_PATH .. "\\NoCreate", R.KEY_READ)
+            t:assert(parent.ret >= 0, "open parent without create rights")
+            local mark = src:mark()
+            local opened = lcs.create_key(src, w2, {
+                parent_fd = parent.ret, path = "Kid", layer = "oVeRlAy", access = R.KEY_READ,
+            })
+            t:assert(opened.ret >= 0, "relative existing-key create: " .. sys.errname(opened.errno or 0))
+            t:assert_eq(opened.disposition, lcs.OPENED_EXISTING)
+            t:assert_eq(#src:served(lcs.OP.CREATE_ENTRY, mark), 0)
+            sys.close(w2, opened.ret)
+            local denied = lcs.create_key(src, w2, {
+                parent_fd = parent.ret, path = "Kid", layer = "Other", access = R.KEY_READ,
+            })
+            t:assert_eq(denied.errno, sys.E.ACCES, "an absent layer entry still requires parent create rights")
+            sys.close(w2, parent.ret)
+        end)
+    end)
+
+test("opening a named entry does not bind a transaction, and sees its own uncommitted entries",
+    { spec = "PKM *reg-syscall.create-key.named-layer-creates-its-own-entry" }, function(t)
+        local txn = assert(lcs.begin_transaction(w))
+        local mark = src:mark()
+        local opened = lcs.create_key(src, w, {
+            path = TEST_PATH .. "\\NoCreate\\Kid", layer = "Overlay", txn_fd = txn,
+        })
+        t:assert(opened.ret >= 0, "open existing named entry in an unbound transaction")
+        t:assert_eq(opened.disposition, lcs.OPENED_EXISTING)
+        sys.close(w, opened.ret)
+        t:assert_eq(lcs.txn_status(nil, w, txn).state, lcs.TXN.ACTIVE_UNBOUND)
+        t:assert_eq(#src:served(lcs.OP.CREATE_ENTRY, mark), 0)
+        local made = lcs.create_key(src, w, {
+            path = TEST_PATH .. "\\NamedInTxn", layer = "Overlay", txn_fd = txn,
+        })
+        t:assert(made.ret >= 0, "create named entry in the transaction")
+        t:assert_eq(made.disposition, lcs.CREATED_NEW)
+        sys.close(w, made.ret)
+        mark = src:mark()
+        local again = lcs.create_key(src, w, {
+            path = TEST_PATH .. "\\NamedInTxn", layer = "Overlay", txn_fd = txn,
+        })
+        t:assert(again.ret >= 0, "open own uncommitted named entry")
+        t:assert_eq(again.disposition, lcs.OPENED_EXISTING)
+        sys.close(w, again.ret)
+        t:assert_eq(#src:served(lcs.OP.CREATE_ENTRY, mark), 0)
+        t:assert_eq(#src:served(lcs.OP.CREATE_KEY, mark), 0)
+        sys.close(w, txn)
     end)
 
 test("a created key reports REG_CREATED_NEW and is published with the granted mask",
