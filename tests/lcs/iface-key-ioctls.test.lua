@@ -18,6 +18,19 @@ local src = lcs.source(vm, { hives = { { name = "Machine" }, { name = "Other" } 
 src:seed_param("MaxValueSize", MAX_VALUE_SIZE)
 src:seed_param("MaxLayersPerValue", MAX_LAYERS_PER_VALUE)
 src:key(lcs.LAYERS_PATH)
+src:key("Machine\\Caſe")
+src:key("Machine\\CaseAscii")
+-- The fixture source folds ASCII only. Supply the two Unicode-equivalent
+-- LOOKUP answers needed here; the kernel still receives the original open
+-- spelling, and READ_KEY still serves each unmodified stored name.
+src:intercept(lcs.OP.LOOKUP, function(self, req)
+    local aliases = { case = "Caſe", ["caſeaſcii"] = "CaseAscii" }
+    local stored = aliases[(lcs.lookup_name(req) or ""):lower()]
+    if stored then
+        return self:dispatch({ op = req.op, txn = req.txn,
+            payload = req.payload:sub(1, 16) .. string.pack("<s4", stored) })
+    end
+end)
 local TEST = src:key("Machine\\Software\\Test")
 src:value(TEST, "Seeded", lcs.TYPE.DWORD, lcs.dword(1))
 -- A value whose only entry is in a layer the source spells in a case of
@@ -291,6 +304,40 @@ test("REG_IOC_QUERY_KEY_INFO returns the key's name, times, counts, maxima, flag
         t:assert(i.hive_generation ~= nil, "and the hive generation number")
         t:assert(i.last_write_time ~= nil, "with the last write time")
         sys.close(w, fd)
+    end)
+
+test("REG_IOC_QUERY_KEY_INFO reports the stored spelling and its byte length",
+    { spec = "PKM *ioctl.query-key-info.stored-name", tags = { "pei774" } }, function(t)
+        for _, names in ipairs({
+            { "machine\\software\\TEST", "Test" },
+            { "Machine\\CASE", "Caſe" },
+            { "Machine\\CaſeAſcii", "CaseAscii" },
+        }) do
+            local fd = must_open(t, names[1])
+            local probe = lcs.query_key_info(src, w, fd, { name_len = 0 })
+            t:assert_eq(probe.errno, sys.E.RANGE, "a zero-sized buffer probes the stored name")
+            t:assert_eq(probe.name_len, #names[2], "the required byte length belongs to the stored spelling")
+            local short = lcs.query_key_info(src, w, fd, { name_len = #names[2] - 1 })
+            t:assert_eq(short.errno, sys.E.RANGE, "one byte short is refused")
+            t:assert_eq(short.name_len, #names[2], "the required length is stable")
+            local info = lcs.query_key_info(src, w, fd, { name_len = #names[2] })
+            t:assert_eq(info.ret, 0, "an exactly sized buffer succeeds")
+            t:assert_eq(info.name, names[2], "the stored name, independent of the open spelling")
+            sys.close(w, fd)
+        end
+        local parent = must_open(t, "machine\\software")
+        local child = lcs.open_key(src, w, parent, "tEsT", lcs.KEY_ALL_ACCESS)
+        t:assert(child.ret >= 0, "a relative open succeeds")
+        local info = lcs.query_key_info(src, w, child.ret)
+        t:assert_eq(info.ret, 0, "query the relative fd")
+        t:assert_eq(info.name, "Test", "relative opens also return the stored spelling")
+        sys.close(w, child.ret)
+        sys.close(w, parent)
+        local root = must_open(t, "mAcHiNe")
+        local root_info = lcs.query_key_info(src, w, root)
+        t:assert_eq(root_info.ret, 0, "query the hive root")
+        t:assert_eq(root_info.name, "mAcHiNe", "a root has no child name and keeps its fd spelling")
+        sys.close(w, root)
     end)
 
 test("REG_IOC_QUERY_KEY_INFO is _IOWR: it reads the caller's output-buffer fields first",
