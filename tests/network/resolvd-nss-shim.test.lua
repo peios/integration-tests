@@ -65,6 +65,8 @@ local PT_NSS_C = [==[
 #include <fcntl.h>
 #include <link.h>
 #include <netdb.h>
+#include <pwd.h>
+#include <grp.h>
 #include <nss.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -532,6 +534,30 @@ static int op(char **a, int n) {
         if (g) printf("h_name=%s\n", g->h_name);
     } else if (!strcmp(o, "cfg") && n >= 3) {
         printf("ret=%d\n", __nss_configure_lookup(a[1], a[2]));
+    } else if (!strcmp(o, "identity")) {
+        struct passwd *pw = getpwnam("pt-nss-user");
+        if (!pw) { printf("error=no test passwd entry\n"); return 2; }
+        uid_t uid = pw->pw_uid;
+        char *name = strdup(pw->pw_name);
+        pw = getpwnam(name);
+        printf("by_name=%d\n", pw && pw->pw_uid == uid);
+        pw = getpwuid(uid);
+        printf("by_id=%d\n", pw && !strcmp(pw->pw_name, name));
+        free(name);
+        struct group *gr = getgrnam("pt-nss-group");
+        if (!gr) { printf("error=no test group entry\n"); return 2; }
+        gid_t gid = gr->gr_gid;
+        name = strdup(gr->gr_name);
+        gr = getgrnam(name);
+        printf("group_by_name=%d\n", gr && gr->gr_gid == gid);
+        gr = getgrgid(gid);
+        printf("group_by_id=%d\n", gr && !strcmp(gr->gr_name, name));
+        free(name);
+        void *identity = dlopen("libnss_peios.so.2", RTLD_NOW | RTLD_NOLOAD);
+        void *gcc = dlopen("libgcc_s.so.1", RTLD_NOW | RTLD_NOLOAD);
+        printf("identity_loaded=%d gcc_loaded=%d\n", identity != NULL, gcc != NULL);
+        if (identity) dlclose(identity);
+        if (gcc) dlclose(gcc);
     } else if (!strcmp(o, "where")) {
         void *m = dlopen("libnss_peios_net.so.2", RTLD_NOW | RTLD_NOLOAD);
         void *c = dlopen("libc.so.6", RTLD_NOW | RTLD_NOLOAD);
@@ -735,7 +761,20 @@ dns.serve(gw, {
         if q.questions[1] and dns.same_name(q.questions[1].name, "slow.example.test") then return false end
     end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw, files = build_pt_nss() })
+local files = build_pt_nss()
+-- Optional signed candidates replace only the two modules in the disposable boot.
+for env, path in pairs({
+    NSS_NET_TEST_BINARY = "usr/lib/x86_64-linux-peios/libnss_peios_net.so.2",
+    NSS_IDENTITY_TEST_BINARY = "usr/lib/x86_64-linux-peios/libnss_peios.so.2",
+}) do
+    local binary = os.getenv(env)
+    if binary then
+        local f = assert(io.open(binary, "rb"))
+        files[path] = { f:read("a"), exec = true }
+        f:close()
+    end
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 -- ---------------------------------------------------------------------------
 -- Talking to resolvd and running pt-nss
@@ -978,11 +1017,8 @@ test("the module exports the six entry points and no other symbol, and each asks
         t:assert_eq(r[9].ttl, -77, "gethostbyaddr_r has no TTL out")
     end)
 
-test("the module needs libgcc_s.so.1, libc.so.6 and ld-linux-x86-64.so.2, and not libpeios; the codec is compiled in",
-    { spec = "resolvd *nss-module.link-dependencies" }, function(t)
-        -- PEI-1374: libgcc_s.so.1 is needed as well as libc and the loader,
-        -- so every resolving process also loads GCC's runtime. This test
-        -- asserts the module as built; the PSPU test below asserts the spec.
+test("the module needs only libc.so.6 and ld-linux-x86-64.so.2; the codec and unwinder are compiled in",
+    { spec = "resolvd *nss-module.link-dependencies", tags = { "pei-1374" } }, function(t)
         local r = pt(t, { { "elf", MODULE } })
         t:log("needed: " .. list(r[1].needed))
         t:assert(#r[1].needed > 0, "the module's dynamic section was read")
@@ -992,15 +1028,12 @@ test("the module needs libgcc_s.so.1, libc.so.6 and ld-linux-x86-64.so.2, and no
             t:assert(not n:find("peios", 1, true), "it does not link libpeios (" .. n .. ")")
         end
         table.sort(needed)
-        t:assert_eq(table.concat(needed, " "), "ld-linux-x86-64.so.2 libc.so.6 libgcc_s.so.1",
-            "exactly libgcc_s, libc and the dynamic loader")
+        t:assert_eq(table.concat(needed, " "), "ld-linux-x86-64.so.2 libc.so.6",
+            "exactly libc and the dynamic loader")
     end)
 
 test("the shim links against libc and the wire codec and nothing else",
-    { spec = "PSPU *nri-shim.links-libc-and-codec-only", tags = { "known-bug" } }, function(t)
-        -- PEI-1374: libnss_peios_net.so.2 NEEDs
-        -- libgcc_s.so.1 as well as libc.so.6 and ld-linux-x86-64.so.2, so
-        -- every resolving process also loads GCC's runtime.
+    { spec = "PSPU *nri-shim.links-libc-and-codec-only", tags = { "pei-1374" } }, function(t)
         local r = pt(t, { { "elf", MODULE } })
         t:log("needed: " .. list(r[1].needed))
         t:assert(#r[1].needed > 0, "the module's dynamic section was read")
@@ -1008,6 +1041,25 @@ test("the shim links against libc and the wire codec and nothing else",
             t:assert(n == "libc.so.6" or n == "ld-linux-x86-64.so.2",
                 "needed " .. n .. " is libc (the codec is compiled in)")
         end
+    end)
+
+test("identity and host lookups load both NSS modules without loading libgcc_s",
+    { tags = { "pei-1374" } }, function(t)
+        sut:run("lps group create pt-nss-group"):assert_ok()
+        sut:run("lps add pt-nss-user --no-password --disabled --no-prompt --primary-group pt-nss-group"):assert_ok()
+        local r = pt(t, {
+            { "elf", "/usr/lib/x86_64-linux-peios/libnss_peios.so.2" },
+            { "gai", "localhost", "0" }, { "identity" },
+        })
+        local needed = r[1].needed
+        table.sort(needed)
+        t:assert_eq(table.concat(needed, " "), "ld-linux-x86-64.so.2 libc.so.6",
+            "identity shim also needs only libc and its loader")
+        t:assert_eq(r[2].gai, 0, "host lookup succeeds")
+        for _, field in ipairs({ "by_name", "by_id", "group_by_name", "group_by_id", "identity_loaded" }) do
+            t:assert_eq(r[3][field], 1, field)
+        end
+        t:assert_eq(r[3].gcc_loaded, 0, "neither lookup loaded libgcc_s into this fresh process")
     end)
 
 -- ---------------------------------------------------------------------------
