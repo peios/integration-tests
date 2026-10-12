@@ -316,8 +316,7 @@ test("local and every name under it is notfound, source synthetic, whatever the 
         synthetic(t, resolve("svc.local", T.ANY), "synthetic", "", "svc.local ANY", "notfound")
         local l = ask({ query = "lookup", name = "nas.local" })
         t:log("lookup nas.local: " .. tostring(l.outcome) .. " " .. tostring(l.source))
-        -- (A lookup reports the source of its last found task, else local:
-        -- §4.9.)
+        -- A lookup with no found task reports source local (§4.9).
         t:assert_eq(l.outcome, "notfound", "lookup of nas.local is notfound")
         local s = stub("cam.local", "A")
         t:log("stub cam.local: rcode " .. s.rcode .. ", " .. #s.answers .. " answers")
