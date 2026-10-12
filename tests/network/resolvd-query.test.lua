@@ -15,10 +15,8 @@
 -- Questions are asked on the native socket from the agent while the
 -- gateway pumps, with `no_cache`; `status` is read between pumps.
 --
--- The generator test recovers resolvd's xorshift64* state from one
--- query's case pattern (an all-lower-case name of 76 letters: its first 64
--- letters are one whole generator output) and then predicts the ID and
--- case pattern of every later query exactly.
+-- The regression retains the old xorshift64* predictor and verifies that
+-- observing one case pattern no longer predicts subsequent queries.
 --
 -- timed is stopped once the machine is up, so every upstream query is a
 -- test's own: the counters and the generator move only for them.
@@ -494,67 +492,47 @@ local function walk(g, log, from)
     return out
 end
 
-test("the ID is the low 16 bits of the transaction's first xorshift64* draw and the case pattern comes from the next, one bit per letter, lowest first, a new draw after 64; every transaction, a retry or a TCP retry included, gets its own",
-    { spec = "resolvd *engine-query.generator-is-xorshift64-star resolvd *engine-query.letters-flipped-on-generator-bits resolvd *engine-query.case-bits-consumed-per-letter resolvd *engine-query.id-fresh-per-transaction resolvd *engine-query.new-pattern-every-transaction" },
+test("each upstream transaction, including UDP retries and TCP fallback, gets fresh ID and case entropy",
+    { spec = "resolvd *engine-query.cryptographic-entropy-per-transaction resolvd *engine-query.letters-flipped-on-generator-bits resolvd *engine-query.id-fresh-per-transaction resolvd *engine-query.new-pattern-every-transaction", tags = { "pei1351" } },
     function(t)
         up(t)
-        local long = long_name("q")
         dns.forget(gw)
-        local r = resolve(long, A)
-        t:assert(r and r.outcome == "notfound", "the long name asked (notfound)")
-        local log = dns.queries(gw)
-        t:assert_eq(#log, 1, "one query so far")
-        local sent = qname(log[1].msg)
-        t:log("asked " .. long .. "\nsent  " .. sent)
-        local g, rest = recover(long, sent)
-        -- The letters past 64 use the next draw, lowest bit first.
-        local o3, want = draw(g), {}
-        for i = 1, #rest do want[i] = (o3 >> (i - 1)) & 1 end
-        t:assert_eq(table.concat(rest), table.concat(want),
-            "letters 65-76 follow the next draw: the state is recovered, and bits go only to letters")
-
-        -- Names with digits and hyphens; a truncated reply and its TCP
-        -- retry; a timeout and its retry.
-        local digits = "n0-1x9.example.test"
-        ZONE[digits] = { { type = "A", ttl = 60, data = "10.77.0.90" } }
         local trunc = "trunc.example.test"
         ZONE[trunc] = { { type = "A", ttl = 60, data = "10.77.0.91" } }
         local slow, gslow = fresh("slow-0x20")
         local nslow = 0
         HOOK = function(q, d, ctx)
-            local n = qname(q) or ""
-            if dns.same_name(n, trunc) and ctx.transport == "udp" then d.tc, d.answers = true, {}; return d end
-            if dns.same_name(n, slow) then
+            local name = qname(q) or ""
+            if dns.same_name(name, trunc) and ctx.transport == "udp" then d.tc, d.answers = true, {}; return d end
+            if dns.same_name(name, slow) then
                 nslow = nslow + 1
                 if nslow == 1 then return false end
             end
         end
-        t:assert(resolve(digits, A).outcome == "found", "digits name found")
         t:assert(resolve(trunc, A).outcome == "found", "truncated name found over TCP")
         local rs = resolve(slow, A)
         HOOK = nil
-        t:assert(rs and texts(rs) == gslow, "slow name found on its retry")
-
-        log = dns.queries(gw)
-        local res = walk(g, log, 1)
-        local good = 0
-        for _, x in ipairs(res) do
-            t:log(string.format("%s %-22s id %5d predicted %5d; sent %s predicted %s %s", x.transport, x.sent:lower(), x.id,
-                x.pid, x.sent, x.pname, x.ok and "ok" or "MISMATCH"))
-            if x.ok then good = good + 1 end
+        t:assert(rs and rs.outcome == "found" and texts(rs) == gslow, "timeout retried")
+        local log = dns.queries(gw, function(e)
+            local name = e.msg and qname(e.msg)
+            return name and (dns.same_name(name, trunc) or dns.same_name(name, slow))
+        end)
+        t:assert_eq(#log, 4, "UDP/TCP and two timeout attempts")
+        t:assert_eq(log[1].transport .. log[2].transport, "udptcp", "fallback uses TCP")
+        for i = 1, 3, 2 do
+            local a, b = log[i].msg, log[i + 1].msg
+            t:assert(dns.same_name(qname(a), qname(b)), "both attempts ask the same name")
+            t:assert(a.id ~= b.id or qname(a) ~= qname(b), "each attempt draws fresh ID and case bits")
         end
-        t:assert_eq(#res, 5, "five transactions: digits, truncated UDP and TCP, slow and its retry")
-        t:assert_eq(res[2].transport .. res[3].transport, "udptcp", "the truncated reply was retried over TCP")
-        t:assert_eq(good, #res, "every later ID and case pattern is exactly what the recovered generator gives")
     end)
 
--- PEI-1351: the ID and the case bits come from xorshift64*, so one query's
--- case pattern (64 letters) gives the generator's state, and every later ID
--- and pattern is predicted exactly. A forger who sees one query (the
+-- PEI-1351 regression: the former xorshift64* generator exposed its state
+-- in a 64-letter case pattern. Fresh kernel entropy must defeat this old
+-- predictor; this check does not purport to prove cryptographic quality. A forger who sees one query (the
 -- upstream, anything on the path, an authoritative server for a name a local
 -- program asks about) loses the ID and case from its work factor.
 test("the message ID and the case pattern are random: what one query shows does not predict the next",
-    { spec = "PSPU *nri-resolution.random-message-id PSPU *nri-resolution.case-randomised-and-echo-required", tags = { "known-bug" } },
+    { spec = "PSPU *nri-resolution.random-message-id PSPU *nri-resolution.case-randomised-and-echo-required", tags = { "pei1351" } },
     function(t)
         up(t)
         local long = long_name("z")
