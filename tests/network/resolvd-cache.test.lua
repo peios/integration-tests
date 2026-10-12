@@ -101,7 +101,14 @@ dns.serve(gw, {
     end,
 })
 
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local function rstatus()
     local s, err = network.call(sut, { query = "status" }, { path = SOCK })
