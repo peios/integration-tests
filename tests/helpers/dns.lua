@@ -408,7 +408,8 @@ end
 ---   on        `function(q, default, ctx)`: q is the decoded query,
 ---             default the zone's reply (a table, already built), ctx
 ---             {transport = "udp"|"tcp", server = the address asked,
----             client = the asker's address (udp), at = clock seconds}.
+---             client = the asker's address (udp), fd = connection (tcp),
+---             at = clock seconds}.
 ---             Return nil for the default, false to stay silent (over TCP
 ---             the connection is then closed), a reply table, or bytes.
 ---             A reply table may also carry (`raw` replacing the
@@ -513,7 +514,7 @@ function M.serve(gw, o)
                 local now = clock(g)
                 g.dns_log[#g.dns_log + 1] = { msg = q, raw = raw, transport = "tcp",
                     server = c.server, at = now }
-                local r = q and not q.qr and decide(q, { transport = "tcp", server = c.server, at = now })
+                local r = q and not q.qr and decide(q, { transport = "tcp", server = c.server, fd = fd, at = now })
                 if r == false or r == nil then
                     sys.close(g.vm, fd)
                     g.dns_conns[fd] = nil
