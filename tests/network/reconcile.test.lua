@@ -686,17 +686,11 @@ test("a failed operation is logged and the rest of the plan carries on; EEXIST o
 end)
 
 -- ---------------------------------------------------------------------------
--- Probes: code behaviour the TRM does not describe (no anchor; see the
--- report). Each asserts what the TRM's account implies would happen.
+-- Equal-metric IPv4 routes, followed by the outstanding IPv6 metric probe.
 -- ---------------------------------------------------------------------------
 
-test("PROBE: a second joined interface whose default route has the same metric as eth0's still gets it",
-    { tags = { "known-bug" } }, function(t)
-    -- PEI-1368: netd adds routes with NLM_F_EXCL, and
-    -- the kernel's IPv4 route key (table, destination, tos, metric) has no
-    -- device in it, so the add meets EEXIST from eth0's route. netd reads
-    -- EEXIST as "the kernel got there first" and says nothing: the
-    -- route never lands and every pass retries it in silence.
+test("two interfaces with the same IPv4 route metric coexist, converge and withdraw independently",
+    { spec = "netd *reconcile.equal-metric-ipv4-routes", tags = { "pei-1368" } }, function(t)
     local MAC4 = "02:c0:00:00:03:04"
     local function defaults()
         local by = {}
@@ -708,9 +702,11 @@ test("PROBE: a second joined interface whose default route has the same metric a
         end
         return table.concat(by, "; ")
     end
-    local eth_default = "via 10.77.0.1 oif " .. eth.index .. " metric 100 proto 200"
     local s = network.serve_until(gw, sut, function(i) return network.bound(i) and i.gateway == "10.77.0.1" end,
         { iface = "eth0", timeout = 30 })
+    t:assert(s, "eth0 acquired its lease")
+    eth.index = network.iface(s, "eth0").index
+    local eth_default = "via 10.77.0.1 oif " .. eth.index .. " metric 100 proto 200"
     t:log("before: " .. defaults())
     t:assert(s and defaults():find(eth_default, 1, true), "eth0 is bound with its default route first")
     network.write(sut, "Profiles\\ptr-g", { ["Address.Static"] = "multi:10.64.0.2/24",
@@ -726,10 +722,30 @@ test("PROBE: a second joined interface whose default route has the same metric a
     local failures = count_logged(function(l) return l:find("reconcile: AddRoute", 1, true) ~= nil
         and l:find("10.64.0.1", 1, true) ~= nil end)
     t:log("failure lines naming 10.64.0.1: " .. failures)
-    network.delete(sut, "Rules\\Interface\\ptc-r4")
     t:assert(after:find(eth_default, 1, true), "eth0 keeps its default route")
     t:assert(after:find("via 10.64.0.1 oif " .. d .. " metric 100 proto 200", 1, true),
         "ptr4 has its desired default route via 10.64.0.1")
+
+    local function count_default(index)
+        local count = 0
+        for _, r in ipairs(netd_routes_on(index)) do
+            if r.family == 4 and r.prefix == 0 then count = count + 1 end
+        end
+        return count
+    end
+    t:assert_eq(count_default(d), 1, "one default on ptr4")
+    t:assert_eq(count_default(eth.index), 1, "one default on eth0")
+    local m = monitor_open()
+    for _ = 1, 3 do pass() end
+    for _, e in ipairs(monitor_drain(m, 1000)) do
+        t:assert(not (e.kind == "route" and e.protocol == 200 and e.prefix == 0
+            and (e.index == d or e.index == eth.index)), "converged defaults do not churn")
+    end
+    network.write(sut, "Profiles\\ptr-g", { ["Route.Gateway"] = "multi:" })
+    pass()
+    t:assert_eq(count_default(d), 0, "only ptr4's default is withdrawn")
+    t:assert(defaults():find(eth_default, 1, true), "eth0's equal-metric route survives")
+    network.delete(sut, "Rules\\Interface\\ptc-r4")
 end)
 
 test("an IPv6 route at Route.Metric 0 converges at the kernel default",
