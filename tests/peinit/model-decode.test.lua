@@ -37,7 +37,19 @@ peinit.claim(2) -- the probe machine, plus one boot of its own at the end
 
 local PROBE = [[Machine\System\Services\pt-probe]]
 
-local vm = peinit.boot({
+local function boot(opts)
+    local binary = os.getenv("PEINIT_TEST_BINARY")
+    if binary then
+        local f = assert(io.open(binary, "rb"))
+        opts.files = peinit.merge(opts.files or {}, {
+            ["bin/peinit2"] = { f:read("*a"), exec = true },
+        })
+        f:close()
+    end
+    return peinit.boot(opts)
+end
+
+local vm = boot({
     name = "decode",
     files = peinit.seed("pt-decode", {
         { path = [[Machine\System]] },
@@ -718,7 +730,7 @@ test("a check is one of the four types with a non-empty argument",
     end)
 
 test("a registry check may only name a key peinit caches",
-    { spec = "peinit *check.a-registry-check-must-name-a-cached-key" },
+    { spec = "peinit *check.a-registry-check-must-name-a-cached-key", tags = { "pei352" } },
     function(t)
         -- A `registry:` check is answered from the in-memory model
         -- rather than by a live read, so it can only name a key the
@@ -731,10 +743,10 @@ test("a registry check may only name a key peinit caches",
                 { [[registry:Machine\System\Services\pt-ok]] }) },
             { "the init key", one("Conditions", "multi",
                 { [[registry:Machine\System\Init]] }) },
-            { "a key under init", one("Conditions", "multi",
-                { [[registry:Machine\System\Init\Anything]] }) },
         })
         expect_all(t, "decode", {
+            { "a key under init", one("Conditions", "multi",
+                { [[registry:Machine\System\Init\Anything]] }) },
             { "a key peinit does not cache", one("Conditions", "multi",
                 { [[registry:Machine\Software\Vendor]] }) },
             { "the parent of both cached roots",
@@ -954,7 +966,7 @@ test("a newer schema version does not prevent boot",
         -- so most of it is proved by the boot returning at all:
         -- `peinit.boot` waits for `phase2 boot complete`, and a refusal
         -- would have gone to the recovery console and never printed it.
-        local newer = peinit.boot({
+        local newer = boot({
             name = "decode-v2",
             files = peinit.seed("pt-schema-v2", {
                 { path = [[Machine\System]] },

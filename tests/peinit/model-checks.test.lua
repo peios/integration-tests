@@ -170,6 +170,13 @@ daemon("pt-cached", {
     { name = "StartTimeout", type = "dword", data = 60 },
 })
 
+local binary = os.getenv("PEINIT_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    FILES["bin/peinit2"] = { f:read("*a"), exec = true }
+    f:close()
+end
+
 local vm = peinit.boot({
     name = "checks",
     files = peinit.merge(FILES, peinit.seed("pt-checks", SERVICES)),
@@ -237,9 +244,8 @@ test("the four check types ask four different questions",
 test("a registry check under the services key is a service-existence test",
     { spec = "peinit *check.a-services-registry-check-is-a-service-existence-test" },
     function(t)
-        -- Narrower than the load-time rule suggests: the check decoded
-        -- because the key is under a cached root, but what it resolves
-        -- against is the service table. pt-no-such-service has no
+        -- The accepted immediate Services child resolves against the
+        -- service table. pt-no-such-service has no
         -- definition, so the check is false -- and it would be false for
         -- any subkey of the services key that is not a service, since
         -- services are the only thing the model holds there.
