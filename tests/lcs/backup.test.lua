@@ -322,13 +322,30 @@ test("backup opens a read-only source transaction and releases it with an abort,
             "there is no commit call anywhere in the backup path")
     end)
 
-test("a source that does not support read-only snapshots makes the backup ENOTSUP",
-    { spec = "PKM *backup.unsupported-snapshot-is-enotsup" }, function(t)
-        src.refuse_txn_mode = { [lcs.RSI_TXN_READ_ONLY] = true }
-        local r = backup_root()
-        src.refuse_txn_mode = nil
-        t:assert_eq(r.errno, ENOTSUP,
-            "RSI_TXN_NOT_SUPPORTED for a read-only snapshot: ENOTSUP")
+test("a source that does not support read-only snapshots makes the backup ENOTSUP and audits the attempt",
+    { spec = { "PKM *backup.unsupported-snapshot-is-enotsup", "PKM *backup.snapshot-refusal-is-audited" },
+      tags = { "pei771" } }, function(t)
+        local mark = src:mark()
+        local events = kmes.recording(t, vm, function()
+            src.refuse_txn_mode = { [lcs.RSI_TXN_READ_ONLY] = true }
+            local r = backup_root()
+            src.refuse_txn_mode = nil
+            t:assert_eq(r.errno, ENOTSUP,
+                "RSI_TXN_NOT_SUPPORTED for a read-only snapshot: ENOTSUP")
+        end)
+        local starts = kmes.of_type(events, "lcs.audit.backup.started")
+        local ends = kmes.of_type(events, "lcs.audit.backup.ended")
+        t:assert_eq(#starts, 1, "the admitted attempt emits START before requesting its snapshot")
+        t:assert_eq(starts[1].payload.object.key.guid, ROOT, "START identifies the backup root")
+        t:assert_eq(#ends, 1, "the snapshot refusal emits END")
+        t:assert_eq(ends[1].payload.object.key.guid, ROOT, "END identifies the same root")
+        t:assert_eq(ends[1].payload.outcome.success, false, "END reports failure")
+        t:assert_eq(ends[1].payload.outcome.errno, -ENOTSUP, "END preserves the refusal errno")
+        t:assert_eq(#src:served(lcs.OP.BEGIN_TXN, mark), 1, "one snapshot was requested")
+        for _, op in ipairs({ lcs.OP.READ_KEY, lcs.OP.ENUM_CHILDREN, lcs.OP.QUERY_VALUES,
+                            lcs.OP.ABORT_TXN, lcs.OP.COMMIT_TXN }) do
+            t:assert_eq(#src:served(op, mark), 0, "no export or release of a snapshot that never opened")
+        end
         local ok = backup_root()
         t:assert_eq(ok.ret, 0, "and a source that does support one still works")
     end)
