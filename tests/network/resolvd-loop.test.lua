@@ -1,7 +1,7 @@
 -- resolvd §2.5 — the event loop: one thread in one poll, the poll
 -- timeout, the order ready descriptors are serviced in, timers after
 -- descriptors, local answers within the iteration, and replies written
--- blocking, with a one-second timeout on each write call.
+-- without blocking, with a one-second deadline for queued replies.
 --
 -- Harness: the scripted gateway (helpers.gateway) with its DNS server
 -- (helpers.dns), and a whole Peios (helpers.network) with resolvd under
@@ -19,7 +19,7 @@
 -- really pending at the moment of SIGCONT is checked first: the receive
 -- queues of the sockets concerned (/proc/net/udp, `ss -x`).
 --
--- The large replies for the blocking-write test are static names with
+-- The large replies for the reply-write test are static names with
 -- many addresses (`Dns\Hosts`), answered without the network.
 --
 -- Own VMs: resolvd is stopped and resumed, netd is stopped once, and the
@@ -77,7 +77,14 @@ dns.serve(gw, {
         if name == "delay.loop.test" then default.delay = 1; return default end
     end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("RESOLVD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/resolvd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local SOCK = "/run/resolvd/resolv.sock"
 
@@ -262,10 +269,11 @@ end
 
 --- A nonblocking TCP connection to the stub door with a small receive
 --- buffer, set before the handshake so the window is small too.
-local function small_tcp()
+local function small_tcp(mss)
     local sa, family = ntfe.sockaddr("127.0.0.53", 53)
     local fd = assert(ntfe.socket(sut, family, ntfe.SOCK_STREAM))
     ntfe.set_int_opt(sut, fd, 1, 8, 1) -- SO_RCVBUF: the kernel's minimum
+    if mss then ntfe.set_int_opt(sut, fd, 6, 2, mss) end -- TCP_MAXSEG before handshake
     local r = sut:syscall(ntfe.NR.connect, { args = { fd, 0, #sa }, bufs = { sa }, ptrs = { 1 } })
     assert(r.ret == 0 or r.errno == sys.E.INPROGRESS, "connect: " .. sys.errname(r.errno or 0))
     assert(ntfe.poll(sut, fd, ntfe.POLLOUT, 2000) ~= 0, "connected")
@@ -538,71 +546,66 @@ test("local answers are given at once, and a networked one as soon as its reply 
     end)
 
 -- ---------------------------------------------------------------------------
--- Blocking writes
+-- Nonblocking replies
 -- ---------------------------------------------------------------------------
 
-test("native and stub TCP replies are written blocking, a second per write call: a client that does not read holds the loop",
-    { spec = "resolvd *loop.replies-written-blocking" }, function(t)
-        -- PEI-1342: the blocking writes are the documented current
-        -- behaviour; the stall is the defect filed against them. The stall
-        -- is shown on the native door. On the stub TCP door it does not
-        -- happen here: a DNS reply is at most 64 KB, and loopback TCP sizes
-        -- the send buffer from its 64 KB MSS (well over that), so even the
-        -- largest reply to a client that never reads fits and is written
-        -- at once, which is the TRM's "a reply that fits" case. (With a
-        -- small client MSS the send buffer is small and the stub TCP write
-        -- stalls too; resolvd-servers-tcpstall.test.lua uses that.)
+test("slow TCP readers do not stall other doors; queued replies resume or expire, and native replies stay bounded",
+    { spec = "resolvd *loop.replies-written-blocking", tags = { "pei-1342" } }, function(t)
         bound_and_routed(t)
-        many_addresses("ptbig", 1700)       -- a 58 KB DNS reply
-        many_addresses("ptbignat", 6000)    -- a native reply far beyond a unix socket's buffer
-        sut:run("sleep 1")
-        local base = udp_latency("localhost")
-        t:log(string.format("stub UDP localhost at rest: %.0f ms", base))
-        t:assert(base < 300, "at rest a local answer is quick")
+        local held = {}
+        local function hold(fd) held[#held + 1] = fd; return fd end
+        local function read_tcp(fd)
+            local got = ""
+            while true do
+                local chunk = ntfe.recv(sut, fd, 1000, 65536)
+                if not chunk or chunk == "" then return got, chunk == "" end
+                got = got .. chunk
+                if #got >= 2 and #got >= 2 + string.unpack(">I2", got) then return got end
+            end
+        end
+        local ok, err = pcall(function()
+            many_addresses("ptbig", 1700)       -- a 58 KB DNS reply
+            many_addresses("ptbignat", 6000)    -- larger than the native message ceiling
+            sut:run("sleep 1")
+            local base = udp_latency("localhost")
+            t:assert(base < 300, "local baseline responds quickly")
 
-        -- A small reply to a client that does not read fits its buffers.
-        local small = small_tcp()
-        ntfe.send(sut, small, dns_frame("localhost", "AAAA", 5))
-        local ms = udp_latency("localhost")
-        t:log(string.format("after a small TCP reply nobody reads: %.0f ms", ms))
-        t:assert(ms < 300, "a reply that fits is written at once")
-        sys.close(sut, small)
+            -- Small MSS plus the small receive window ensures the answer
+            -- cannot fit in the sender's initial TCP buffers on loopback.
+            local stalled = hold(small_tcp(536))
+            ntfe.send(sut, stalled, dns_frame("ptbig", "AAAA", 6))
+            t:assert(ntfe.poll(sut, stalled, ntfe.POLLIN, 1000) ~= 0, "reply started")
+            local ms = udp_latency("localhost")
+            t:log(string.format("stub UDP while a large TCP reply is unread: %.0f ms", ms))
+            t:assert(ms < 300, "the unread TCP reply does not block UDP")
+            local start = guest_ns()
+            local native = rcall({ query = "status" })
+            t:assert(native and native.ok, "native door also responds")
+            t:assert((guest_ns() - start) / 1e6 < 300, "native door does not wait for the slow reader")
+            gw:serve({ timeout = 1.2 })
+            local partial, closed = read_tcp(stalled)
+            t:assert(closed, "the write deadline closes the slow connection")
+            t:assert(#partial >= 2, "some reply bytes reached the slow client")
+            t:assert(#partial < 2 + string.unpack(">I2", partial), "the stalled reply expired before completion")
 
-        -- The largest stub TCP reply, to a client that does not read: it
-        -- fits loopback's send buffer, so it too is written at once...
-        local big = small_tcp()
-        ntfe.send(sut, big, dns_frame("ptbig", "AAAA", 6))
-        ms = udp_latency("localhost")
-        t:log(string.format("during a 58 KB stub TCP reply nobody reads: %.0f ms", ms))
-        t:assert(ms < 300, "a 58 KB stub TCP reply fits and is written at once")
-        -- ...and whole: the client reads all of it afterwards.
-        local got = ""
-        repeat
-            local chunk = ntfe.recv(sut, big, 1000, 65536)
-            if chunk and #chunk > 0 then got = got .. chunk end
-        until not chunk or chunk == "" or (#got >= 2 and #got >= 2 + string.unpack(">I2", got))
-        local reply = #got >= 2 and dns.decode(got:sub(3)) or nil
-        t:log(string.format("the client then read %d bytes, %d answers", #got, reply and #reply.answers or -1))
-        t:assert(reply and #reply.answers == 1700, "the whole reply was in the buffers")
-        sys.close(sut, big)
+            -- Drain a second partial reply before its fixed deadline and
+            -- require the entire length-prefixed DNS message, without loss.
+            local reading = hold(small_tcp(536))
+            ntfe.send(sut, reading, dns_frame("ptbig", "AAAA", 7))
+            t:assert(ntfe.poll(sut, reading, ntfe.POLLIN, 1000) ~= 0, "second reply started")
+            ntfe.set_int_opt(sut, reading, 1, 8, 131072)
+            local whole = read_tcp(reading)
+            t:assert(#whole >= 2 and #whole == 2 + string.unpack(">I2", whole), "partial writes resume into one complete frame")
+            local reply = assert(dns.decode(whole:sub(3)))
+            t:assert_eq(#reply.answers, 1700, "all records retained")
 
-        -- A large native reply to a client that does not read.
-        local mark = guest_ns()
-        local nat = native_open({ query = "resolve", name = "ptbignat", type = 28 })
-        ms = udp_latency("localhost")
-        t:log(string.format("during a large native reply nobody reads: %.0f ms", ms))
-        local after = udp_latency("localhost")
-        sys.close(sut, nat)
-        local lines = log_since(mark)
-        t:log("log:\n" .. table.concat(lines, "\n"))
+            local nat = hold(native_open({ query = "resolve", name = "ptbignat", type = 28 }))
+            ms = udp_latency("localhost")
+            t:assert(ms < 300, "an unread native reply does not block UDP")
+            local bounded = native_reply(nat, 5)
+            t:assert(bounded and bounded.ok == false and bounded.error == "reply too large", "native ceiling is retained")
+        end)
+        for _, fd in ipairs(held) do sys.close(sut, fd) end
         network.reg(sut, { "del", "-r", [[Machine\System\Network\Dns]] })
-        t:assert(after < 300, "the loop lets go afterwards (" .. math.floor(after) .. " ms)")
-        t:assert(find(lines, "resolvd: warn: control: reply failed: ") ~= nil, "the abandoned native write is logged")
-        -- The one-second timeout is per write call, and this reply takes
-        -- two: the first fills the socket buffer, blocks its second and
-        -- returns short; the second sends nothing and times out, which
-        -- ends the write. A client that does not read holds the loop for
-        -- about two seconds (2026 and 2084 ms measured).
-        t:assert(ms > 1300, "for more than one call's second (" .. math.floor(ms) .. " ms)")
-        t:assert(ms < 2700, "and for about two seconds: two calls (" .. math.floor(ms) .. " ms)")
+        if not ok then error(err, 0) end
     end)
