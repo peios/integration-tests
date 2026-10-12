@@ -583,14 +583,14 @@ test("wrong MessagePack types: the payload not a map, a key not a string, a know
         })
     end)
 
-test("floats and extension values are unsupported value types",
-    { spec = "resolvd *native-framing.error-unsupported-type" }, function(t)
+test("unknown floats and extensions are skipped, while the reserved marker is refused",
+    { spec = "resolvd *native-framing.error-unsupported-type", tags = { "pei-1347" } }, function(t)
         ready(t)
         expect_all(t, {
-            { "float64 under an unknown key", M("query", E("status"), "zz", double(0.5)), US },
-            { "float32 under an unknown key", M("query", E("status"), "zz", "\xca" .. string.pack(">f", 0.5)), US },
-            { "fixext1 under an unknown key", M("query", E("status"), "zz", "\xd4\x01\x00"), US },
-            { "ext8 under an unknown key", M("query", E("status"), "zz", "\xc7\x01\x05\x00"), US },
+            { "float64 under an unknown key", M("query", E("status"), "zz", double(0.5)), true },
+            { "float32 under an unknown key", M("query", E("status"), "zz", "\xca" .. string.pack(">f", 0.5)), true },
+            { "fixext1 under an unknown key", M("query", E("status"), "zz", "\xd4\x01\x00"), true },
+            { "ext8 under an unknown key", M("query", E("status"), "zz", "\xc7\x01\x05\x00"), true },
             { "the reserved tag 0xc1 under an unknown key", M("query", E("status"), "zz", "\xc1"), US },
         })
     end)
@@ -665,14 +665,9 @@ test("a key repeated in the top-level map is an error; keys inside a skipped val
         })
     end)
 
--- PEI-1347 (widened): an unknown key holding a uint64 above i64::MAX is
--- not skipped: `skip` reads integers through `read_int`, which refuses
--- them, so the request fails with "malformed message: unexpected value
--- type", wherever in the value the integer sits. Every other value below
--- is skipped. The PSPU test `nri-native.unknown-keys-ignored` asserts the
--- spec.
-test("an unknown key is skipped when its value is nil, boolean, integer, string, binary, array or map; an integer of 2^63 or more inside it fails as unexpected value type",
-    { spec = "resolvd *native-framing.unknown-keys-skipped" }, function(t)
+-- PEI-1347 skips unknown scalar values by their encoded length.
+test("unknown values are skipped, including the full uint64 range inside arrays and map keys",
+    { spec = "resolvd *native-framing.unknown-keys-skipped", tags = { "pei-1347" } }, function(t)
         ready(t)
         expect_all(t, {
             { "nil", M("query", E("status"), "zz", "\xc0"), true },
@@ -685,21 +680,21 @@ test("an unknown key is skipped when its value is nil, boolean, integer, string,
             { "a map", M("query", E("status"), "zz", "\x82\xa1a\x01\xa1b\x92\xc0\xc2"), true },
             { "every one at once, around the query", M("z1", "\xc0", "z2", "\xc3", "query", E("status"), "z3", "\xc4\x01x",
                 "z4", "\x90", "z5", "\x80"), true },
-            { "an integer above i64::MAX (uint64)", M("query", E("status"), "zz", "\xcf" .. string.rep("\xff", 8)), UT },
-            { "2^63 exactly (uint64)", M("query", E("status"), "zz", "\xcf\x80" .. string.rep("\0", 7)), UT },
-            { "2^63 two arrays down", M("query", E("status"), "zz", "\x91\x91\xcf\x80" .. string.rep("\0", 7)), UT },
-            { "2^63 as a map key", M("query", E("status"), "zz", "\x81\xcf\x80" .. string.rep("\0", 7) .. "\xc0"), UT },
+            { "an integer above i64::MAX (uint64)", M("query", E("status"), "zz", "\xcf" .. string.rep("\xff", 8)), true },
+            { "2^63 exactly (uint64)", M("query", E("status"), "zz", "\xcf\x80" .. string.rep("\0", 7)), true },
+            { "2^63 two arrays down", M("query", E("status"), "zz", "\x91\x91\xcf\x80" .. string.rep("\0", 7)), true },
+            { "2^63 as a map key", M("query", E("status"), "zz", "\x81\xcf\x80" .. string.rep("\0", 7) .. "\xc0"), true },
         })
     end)
 
-test("inside an unknown key's value, a float, an extension or a non-UTF-8 string fails the decode, however deep",
-    { spec = "resolvd *native-framing.unknown-key-unsupported-value-fails" }, function(t)
+test("unknown nested floats and extensions are skipped, while invalid UTF-8 still fails",
+    { spec = "resolvd *native-framing.unknown-key-unsupported-value-fails", tags = { "pei-1347" } }, function(t)
         ready(t)
         expect_all(t, {
-            { "a float", M("query", E("status"), "zz", double(0.5)), US },
-            { "an extension", M("query", E("status"), "zz", "\xd5\x01\x00\x00"), US },
-            { "a float two arrays down", M("query", E("status"), "zz", "\x91\x91" .. double(2.5)), US },
-            { "a float as a map key", M("query", E("status"), "zz", "\x81" .. double(1) .. "\xc0"), US },
+            { "a float", M("query", E("status"), "zz", double(0.5)), true },
+            { "an extension", M("query", E("status"), "zz", "\xd5\x01\x00\x00"), true },
+            { "a float two arrays down", M("query", E("status"), "zz", "\x91\x91" .. double(2.5)), true },
+            { "a float as a map key", M("query", E("status"), "zz", "\x81" .. double(1) .. "\xc0"), true },
             { "a non-UTF-8 string in a map", M("query", E("status"), "zz", "\x81\xa1k\xa1\xff"), NU },
         })
     end)
@@ -721,7 +716,7 @@ test("an array or map nested more than 32 levels inside an unknown key fails; 32
     end)
 
 test("every known key is type-checked in every request, the first error met is reported, and a missing field is looked for last",
-    { spec = "resolvd *native-framing.wrong-field-type-is-error" }, function(t)
+    { spec = "resolvd *native-framing.wrong-field-type-is-error", tags = { "pei-1347" } }, function(t)
         ready(t)
         expect_all(t, {
             { "{query: status, name: 5}", M("query", E("status"), "name", E(5)), UT },
@@ -737,7 +732,7 @@ test("every known key is type-checked in every request, the first error met is r
             { "a bad name before an unknown query", M("name", E(5), "query", E("bogus")), UT },
             { "a duplicate before the query is judged", M("query", E("bogus"), "query", E("x")), DF("query") },
             -- The whole map is read before a missing name is noticed.
-            { "resolve, no name, a float later", M("query", E("resolve"), "zz", double(1)), US },
+            { "resolve, no name, a float later", M("query", E("resolve"), "zz", double(1)), MF("name") },
         })
     end)
 
@@ -752,13 +747,9 @@ test("anything after the top-level map in the payload is ignored",
         })
     end)
 
--- PEI-1347: resolvd fails the request with "malformed message: unsupported
--- value type" when an unknown key holds a float or an extension value;
--- PEI-1347 (widened): and with "unexpected value type" when it
--- holds a uint64 above i64::MAX. This test stops at the float; the uint64
--- refusal is shown by the `unknown-keys-skipped` test above.
+-- The landed PEI-1347 fix permits unknown scalar wire types.
 test("a receiver ignores keys it does not know, whatever they hold",
-    { spec = "PSPU *nri-native.unknown-keys-ignored", tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-native.unknown-keys-ignored", tags = { "pei-1347" } }, function(t)
         ready(t)
         expect_all(t, {
             { "a string", M("query", E("status"), "weight", E("heavy")), true },
@@ -882,9 +873,8 @@ test("a request whose length exceeds the ceiling is refused without reading its 
         t:assert(read < 4 + payload, "without reading the payload (resolvd read " .. read .. " bytes)")
     end)
 
--- PEI-1355: this is the documented current behaviour (the reply is not
--- checked against the ceiling, and libresolv clients refuse it); the test
--- passes on it.
+-- PEI-1355: oversized native replies become a bounded protocol error.
+-- PEI-1342 keeps this ceiling while moving writes into the poll loop.
 test("an oversized native TXT answer is replaced by a bounded reply too large error",
     { tags = { "pei-1355" }, spec = "resolvd *native-framing.reply-size-not-checked" }, function(t)
         ready(t)
