@@ -1,6 +1,7 @@
 -- netd §8.2 "Publishing it" — the notify half: the machine level sent as
--- `LEVEL=<level>` on the socket `NOTIFY_SOCKET` names, at the first
--- publish (before `READY=1`) and then on every change and only on a
+-- repeated `LEVEL=<level>` lines in one datagram on the socket
+-- `NOTIFY_SOCKET` names, at the first publish (before `READY=1`) and then
+-- on every change and only on a
 -- change. The log and registry halves are in readiness.test.lua.
 --
 -- Harness: the scripted gateway (helpers.gateway) and a whole Peios
@@ -26,13 +27,21 @@ peinit.claim(2)
 local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local sut = network.boot({ bridges = { lan }, gateway = gw,
+    files = network.test_binary("netd", {}) })
+
+local LEVELS = {
+    absent = "LEVEL=absent",
+    link = "LEVEL=link",
+    addressed = "LEVEL=link\nLEVEL=addressed",
+    routed = "LEVEL=link\nLEVEL=addressed\nLEVEL=routed",
+}
 
 local NOTIFY = "/run/pt-netd-notify.sock"
 
 local function list_text(l) return "[" .. table.concat(l or {}, ", ") .. "]" end
 
-test("LEVEL=<level> goes to NOTIFY_SOCKET at the first publish, before READY=1, and afterwards on each change and only then",
+test("the complete readiness set goes to NOTIFY_SOCKET at the first publish, before READY=1, and afterwards on each change and only then",
     { spec = "netd *readiness.publish-on-change" }, function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "the service bound")
         sut:run("svctl stop netd"):assert_ok()
@@ -58,9 +67,9 @@ test("LEVEL=<level> goes to NOTIFY_SOCKET at the first publish, before READY=1, 
             drain(1500)
             t:log("first datagrams: " .. list_text(got))
             t:assert(#got >= 3, "a level, READY=1, and the level after binding")
-            t:assert(got[1]:match("^LEVEL=%a+$") ~= nil, "the first datagram is a LEVEL= (sent before READY=1)")
+            t:assert(got[1]:match("^LEVEL="), "the first datagram publishes the set before READY=1")
             t:assert_eq(got[2], "READY=1", "READY=1 follows the first level")
-            t:assert_eq(got[#got], "LEVEL=routed", "the latest level is routed")
+            t:assert_eq(got[#got], LEVELS.routed, "the latest level is routed")
 
             -- Passes that change nothing send nothing.
             local n = #got
@@ -79,7 +88,7 @@ test("LEVEL=<level> goes to NOTIFY_SOCKET at the first publish, before READY=1, 
                 { iface = "eth0", timeout = 60 }), "bound again")
             drain(1500)
             t:log("all datagrams: " .. list_text(got))
-            t:assert_eq(got[#got], "LEVEL=routed", "routed again")
+            t:assert_eq(got[#got], LEVELS.routed, "routed again")
         end)
 
         proc:kill("term")
@@ -97,14 +106,16 @@ test("LEVEL=<level> goes to NOTIFY_SOCKET at the first publish, before READY=1, 
         for lvl in tostring(res.stderr):gmatch("machine readiness is (%a+)") do logged[#logged + 1] = lvl end
         local levels = {}
         for _, d in ipairs(got) do
-            local lvl = d:match("^LEVEL=(%a+)$")
-            if lvl then levels[#levels + 1] = lvl
+            local lvl = d:match("LEVEL=(%a+)$")
+            if lvl then
+                t:assert_eq(d, LEVELS[lvl], "complete readiness set, strongest last")
+                levels[#levels + 1] = lvl
             else t:assert_eq(d, "READY=1", "the only other datagram is READY=1") end
         end
         t:log("LEVEL= sent: " .. list_text(levels))
         t:log("levels logged: " .. list_text(logged))
         t:assert_eq(table.concat(levels, " "), table.concat(logged, " "),
-            "one LEVEL= for every 'machine readiness is' line, in the same order")
+            "one complete readiness-set datagram for every 'machine readiness is' line, in the same order")
         for k = 2, #levels do
             t:assert(levels[k] ~= levels[k - 1], "LEVEL=" .. levels[k] .. " sent twice in a row")
         end

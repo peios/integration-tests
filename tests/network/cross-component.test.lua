@@ -18,7 +18,7 @@
 -- Harness: the scripted gateway (helpers.gateway, helpers.dns) and a
 -- whole Peios (helpers.network). Nothing in the network configuration is
 -- the test's: `Profiles\default` and `Rules\Interface\wired` as shipped.
--- The only seed is five services that wait on netd's levels, each a
+-- The only seed is six services that wait on netd's levels, each a
 -- shell that stamps `<realtime ns> <pid>` into /run/<name>.started and
 -- execs a long sleep, so "started" is a stamp on the guest's clock and
 -- "still running" is the same pid alive. Three are boot-triggered
@@ -79,7 +79,7 @@ end
 -- them (a full run once lost every readiness line after the first).
 local sut = network.boot({
     bridges = { lan }, gateway = gw,
-    files = peinit.seed("zz-pt-cross", {
+    files = peinit.test_binary("peinit", network.test_binary("netd", peinit.seed("zz-pt-cross", {
         { path = [[Machine\System]] },
         { path = [[Machine\System\Services]] },
         resident("pt-x-link", "netd:link", true),
@@ -87,7 +87,8 @@ local sut = network.boot({
         resident("pt-x-routed", "network:routed", true),
         resident("pt-x-routed2", "netd:routed", false),
         resident("pt-x-addressed2", "netd:addressed", false),
-    }),
+        resident("pt-x-addressed3", "network:addressed", false),
+    }))),
 })
 
 -- ---------------------------------------------------------------------------
@@ -233,9 +234,9 @@ test("with the gateway silent, a dependent on netd:link starts, one on netd:addr
         t:log("readiness published so far: " .. list(readiness_lines(netd_log())))
     end)
 
-test("network:routed starts after the gateway's ACK and after netd logs routed; the addressed dependent keeps running, and a new start on netd:addressed is held because a level is exact",
+test("network:routed starts after the gateway's ACK and after netd logs routed; the addressed dependent keeps running, and a new start on netd:addressed also succeeds",
     { spec = "peinit *ready.only-the-level-itself-opens-a-hard-gate " ..
-             "peinit *ready.a-level-is-matched-exactly-and-never-implied " ..
+             "peinit *ready.a-level-matches-membership-in-the-published-set " ..
              "peinit *ready.a-level-dropping-after-the-start-does-nothing " ..
              "peinit *ready.a-level-dependency-waits-for-the-level-as-well-as-the-service " ..
              "netd *readiness.publish-on-change netd *readiness.machine-level netd *readiness.any-default-route-counts" },
@@ -276,17 +277,16 @@ test("network:routed starts after the gateway's ACK and after netd logs routed; 
         t:assert_eq(network.status(sut).level, "routed", "the machine is routed")
         t:assert_eq(network.get(sut, network.KEY, "Readiness"), "routed", "Readiness says so")
 
-        -- The level moved off `addressed` under a running dependent:
-        -- nothing happens to it.
+        -- Publishing the expanded set does not restart an existing dependent.
         t:assert(alive(addressed_pid), "pt-x-addressed is still the same running process")
         t:assert_eq(svc("pt-x-addressed").state, "active", "and still active")
 
-        -- `routed` does not satisfy `netd:addressed`: a new start on it
-        -- is held while the machine is routed.
+        -- The routed publisher includes addressed in its set.
         sut:run("svctl start pt-x-addressed2 --no-wait"):assert_ok()
         gw:serve({ timeout = 4 })
         t:assert_eq(network.status(sut).level, "routed", "still routed")
-        held(t, "pt-x-addressed2", "level routed")
+        local addressed2_ns = started(t, "pt-x-addressed2", "routed includes addressed", 30)
+        t:assert(addressed2_ns >= routed_line.ts, "the new addressed dependent starts on the routed set")
         t:assert(routed_pid and alive(routed_pid), "pt-x-routed is running")
     end)
 
@@ -439,31 +439,29 @@ test("pulling the cable drops the level to absent and stops nothing; a dependent
         local cut = now_ns()
         t:assert_eq(svc("netd").state, "active", "netd itself is active")
         sut:run("svctl start pt-x-routed2 --no-wait"):assert_ok()
+        sut:run("svctl start pt-x-addressed3 --no-wait"):assert_ok()
         gw:serve({ timeout = 4 })
         held(t, "pt-x-routed2", "level absent")
+        held(t, "pt-x-addressed3", "level absent")
 
         nic:reconnect()
         t:assert(network.serve_until(gw, sut, network.bound, { iface = "eth0", timeout = 60 }), "bound again")
         local ns = started(t, "pt-x-routed2", "routed again", 30)
+        local addressed_ns = started(t, "pt-x-addressed3", "routed set includes addressed again", 30)
         local log = netd_log()
         local again = first_line(log, "machine readiness is routed", cut)
         t:log("published since the pull: " .. list(readiness_lines(log)))
         t:assert(again, "netd published routed again after the pull")
+        t:assert(addressed_ns >= again.ts, "the addressed role dependent started after the routed set arrived")
         t:assert(ns >= again.ts, "pt-x-routed2 started after it (" .. ns .. " vs " .. again.ts .. ")")
         t:assert(alive(pids["pt-x-routed"]), "and the first routed dependent never restarted")
     end)
 
-test("netd publishes only the current level and peinit matches it exactly: on DHCP the level goes link to routed, so a netd:addressed dependent is held through routed",
+test("DHCP skips the addressed machine status but publishes addressed in the routed readiness set",
     { spec = "netd *readiness.peinit-matches-the-published-level" },
     function(t)
-        -- PEI-1384 (decided: netd publishes the set of levels that hold,
-        -- peinit matches membership). Asserted as it is today: peinit
-        -- matches a level exactly (peinit §7.5), and netd publishes only
-        -- the machine's current level, which on a DHCP network goes
-        -- link -> routed in one pass without ever being addressed. So
-        -- pt-x-addressed2, started while the machine was routed, has been
-        -- held through routed, absent and routed again. When PEI-1384 is
-        -- fixed this test and netd §8.2 change together.
+        -- The highest status can skip addressed. The notify set still
+        -- includes it, so the role dependent held during cable loss starts.
         local log = netd_log()
         local seq = readiness_lines(log)
         t:log("machine levels published this boot: " .. list(seq))
@@ -479,5 +477,5 @@ test("netd publishes only the current level and peinit matches it exactly: on DH
         end
         t:assert_eq(since[#since], "routed", "and ended at routed")
         t:assert_eq(network.status(sut).level, "routed", "the machine is routed, above addressed")
-        held(t, "pt-x-addressed2", "level routed, after the pull")
+        t:assert_eq(svc("pt-x-addressed3").state, "active", "addressed membership released the held role dependent")
     end)

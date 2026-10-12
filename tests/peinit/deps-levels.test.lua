@@ -68,7 +68,7 @@ local function wants(...) return { name = "Wants", type = "multi", data = { ... 
 local vm = peinit.boot({
     memory = "800M",
     name = "levels",
-    files = peinit.seed("zz-pt-levels", {
+    files = peinit.test_binary("peinit", peinit.seed("zz-pt-levels", {
         { path = [[Machine\System]] },
         { path = [[Machine\System\Services]] },
 
@@ -101,7 +101,7 @@ local vm = peinit.boot({
         -- A role nothing fills, which is a missing hard dependency
         -- named after what the definition wrote.
         oneshot("pt-lv-norole", { BOOT, requires("pt-no-such-role:" .. NO_SUCH_LEVEL) }),
-    }),
+    })),
 })
 
 local function status(name)
