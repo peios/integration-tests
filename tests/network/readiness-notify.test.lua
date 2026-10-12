@@ -21,6 +21,7 @@ local network = require("helpers.network")
 local unixsock = require("helpers.unixsock")
 local ntfe = require("helpers.ntfe")
 local sys = require("helpers.sys")
+local rtnl = require("helpers.rtnl")
 
 peinit.claim(2)
 
@@ -44,9 +45,15 @@ local function list_text(l) return "[" .. table.concat(l or {}, ", ") .. "]" end
 test("the complete readiness set goes to NOTIFY_SOCKET at the first publish, before READY=1, and afterwards on each change and only then",
     { spec = "netd *readiness.publish-on-change" }, function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "the service bound")
+        local index = network.iface(network.status(sut), "eth0").index
         sut:run("svctl stop netd"):assert_ok()
         wait_until(function() return network.netd_pid(sut) == nil end,
             { timeout = 15, interval = 0.25, desc = "the service stopped" })
+
+        -- This notification test needs a link -> routed transition. Start
+        -- without the installed address; startup.test.lua separately
+        -- verifies that a restart preserves it while INIT-REBOOT is pending.
+        t:assert(rtnl.del_address(sut, index, "10.77.0.50", { prefix = 24 }), "clear the fixture address")
 
         local fd = assert(unixsock.socket(sut, unixsock.AF_UNIX, unixsock.SOCK.DGRAM))
         local b = unixsock.bind(sut, fd, NOTIFY)

@@ -173,6 +173,16 @@ function M.add_address(who, index, addr, o)
     return ack(exchange(who, M.RTM.NEWADDR, M.NLM_F.ACK | M.NLM_F.CREATE | M.NLM_F.EXCL, body))
 end
 
+--- Remove an address as another program would. `o`: prefix (24 / 64).
+function M.del_address(who, index, addr, o)
+    o = o or {}
+    local v6 = addr:find(":", 1, true) ~= nil
+    local bytes = v6 and ntfe.ip6(addr) or ntfe.ip4(addr)
+    local body = string.pack("<I1I1I1I1i4", v6 and 10 or 2, o.prefix or (v6 and 64 or 24), 0, 0, index)
+        .. nla(2, bytes) .. nla(1, bytes)
+    return ack(exchange(who, M.RTM.DELADDR, M.NLM_F.ACK, body))
+end
+
 --- Add a route as another program would. `r`: dst ("10.9.0.0"), prefix,
 --- gateway, oif, metric, protocol (RTPROT.STATIC).
 function M.add_route(who, r)
