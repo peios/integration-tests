@@ -91,7 +91,7 @@ local function udp(name, rtype)
 end
 
 test("the attempt limit spans search candidates; a notfound answer does not spend it",
-    { spec = "resolvd *engine-servers.limit-is-per-candidate" }, function(t)
+    { spec = "resolvd *engine-servers.limit-is-per-question" }, function(t)
         setup(t)
         local out, elapsed = timed(t, "resolv query pc A")
         t:assert(out:find("\nunavailable", 1, true), "the question is unavailable")
