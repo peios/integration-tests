@@ -40,7 +40,13 @@ local function begin(t)
  return txn,captured
 end
 
-test('renewal requires this source session and a live transaction owner',function(t)
+test('renewal requires this source session and a live transaction owner',
+ { spec = {
+  'PKM *source.dispatch.lease-renewal-requires-a-live-owner-and-session',
+  'PKM *source.dispatch.context-preserves-the-original-request-deadline',
+  'PKM *lcs-abi.struct-reg-src-renew-args',
+  'PKM *lcs-abi.struct-reg-src-request-context-args',
+ } },function(t)
  t:assert(src.session>0,'negotiated session')
  t:assert_eq(renew(999999).errno,116,'unknown transaction is stale')
  local txn,id=begin(t)
@@ -143,7 +149,11 @@ test('an in-kernel read-only operation owns the same renewable lease',function(t
  sys.close(w,params.ret)
 end)
 
-test('source reconnect fences the previous session',function(t)
+test('source reconnect fences the previous session',
+ { spec = {
+  'PKM *source.dispatch.lifetime-extension-is-negotiated-before-registration',
+  'PKM *lcs-abi.struct-reg-src-negotiate-args',
+ } },function(t)
  local old=src.session
  src:disconnect()
  t:assert(src:resume({lifetime=true}),'source reconnects')
