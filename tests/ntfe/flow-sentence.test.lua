@@ -368,12 +368,12 @@ test("a sentence write zeroes the generation, writes the fields, and publishes t
 test("a torn sentence reads as absent and the flow is simply evaluated",
     { spec = "PKM *ntfe-flow.torn-sentence-reads-absent",
       covered_by = "kunit:pkm_kunit_ntfe",
-      skip = "a torn read needs a writer between the reader's two loads of the generation, " ..
-             "which no guest traffic can arrange; runs under " ..
-             "ntfe_kunit_sentence_concurrency, which exercises the generation-zero form " ..
-             "only (a slot with fields set and generation 0 is not applied, and the flow " ..
-             "is evaluated); a write landing between the reader's two loads needs a " ..
-             "second CPU at a precise instant and is covered by no test" },
+      skip = "guest traffic cannot schedule a writer between individual field reads; " ..
+             "ntfe_kunit_sentence_same_generation_refresh deterministically publishes " ..
+             "a replacement between expiry and verdict reads in both slots, and " ..
+             "ntfe_kunit_sentence_write_in_progress checks that an active writer " ..
+             "causes an immediate miss without blocking the other slot; " ..
+             "ntfe_kunit_sentence_concurrency covers empty-slot re-evaluation" },
     function(t) end)
 
 test("two packets of a new flow racing on two CPUs may both evaluate; the second write wins",
