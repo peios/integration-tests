@@ -1,8 +1,8 @@
 -- netd §9.1 — the control socket and its object: the socket's path, modes
 -- and descriptor, the control object's compiled default, how a written
 -- `ControlSecurity` replaces it, the rights and their generic mapping,
--- the real access check against the peer's token, and the one-at-a-time
--- service that lets an idle peer hold netd's loop (PEI-1329).
+-- the real access check against the peer's token, and nonblocking client
+-- I/O that keeps idle peers out of netd's way (PEI-1329).
 --
 -- Harness: the scripted gateway (helpers.gateway) and a whole Peios
 -- (helpers.network). The agent is SYSTEM; every other caller is a token
@@ -11,9 +11,8 @@
 -- connection (KACS_SO_PEER_TOKEN, captured at connect) is that token.
 --
 -- Own VMs: the descriptor tests rewrite `Machine\System\Network
--- ControlSecurity`, which is machine-wide, and the last test stalls
--- netd's loop on purpose. Every test puts back what it wrote; the stall
--- test is last because it also holds up DHCP for several seconds.
+-- ControlSecurity`, which is machine-wide. Every test puts back what it
+-- wrote; idle-client tests use only a few local connections.
 --
 -- Non-obvious: ControlSecurity is a REG_BINARY written with `reg set …
 -- hex:`; netd rebuilds the object on the registry watch event, so each
@@ -36,7 +35,14 @@ peinit.claim(2)
 local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("NETD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/netd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local NETWORK_QUERY, NETWORK_CONTROL, NETWORK_ALL_ACCESS = 0x1, 0x2, 0x000F0003
 local GENERIC_READ, GENERIC_WRITE = 0x80000000, 0x40000000
@@ -280,43 +286,37 @@ local function mono()
     return s + ns / 1e9
 end
 
--- PEI-1329: this is the documented current behaviour (one connection at a
--- time, 2 s timeouts, an idle peer holds the loop). The test passes on it.
-test("connections are served one after another with a 2 s read timeout, so idle peers hold netd's loop 2 s each (PEI-1329)",
-    { spec = "netd *control.serial-and-blocking" }, function(t)
+test("idle and partial control clients do not delay another request and expire independently (PEI-1329)",
+    { spec = "netd *control.serial-and-blocking", tags = { "pei-1329" } }, function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "netd bound")
-        -- Baseline: an answer with nobody in the way is quick.
-        local t0 = mono()
-        t:assert(allowed(ask(sut, "status")), "status answers")
-        local quick = mono() - t0
-        t:log(string.format("unobstructed status: %.3f s", quick))
-        t:assert(quick < 1.0, "an unobstructed request is answered well inside a second")
-
-        for _, n in ipairs({ 1, 3 }) do
-            local idle = {}
-            local start = mono()
-            for k = 1, n do
+        local idle = {}
+        local ok, err = pcall(function()
+            for k = 1, 3 do
                 local fd = assert(unixsock.socket(sut, unixsock.AF_UNIX, unixsock.SOCK.STREAM))
-                local c = unixsock.connect(sut, fd, network.CONTROL)
-                t:assert_eq(c.ret, 0, "idle peer " .. k .. " connects")
-                idle[k] = fd
+                idle[#idle + 1] = fd
+                t:assert_eq(unixsock.connect(sut, fd, network.CONTROL).ret, 0, "idle peer connects")
+                if k == 2 then
+                    t:assert_eq(ntfe.send(sut, fd, string.char(12, 0)).ret, 2, "partial header")
+                elseif k == 3 then
+                    local prefix = string.pack("<I4", 12) .. string.char(0x81)
+                    t:assert_eq(ntfe.send(sut, fd, prefix).ret, #prefix, "partial body")
+                end
             end
-            local r, err = network.call(sut, { query = "status" }, { timeout_ms = 20000 })
+            local start = mono()
+            local r, why = network.call(sut, { query = "status" }, { timeout_ms = 10000 })
             local took = mono() - start
-            t:log(string.format("%d idle peer(s): status answered after %.2f s (%s)", n, took,
-                tostring(r and r.ok or err)))
-            t:assert(r and r.ok, "status is answered in the end")
-            t:assert(took >= 2 * n - 0.3, string.format("%d idle peer(s) held netd ~%d s (took %.2f)", n, 2 * n, took))
-            t:assert(took < 2 * n + 3, string.format("and not much longer (took %.2f)", took))
-            -- Each idle peer was timed out and told so, then closed.
-            for k, fd in ipairs(idle) do
-                local head = ntfe.recv(sut, fd, 1000, 4)
-                local body = head and #head == 4 and ntfe.recv(sut, fd, 1000, string.unpack("<I4", head))
-                local reply = body and msgpack.decode(body)
-                t:log(string.format("idle peer %d got: ok=%s error=%s", k, tostring(reply and reply.ok),
-                    tostring(reply and reply.error)))
-                t:assert(reply and reply.ok == false, "idle peer " .. k .. " got an error reply")
-                sys.close(sut, fd)
+            t:log(string.format("status behind three idle/partial peers: %.3f s (%s)", took, tostring(why)))
+            t:assert(r and r.ok, "status answers")
+            t:assert(took < 1.0, "status does not wait for the idle deadlines")
+            -- Fixed deadlines close stalled connections without queuing a
+            -- timeout reply that could itself wait on a non-reading peer.
+            gw:serve({ timeout = 2.2 })
+            for _, fd in ipairs(idle) do
+                local bytes = ntfe.recv(sut, fd, 1000, 1)
+                t:assert(bytes == "", "idle connection expired and closed")
             end
-        end
+            t:assert(allowed(ask(sut, "status")), "normal requests still work after expiry")
+        end)
+        for _, fd in ipairs(idle) do sys.close(sut, fd) end
+        if not ok then error(err, 0) end
     end)

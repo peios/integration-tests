@@ -30,7 +30,14 @@ peinit.claim(2)
 local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+local binary = os.getenv("NETD_TEST_BINARY")
+if binary then
+    local f = assert(io.open(binary, "rb"))
+    files["usr/sbin/netd"] = { f:read("*a"), exec = true }
+    f:close()
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 -- ---------------------------------------------------------------------------
 -- Local instruments
@@ -107,10 +114,8 @@ test("netd is one thread blocked in one poll(2)",
             sut:run("sleep 0.2")
         end
         t:assert(idle >= 4, "netd waits in poll(2): " .. idle .. " of 5 samples")
-        -- One thread means a handler that blocks holds everything: a
-        -- connection that sends nothing keeps netd in its read for up to
-        -- 2 s (PEI-1329, the documented current behaviour), and a second
-        -- client waits for it.
+        -- A silent client remains in the poll set without holding the
+        -- one thread in a blocking read.
         local fd = assert(unixsock.socket(sut, unixsock.AF_UNIX, unixsock.SOCK.STREAM))
         local r = unixsock.connect(sut, fd, network.CONTROL)
         t:assert_eq(r.ret, 0, "connected without sending")
@@ -118,12 +123,7 @@ test("netd is one thread blocked in one poll(2)",
         sys.close(sut, fd)
         local ms = tonumber(m.stdout:match("%d+"))
         t:log("net status took " .. tostring(ms) .. " ms behind a silent connection")
-        t:assert(ms and ms >= 1000, "the second client waited for the first's handler")
-        -- Unblocked, the same request is quick.
-        local q = sut:run("s=$(date +%s%N); net status >/dev/null; e=$(date +%s%N); echo $(( (e - s) / 1000000 ))")
-        local quick = tonumber(q.stdout:match("%d+"))
-        t:log("and " .. tostring(quick) .. " ms on its own")
-        t:assert(quick and quick < ms - 500, "alone it does not wait")
+        t:assert(ms and ms < 1000, "the second client does not wait for the idle client")
     end)
 
 -- ---------------------------------------------------------------------------
