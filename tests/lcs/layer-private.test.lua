@@ -29,6 +29,7 @@ src:seed_layer("midp", { precedence = 3, enabled = false })
 src:seed_layer("top", { precedence = 5 })
 src:seed_layer("hip", { precedence = 9, enabled = false })
 src:seed_layer("ROLEs", { enabled = false })
+src:seed_layer("promote", { enabled = false })
 
 src:value(key, "P", SZ, lcs.sz("base"))
 src:value(key, "P", SZ, lcs.sz("priv"), { layer = "priv" })     -- later: higher sequence
@@ -38,6 +39,7 @@ src:value(key, "R", SZ, lcs.sz("top"), { layer = "top" })
 src:value(key, "R", SZ, lcs.sz("hip"), { layer = "hip" })
 src:value(key, "Fold", SZ, lcs.sz("base"))
 src:value(key, "Fold", SZ, lcs.sz("folded"), { layer = "ROLEs" })
+src:value(key, "Promote", SZ, lcs.sz("private"), { layer = "promote" })
 src:value(scoped, "S", SZ, lcs.sz("base"))
 src:value(scoped, "S", SZ, lcs.sz("priv"), { layer = "priv" })
 assert(src:register())
@@ -343,26 +345,26 @@ test("KACS matches the private layer names it parses by the same folding LCS res
         end)
     end)
 
-test("nothing on the attachment path looks up a layer's precedence or tests a privilege",
-    { spec = "PKM *layer.private.no-precedence-or-privilege-check-on-attachment" },
+test("a trusted creator can delegate a high-precedence layer to a token with no privileges",
+    { spec = "PKM *layer.private.tcb-authorized-attachment-can-be-delegated" },
     function(t)
-        -- A token with no privileges at all, attaching a disabled layer
-        -- at Group Policy precedence.
+        -- SYSTEM creates this token: authority belongs to the attachment,
+        -- not to the resulting consumer, which carries no privileges.
         token.as_principal(t, vm, creds({ "hip" }, {},
             { privs_present = 0, privs_enabled = 0 }), function(w)
             local r = lcs.open_key(src, w, -1, TEST_PATH, lcs.RIGHT.KEY_READ)
             t:assert(r.ret >= 0, "the key opens: " .. sys.errname(r.errno or 0))
             local q = lcs.query_value(src, w, r.ret, "R")
             t:assert_eq(q.layer, "hip",
-                "an unprivileged process sees a precedence-9 layer it attached to itself")
+                "an unprivileged process sees a precedence-9 layer delegated by SYSTEM")
             sys.close(w, r.ret)
         end)
-        -- And KACS never consults the layer table: a name that is not a
-        -- layer at all is accepted just the same.
+        -- Names need not exist yet; any later activation is constrained
+        -- by the retained attachment authority.
         token.as_principal(t, vm, creds({ "not-a-layer-anywhere" }), function(w)
             local r = lcs.open_key(src, w, -1, TEST_PATH, lcs.RIGHT.KEY_READ)
             t:assert(r.ret >= 0,
-                "there is no precedence lookup on the attachment path: " ..
+                "a future layer name can be attached: " ..
                 sys.errname(r.errno or 0))
             sys.close(w, r.ret)
         end)
@@ -380,3 +382,109 @@ test("what does gate attachment is SeCreateTokenPrivilege",
                 "for scope GUIDs")
         end)
     end)
+
+
+-- PEI-268: authority is checked on the creator and retained across later
+-- metadata changes and token derivation. The creator's logon session already
+-- exists before dropping TCB, since creating one itself requires TCB.
+local CREATE = token.bit(token.PRIV.CREATE_TOKEN)
+local ASSIGN = token.bit(token.PRIV.ASSIGN_PRIMARY_TOKEN)
+local TCB = token.bit(token.PRIV.TCB)
+local function creator(t, enabled_tcb, present_tcb, fn)
+    local common = CREATE | ASSIGN
+    token.as_principal(t, vm, {
+        privs_present = common | (present_tcb and TCB or 0),
+        privs_enabled = common | (enabled_tcb and TCB or 0),
+    }, fn)
+end
+local function child(w, sid, names, privileges)
+    return token.create(w, creds(names, {}, {
+        auth_id = sid, privs_present = privileges or 0, privs_enabled = privileges or 0,
+    }))
+end
+
+test("a creator without enabled TCB cannot attach a known high-precedence layer", function(t)
+    for _, present in ipairs({false, true}) do
+        creator(t, false, present, function(w, sid)
+            for _, name in ipairs({"hip", "HiP", "top"}) do
+                local fd, e = child(w, sid, {name})
+                t:assert(not fd, "high precedence is refused at creation")
+                t:assert_eq(e, sys.E.PERM, "missing or disabled TCB")
+            end
+            local fd, e = child(w, sid, {"hip"}, TCB)
+            t:assert(not fd, "privileges requested for the child cannot authorize its creator")
+            t:assert_eq(e, sys.E.PERM)
+        end)
+    end
+end)
+
+test("a creator without TCB can attach precedence-zero and future layer names", function(t)
+    creator(t, false, false, function(w, sid)
+        local fd = assert(child(w, sid, {"priv", "future-zero"}))
+        t:assert_eq(token.install(w, fd).ret, 0)
+        local keyfd = lcs.open_key(src, w, -1, TEST_PATH, lcs.RIGHT.KEY_READ)
+        t:assert(keyfd.ret >= 0, "ordinary private view opens")
+        t:assert_eq(lcs.query_value(src, w, keyfd.ret, "P").layer, "priv")
+        sys.close(w, keyfd.ret); sys.close(w, fd)
+    end)
+end)
+
+test("later promotion cannot upgrade an attachment made without TCB", function(t)
+    local admin = vm:spawn_worker()
+    local metadata = lcs.open_key(src, admin, -1, lcs.LAYERS_PATH .. "\\promote", lcs.KEY_ALL_ACCESS)
+    t:assert(metadata.ret >= 0)
+    creator(t, false, false, function(w, sid)
+        local fd = assert(child(w, sid, {"promote"}))
+        t:assert_eq(token.install(w, fd).ret, 0)
+        local k = lcs.open_key(src, w, -1, TEST_PATH, lcs.RIGHT.KEY_READ)
+        t:assert(k.ret >= 0)
+        t:assert_eq(lcs.query_value(src, w, k.ret, "Promote").layer, "promote")
+        t:assert_eq(lcs.set_value(src, admin, metadata.ret, "Precedence", lcs.TYPE.DWORD, lcs.dword(9)).ret, 0)
+        t:assert_eq(lcs.query_value(src, w, k.ret, "Promote").errno, sys.E.PERM,
+            "an already-open key cannot bypass attachment authority")
+        t:assert_eq(lcs.open_key(src, w, -1, TEST_PATH, lcs.RIGHT.KEY_READ).errno, sys.E.PERM)
+        t:assert_eq(lcs.set_value(src, admin, metadata.ret, "Precedence", lcs.TYPE.DWORD, lcs.dword(0)).ret, 0)
+        t:assert_eq(lcs.query_value(src, w, k.ret, "Promote").layer, "promote",
+            "the original precedence-zero authority remains usable")
+        sys.close(w, k.ret); sys.close(w, fd)
+    end)
+    sys.close(admin, metadata.ret); admin:kill(); admin:join()
+end)
+
+test("a future layer cannot appear above the authority of an existing attachment", function(t)
+    local admin = vm:spawn_worker()
+    creator(t, false, false, function(w, sid)
+        local fd = assert(child(w, sid, {"later-policy"}))
+        t:assert_eq(token.install(w, fd).ret, 0)
+        local k = lcs.open_key(src, w, -1, TEST_PATH, lcs.RIGHT.KEY_READ)
+        t:assert(k.ret >= 0); sys.close(w, k.ret)
+        local layer = assert(lcs.create_layer(src, admin, "later-policy", {precedence=7, enabled=false}))
+        t:assert_eq(lcs.open_key(src, w, -1, TEST_PATH, lcs.RIGHT.KEY_READ).errno, sys.E.PERM)
+        sys.close(admin, layer); sys.close(w, fd)
+    end)
+    admin:kill(); admin:join()
+end)
+
+test("TCB attachment authority survives duplicate and restricted token derivation", function(t)
+    for _, derive in ipairs({token.duplicate, token.restrict}) do
+        local w = vm:spawn_worker()
+        local original = assert(token.mint(w, creds({"hip"}, {}, {privs_present=0, privs_enabled=0})))
+        local derived = assert(derive(w, original, {}))
+        t:assert_eq(token.install(w, derived).ret, 0)
+        local k = lcs.open_key(src, w, -1, TEST_PATH, lcs.RIGHT.KEY_READ)
+        t:assert(k.ret >= 0)
+        t:assert_eq(lcs.query_value(src, w, k.ret, "R").layer, "hip")
+        sys.close(w, k.ret); w:kill(); w:join()
+    end
+end)
+
+test("authorizing a private attachment marks the creator's TCB privilege used", function(t)
+    creator(t, true, true, function(w, sid)
+        local self = assert(token.open_self(w, token.RIGHT.QUERY))
+        local before = assert(token.privileges(w, self))
+        t:assert_eq(before.used & TCB, 0)
+        local fd = assert(child(w, sid, {"hip"}))
+        t:assert((assert(token.privileges(w, self)).used & TCB) ~= 0)
+        sys.close(w, fd); sys.close(w, self)
+    end)
+end)
