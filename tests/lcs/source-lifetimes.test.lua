@@ -149,6 +149,36 @@ test('an in-kernel read-only operation owns the same renewable lease',function(t
  sys.close(w,params.ret)
 end)
 
+test('cleanup lease expiry does not discard a late successful commit',
+ { spec = 'PKM *source.dispatch.lease-expiry-does-not-infer-a-commit-outcome' },function(t)
+ local before=lcs.query_key_info(src,vm,querykey.ret).hive_generation
+ t:assert_eq(lcs.notify(nil,vm,querykey.ret,lcs.NOTIFY.ALL,false).ret,0,'arm watch')
+ local txn,id=begin(t)
+ src:intercept(lcs.OP.COMMIT_TXN,function() return lcs.HOLD end)
+ local pending=lcs.commit_async(w,txn)
+ src:pump(100)
+ src:intercept(lcs.OP.COMMIT_TXN,nil)
+ local held=src:held_ids()
+ t:assert_eq(#held,1,'commit admitted by source')
+ t:assert_eq(pending:await().errno,110,'caller times out without a commit outcome')
+ sys.nanosleep(vm,5,200000000)
+ t:assert_eq(renew(id).errno,116,'cleanup lease is terminal')
+ t:assert(src:release(held[1],lcs.STATUS.OK,'')>0,'late actual commit result accepted')
+ src:pump(100)
+ local poll=vm:syscall(sys.NR.poll,{args={0,1,100},
+  bufs={string.pack('<i4i2i2',querykey.ret,1,0)},ptrs={0}})
+ t:assert(poll.ret>0,'actual successful commit publishes its retained watch effects')
+ local events=lcs.read_events(nil,vm,querykey.ret)
+ local found=false
+ for _,event in ipairs(events.events or {}) do
+  if event.type==lcs.WATCH.VALUE_SET and event.name=='V' then found=true end
+ end
+ t:assert(found,'the committed value publishes a watch event')
+ local after=lcs.query_key_info(src,vm,querykey.ret).hive_generation
+ t:assert(before and after and after>before,'actual success advances hive generation')
+ sys.close(w,txn);src:pump()
+end)
+
 test('source reconnect fences the previous session',
  { spec = {
   'PKM *source.dispatch.lifetime-extension-is-negotiated-before-registration',
