@@ -12,10 +12,9 @@
 -- sampling needs none of resolvd's) are the in-flight count: one socket
 -- per transaction above the resting count.
 --
--- As shipped, resolvd's descriptor limit is 1 024 soft and 4 096 hard
--- (it sets no LimitNOFILE), below the ceiling, so the first test floods
--- the shipped daemon. The rest first raise its limit with prlimit64 from
--- the agent, so that the ceiling, not EMFILE, is what binds.
+-- The shipped service reserves descriptor headroom (PEI-1344). Candidate
+-- binary/service overlays let this run against an older cached image.
+-- Later ceiling tests explicitly set a 16 384 limit with prlimit64.
 --
 -- The time service is stopped first, so its background lookups do not
 -- share the counts.
@@ -42,7 +41,16 @@ dns.serve(gw, {
         if qn and qn.name:lower():match("%.fl%.test$") then return false end
     end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = {}
+for env, path in pairs({ RESOLVD_TEST_BINARY = "usr/sbin/resolvd", RESOLVD_TEST_SERVICE = "tmp/resolvd-service.reg" }) do
+    local source = os.getenv(env)
+    if source then
+        local f = assert(io.open(source, "rb"))
+        files[path] = { f:read("*a"), exec = env == "RESOLVD_TEST_BINARY" }
+        f:close()
+    end
+end
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local function rstatus()
     local s, err = network.call(sut, { query = "status" }, { path = SOCK })
@@ -52,8 +60,9 @@ end
 
 local pid
 local function fds()
-    local r = sut:run("ls /proc/" .. pid .. "/fd | wc -l")
-    return tonumber(r.stdout:match("%d+"))
+    -- The agent reads the directory directly. A shell `ls | wc -l` can
+    -- silently report zero when ls cannot inspect another process's fds.
+    return #sut:listdir("/proc/" .. pid .. "/fd")
 end
 
 --- Start a flood of `n` distinct stub questions `<tag><i>.fl.test` A,
@@ -94,8 +103,16 @@ end
 local rest   -- resolvd's descriptors at rest
 
 test("as shipped, 1 500 outstanding transactions fit under the 4 096 in-flight bound",
-    { spec = "PSPU *nri-limits.upstream-in-flight", tags = { "known-bug" } }, function(t)
+    { spec = "PSPU *nri-limits.upstream-in-flight", tags = { "pei-1344-capacity" } }, function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "netd bound a lease")
+        if os.getenv("RESOLVD_TEST_SERVICE") then
+            network.reg(sut, { "apply", "/tmp/resolvd-service.reg" }):assert_ok()
+            sut:run("svctl stop resolvd"):assert_ok()
+            wait_until(function() return peinit.pid_of_comm(sut, "resolvd") == nil end,
+                { timeout = 20, interval = 0.1, desc = "resolvd stopped" })
+            sut:run("rm -rf /run/resolvd"):assert_ok()
+            sut:run("svctl start resolvd"):assert_ok()
+        end
         t:assert(gw:serve({ timeout = 20, until_ = function()
             local s = rstatus().scopes or {}
             return s[1] ~= nil and (s[1].servers or {})[1] == "10.77.0.1"
@@ -121,10 +138,7 @@ test("as shipped, 1 500 outstanding transactions fit under the 4 096 in-flight b
         t:log(string.format("queries +%d, sent +%d, failed +%d, refused +%d; a warning: %s; demoted now: %s",
             c1.queries - c0.queries, c1.upstream_sent - c0.upstream_sent, c1.upstream_failed - c0.upstream_failed,
             c1.refused - c0.refused, tostring(emfile), table.concat(rstatus().scopes[1].demoted or {}, ",")))
-        -- PEI-1344: resolvd sets no LimitNOFILE, so at ~1 024 descriptors
-        -- every new transaction fails with EMFILE ("Too many open files"),
-        -- failing its attempts at once and demoting a healthy server; the
-        -- held count never gets near 1 500, let alone 4 096.
+        -- Descriptor headroom must let the advertised engine capacity bind first.
         t:assert(max - rest >= 1500, string.format("1 500 transactions held at once (held %d)", max - rest))
     end)
 
