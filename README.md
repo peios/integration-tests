@@ -92,6 +92,19 @@ registry seeds", which is exactly what a testset is. Per-testset *editions*
 are not needed — a spec's `[[package]]` and `[registry]` keys tune a shared
 base, so `peios-testbase` is the only new edition package.
 
+## Datagram fixture inputs
+
+`helpers.eventd.send_log` and `send_metric` require the entire datagram to
+be sent. They close the temporary socket before reporting a send failure,
+with its destination, byte counts and errno. A failed fixture send must not
+look like an eventd ingestion timeout or rejection.
+
+For an intentional negative syscall probe, pass `{ allow_error = true }`
+and assert the returned `ret`/`errno` yourself. Malformed protocol data that
+eventd must receive and reject still uses the checked default. These helpers
+do not raise the socket's send buffer; tests of large accepted datagrams must
+configure a sender with enough capacity explicitly.
+
 ## Citing what a test verifies
 
 Every test names the documented statement it verifies, so a change to

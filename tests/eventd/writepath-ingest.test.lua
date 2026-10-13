@@ -219,7 +219,8 @@ test("a service cannot reach the log socket, even as SYSTEM, while peinit's own 
         { user_sid = SY, groups = groups_of({ EVERYONE, AU, BA, SERVICE }) },
     }) do
         token.as_principal(t, vm, spec, function(w)
-            local r = eventd.send_log(w, { origin = origin, is_error = false, message = "forged" })
+            local r = eventd.send_log(w, { origin = origin, is_error = false, message = "forged" },
+                { allow_error = true })
             t:assert_eq(r.errno, sys.E.ACCES, token.sid_string(spec.user_sid)
                 .. " with the Service logon group is refused at sendto")
         end)

@@ -551,7 +551,7 @@ function M.emit(who, event_type, payload)
     return kmes.emit(who, event_type, bytes)
 end
 
-local function send(who, path, bytes, pass_token)
+local function send(who, path, bytes, pass_token, allow_error)
     local fd, errno = unixsock.socket(who, unixsock.AF_UNIX, unixsock.SOCK.DGRAM)
     assert(fd, "socket: " .. tostring(errno))
     if pass_token then
@@ -560,6 +560,8 @@ local function send(who, path, bytes, pass_token)
     end
     local r = unixsock.sendto(who, fd, bytes, path)
     who:syscall(3, fd) -- close
+    assert(allow_error or r.ret == #bytes, string.format(
+        "sendto %s: sent %s/%d bytes; errno %s", path, tostring(r.ret), #bytes, tostring(r.errno)))
     return r
 end
 
@@ -569,10 +571,13 @@ end
 --- No token is attached: the log channel's only producer is peinit, and
 --- the socket's descriptor is its whole access control (§7.1).
 --- `opts.path` overrides the socket, `opts.pass_token` attaches one.
+--- Requires the whole datagram to be sent; failure reports the path, byte
+--- counts and errno after closing the temporary socket. Negative syscall
+--- tests may pass `opts.allow_error = true` and must check the returned result.
 function M.send_log(who, record, opts)
     opts = opts or {}
     local bytes = record.raw or M.msgpack(record)
-    return send(who, opts.path or M.SOCKET.log, bytes, opts.pass_token)
+    return send(who, opts.path or M.SOCKET.log, bytes, opts.pass_token, opts.allow_error)
 end
 
 --- Send one metric datagram; as `send_log`, except that the sender's
@@ -586,7 +591,7 @@ function M.send_metric(who, record, opts)
     local bytes = record.raw or M.msgpack(record)
     local pass = opts.pass_token
     if pass == nil then pass = true end
-    return send(who, opts.path or M.SOCKET.metric, bytes, pass)
+    return send(who, opts.path or M.SOCKET.metric, bytes, pass, opts.allow_error)
 end
 
 --- A process-unique marker, for telling this test's records from

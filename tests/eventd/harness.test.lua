@@ -78,6 +78,45 @@ test("a metric datagram sent to the metric socket comes back through evctl", {},
     t:assert_eq(rows[1].value, 42, "the sample round-tripped: " .. json.encode(rows[1]))
 end)
 
+-- PEI-1336 item 7 / PEI-1452: fixture sends must not hide syscall failures
+-- behind an unrelated eventd timeout or an apparent daemon-side rejection.
+for _, channel in ipairs({ "log", "metric" }) do
+    test(channel .. " helper reports send failures and supports explicit negative probes", {
+        tags = { "datagram-helper" },
+    }, function(t)
+        local send = eventd["send_" .. channel]
+        local missing = "/run/eventd/" .. eventd.marker("missing") .. ".sock"
+        local bytes = "fixture"
+        local ok, err = pcall(send, vm, { raw = bytes }, { path = missing })
+        t:assert(not ok, "an absent socket must fail immediately")
+        local message = tostring(err)
+        t:assert(message:find(missing, 1, true), "error names the destination: " .. message)
+        t:assert(message:find("/" .. #bytes .. " bytes", 1, true), "error names the size: " .. message)
+        t:assert(message:find("errno " .. sys.E.NOENT, 1, true), "error names ENOENT: " .. message)
+        local r = send(vm, { raw = bytes }, { path = missing, allow_error = true })
+        t:assert_eq(r.errno, sys.E.NOENT, "an explicit negative probe retains the syscall result")
+    end)
+end
+
+test("both datagram helpers surface EMSGSIZE instead of silently losing fixture input", {
+    tags = { "datagram-helper" },
+}, function(t)
+    -- Deliberately beyond a fresh Unix datagram socket's send capacity.
+    -- No producer buffer policy is changed by these test helpers.
+    local bytes = string.rep("x", 1024 * 1024)
+    for _, channel in ipairs({ "log", "metric" }) do
+        local send = eventd["send_" .. channel]
+        local raw = send(vm, { raw = bytes }, { allow_error = true })
+        t:assert_eq(raw.errno, 90, "the guest refuses the oversized " .. channel .. " datagram with EMSGSIZE")
+        local ok, err = pcall(send, vm, { raw = bytes })
+        t:assert(not ok, channel .. " send must fail immediately")
+        local message = tostring(err)
+        t:assert(message:find(eventd.SOCKET[channel], 1, true), message)
+        t:assert(message:find("/" .. #bytes .. " bytes", 1, true), message)
+        t:assert(message:find("errno 90", 1, true), message)
+    end
+end)
+
 test("the host-side sqlite copy reads a store's schema", {}, function(t)
     local schema = eventd.schema(vm, eventd.DB.logs)
     t:assert(schema.logs, "logs.db has a logs table; objects: " .. json.encode(schema))

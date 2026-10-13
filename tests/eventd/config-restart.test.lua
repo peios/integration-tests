@@ -200,7 +200,8 @@ test("LogSocketPath is where eventd takes log datagrams", {
     t:assert(r.ret and r.ret > 0, "the datagram was accepted at LogSocketPath")
     eventd.wait_rows(vm, "LOGS FROM " .. origin .. " SINCE 10m ago", function(rs) return #rs == 1 end,
         { socket = ALT.query })
-    local old = eventd.send_log(vm, { origin = origin, is_error = false, message = "x" })
+    local old = eventd.send_log(vm, { origin = origin, is_error = false, message = "x" },
+        { allow_error = true })
     t:assert(not old.ret or old.ret < 0, "and nothing takes one at the standard path")
 end)
 
@@ -212,7 +213,8 @@ test("MetricSocketPath is where eventd takes metric datagrams", {
     t:assert(r.ret and r.ret > 0, "the datagram was accepted at MetricSocketPath")
     eventd.wait_rows(vm, "METRIC " .. name .. " SINCE 10m ago", function(rs) return #rs == 1 end,
         { socket = ALT.query })
-    local old = eventd.send_metric(vm, { name = name, type = "gauge", value = 2 })
+    local old = eventd.send_metric(vm, { name = name, type = "gauge", value = 2 },
+        { allow_error = true })
     t:assert(not old.ret or old.ret < 0, "and nothing takes one at the standard path")
 end)
 
