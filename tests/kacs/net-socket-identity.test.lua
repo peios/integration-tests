@@ -26,6 +26,16 @@ local CLONE_NEWNET = 0x40000000
 local NR_unshare = 272
 local OWNER_PROGRAM, OWNER_KERNEL = 1, 2
 
+test("final socket cleanup releases its references from an RCU callback",
+    { spec = "PKM *net.socket.final-release-rcu-safe",
+      covered_by = "kunit:pkm_kunit_misc",
+      skip = "pkm_kunit_socket_final_release_from_rcu exercises the live " ..
+             "register in task context, then releases six owned token " ..
+             "references and a descriptor pin via call_rcu; it checks " ..
+             "cleared fields, the retained descriptor reference and active " ..
+             "lockdep under CONFIG_PROVE_LOCKING" },
+    function(t) end)
+
 --- Run `fn` with the socket-identity tracepoint enabled and return the
 --- `reason=owner` lines it produced.
 local function stamps(t, fn)
