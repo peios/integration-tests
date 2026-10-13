@@ -16,6 +16,12 @@
 -- is executable" flag and its absence is exactly the failure wanted.
 
 local peinit = require("helpers.peinit")
+
+local function boot_to_recovery(t, opts)
+    opts.files = peinit.test_binary("peinit", opts.files)
+    return peinit.boot_to_recovery(t, opts)
+end
+
 peinit.claim(1)
 
 local function occurrences(haystack, needle)
@@ -36,7 +42,7 @@ test("recovery respawns the shell when it exits",
         -- replaced rather than leaving the machine with nothing on the
         -- console. This shell exits deliberately, once a second, and the
         -- count of its greetings is the count of sessions peinit started.
-        local console = peinit.boot_to_recovery(t, {
+        local console = boot_to_recovery(t, {
             name = "recovery-respawn",
             agent_timeout = 20,
             append = "peios.recovery=1",
@@ -84,7 +90,7 @@ test("a registryd that will not start still gets the administrator a shell",
             "sleep 3600",
             "",
         }, "\n")
-        local console = peinit.boot_to_recovery(t, {
+        local console = boot_to_recovery(t, {
             name = "recovery-no-registryd",
             agent_timeout = 25,
             files = peinit.merge(
@@ -125,7 +131,7 @@ test("with neither shell executable peinit halts rather than exiting",
         -- end in the same three actions, which are what §2.8 states and
         -- what is asserted here — the reason on the console, and a stopped
         -- machine. The sync between them is a syscall and leaves no trace.
-        local console = peinit.boot_to_recovery(t, {
+        local console = boot_to_recovery(t, {
             name = "recovery-no-shell",
             agent_timeout = 20,
             append = "peios.recovery=1",

@@ -15,6 +15,12 @@
 -- console.
 
 local peinit = require("helpers.peinit")
+
+local function boot(opts)
+    opts.files = peinit.test_binary("peinit", opts.files)
+    return peinit.boot(opts)
+end
+
 peinit.claim(1)
 
 local SERVICES = {
@@ -53,7 +59,7 @@ local SERVICES = {
     } },
 }
 
-local vm = peinit.boot({ name = "child", files = peinit.seed("pt-child", SERVICES) })
+local vm = boot({ name = "child", files = peinit.seed("pt-child", SERVICES) })
 
 --- The main process of a service, once it has one.
 local function main_pid(service)
