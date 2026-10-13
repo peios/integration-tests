@@ -479,7 +479,7 @@ test("each successful reply carries ok true and its kind — answer, addresses, 
         t:assert_eq(m.ok, true, "flush: ok is true")
     end)
 
-test("a reply is framed the same way, written, and the connection closed; a write that fails is logged",
+test("a reply is framed the same way, written, and the connection closed",
     { spec = "resolvd *native-framing.reply-written-then-closed" }, function(t)
         ready(t)
         local r = raw(request({ query = "resolve", name = "localhost", type = 1 }))
@@ -487,23 +487,7 @@ test("a reply is framed the same way, written, and the connection closed; a writ
         t:assert_eq(r.len, #r.body, "length-prefixed, little-endian")
         t:assert(r.eof, "and the connection is closed after it")
 
-        -- A client that has gone by the time its answer is ready: the
-        -- write fails and is logged. (The question is not cancelled when
-        -- the client leaves: PEI-1343.)
-        hold["gone.example.test"] = true
-        dns.forget(gw)
-        local fd = open()
-        send_all(sut, fd, request({ query = "resolve", name = "gone.example.test", type = 1, no_cache = true }))
-        t:assert(asked("gone.example.test"), "resolvd asked upstream (it has read the request)")
-        sys.close(sut, fd)
-        hold["gone.example.test"] = nil
-        local line
-        local ok = gw:serve({ timeout = 20, until_ = function()
-            line = logged("control: reply failed: ")
-            return line ~= nil
-        end })
-        t:log("log: " .. tostring(line))
-        t:assert(ok, "control: reply failed: <error> is logged")
+        -- Departed-client cancellation is exercised by resolvd-flow.test.lua.
     end)
 
 -- ---------------------------------------------------------------------------
@@ -961,8 +945,8 @@ test("a connection that has not delivered a whole request five seconds after it 
         t:assert(raw(request({ query = "status" })).reply.ok, "resolvd answers others meanwhile and after")
     end)
 
-test("with 256 accepted connections still sending, a newly accepted one is closed at once without a reply; requests already read do not count",
-    { spec = "resolvd *native-framing.pending-connection-cap-closes-silently" }, function(t)
+test("256 native slots count both readers and questions already being resolved",
+    { spec = "resolvd *native-framing.pending-connection-cap-closes-silently resolvd *sockets.answered-connections-not-counted", tags = { "pei-1343" } }, function(t)
         ready(t)
         t:log("agent limits: " .. ((sut:read_file("/proc/self/limits"):match("Max open files[^\n]*")) or "?"))
         -- Three connections whose requests resolvd has read and is still
@@ -981,25 +965,25 @@ test("with 256 accepted connections still sending, a newly accepted one is close
         local stopped_for
         with_resolvd_stopped(function()
             local s = mono()
-            for i = 1, 257 do idle[i] = open() end
+            for i = 1, 254 do idle[i] = open() end
             stopped_for = mono() - s
             for i = 1, 3 do
                 t:assert_eq(ntfe.poll(sut, waiters[i], ntfe.POLLIN, 0), 0, "waiter " .. i .. " is still unanswered")
             end
         end)
-        t:log(string.format("opened 257 connections in %.2f s with resolvd stopped", stopped_for))
-        -- resolvd now accepts all 257 in one pass.
-        local last, err = ntfe.recv(sut, idle[257], 3000, 4096)
-        t:log("connection 257: read " .. (last and (#last .. " bytes") or tostring(err)))
-        t:assert_eq(last, "", "the 257th is closed at once, with no reply")
-        for _, i in ipairs({ 256, 1 }) do
+        t:log(string.format("opened 254 connections in %.2f s with resolvd stopped", stopped_for))
+        -- Three resolving requests leave 253 reader slots; acceptance is batched.
+        local last, err = ntfe.recv(sut, idle[254], 3000, 4096)
+        t:log("connection 254: read " .. (last and (#last .. " bytes") or tostring(err)))
+        t:assert_eq(last, "", "the 254th reader is closed at once, with no reply")
+        for _, i in ipairs({ 253, 1 }) do
             send_all(sut, idle[i], request({ query = "status" }))
             local r = read_reply(sut, idle[i], 3000)
             t:log("connection " .. i .. ": " .. tostring(r.reply and r.reply.kind or r.err))
             t:assert(r.reply and r.reply.kind == "status", "connection " .. i .. " was accepted and is answered")
         end
         local closes = sut:batch(function(b)
-            for i = 1, 257 do b:syscall(sys.NR.close, idle[i]) end
+            for i = 1, 254 do b:syscall(sys.NR.close, idle[i]) end
             for i = 1, 3 do b:syscall(sys.NR.close, waiters[i]) end
         end)
         t:log("closed " .. #closes .. " descriptors")

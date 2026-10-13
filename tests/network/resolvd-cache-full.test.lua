@@ -5,7 +5,7 @@
 -- only DNS server (helpers.dns, offered by DHCP option 6), and a whole
 -- Peios (helpers.network). The cache is filled through the stub door:
 -- the agent sends queries to 127.0.0.53 from one UDP socket in batches
--- of 200 (well under resolvd's 1 024 descriptors) and never reads the
+-- of 16 (within the per-endpoint pending budget) and never reads the
 -- replies; the gateway answers each from a hook, so the TTL of every
 -- entry is chosen by its name. `status`'s `cache_entries` is the count.
 --
@@ -86,7 +86,7 @@ dns.serve(gw, {
     end,
 })
 
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = network.test_binary("resolvd", {}) })
 
 local function rstatus()
     local s, err = network.call(sut, { query = "status" }, { path = SOCK })
@@ -131,14 +131,14 @@ local stub = assert(ntfe.udp_connect(sut, "127.0.0.53", 53))
 local next_id = 0
 
 --- Store `n` new entries named `prefix-<from..from+n-1>` through the stub
---- door, 200 at a time, and wait until every one is in the cache. Only
+--- door, 16 at a time, and wait until every one is in the cache. Only
 --- for a cache with room for them all: nothing here may evict.
 local function fill(t, prefix, from, n)
     local target = entries() + n
     t:assert(target <= CAP, string.format("fill %s: %d more fit (%d)", prefix, n, target))
     local i, last = from, from + n - 1
     while i <= last do
-        local batch = math.min(200, last - i + 1)
+        local batch = math.min(16, last - i + 1)
         local before = entries()
         for k = i, i + batch - 1 do
             next_id = (next_id + 1) % 65536

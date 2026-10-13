@@ -22,7 +22,7 @@
 --
 -- Not here: candidates going to different scopes (two interfaces) is
 -- resolvd-flow-scopes.test.lua; the in-flight ceiling row is
--- resolvd-counters-ceiling.test.lua.
+-- covered by the resolver engine host tests (see resolvd-limits-inflight).
 --
 -- helpers.msgpack drops a map entry whose value is nil, so a nil
 -- `server` or `interface` reads as absent; that is what is asserted.
@@ -55,6 +55,7 @@ dns.serve(gw, {
         ["late.example.test"] = { { type = "A", ttl = 60, data = "10.77.0.92" } },
         ["late2.example.test"] = { { type = "A", ttl = 60, data = "10.77.0.93" } },
         ["signed.example.test"] = { { type = "A", ttl = 60, data = "10.77.0.94" } },
+        ["lookup.example.test"] = { { type = "A", ttl = 60, data = "10.77.0.98" } },
         ["back.example.test"] = { { type = "A", ttl = 60, data = "10.77.0.95" } },
         ["."] = { { type = "NS", ttl = 60, data = "a.root-servers.test" } },
     },
@@ -69,7 +70,7 @@ dns.serve(gw, {
         return nil
     end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = network.test_binary("resolvd", {}) })
 
 local SOCK = "/run/resolvd/resolv.sock"
 local T = dns.TYPE
@@ -476,52 +477,42 @@ test("an answer through the fallback scope has no interface: a server's reply, a
         t:assert_eq(#asked("silent2.example.test"), 3, "three attempts: exhausted")
     end)
 
-test("a question whose native asker has gone runs to completion, its reply is cached, and the failed write is logged",
-    { spec = "resolvd *engine-flow.departed-asker-transactions-continue resolvd *engine-flow.departed-asker-reply-cached resolvd *engine-flow.departed-asker-answer-write-fails" },
+test("definite native hangup and TCP reset cancel pending questions without retries, caching or answer writes",
+    { spec = "resolvd *engine-flow.departed-asker-transactions-continue resolvd *engine-flow.departed-asker-reply-cached resolvd *engine-flow.departed-asker-answer-write-fails", tags = { "pei-1343" } },
     function(t)
-        -- PEI-1343: abandoned questions are never cancelled; this asserts
-        -- the TRM's present behaviour.
-        -- Silent twice, answered at the third attempt.
-        local late = function(n) if n < 3 then return false end end
-        behave["late.example.test"] = late
-        behave["late2.example.test"] = late
-        local failed_before = count_lines(rlogs(), "control: reply failed")
-        dns.forget(gw)
-        local h = send_native({ query = "resolve", name = "late.example.test", type = T.A })
-        t:assert(gw:serve({ timeout = 5, until_ = function() return #asked("late.example.test") >= 1 end }),
-            "the first attempt went out")
-        sys.close(sut, h.fd)
-        t:assert(gw:serve({ timeout = 15, until_ = function() return #asked("late.example.test") >= 3 end }),
-            "the second and third attempts went out after the asker left")
-        local logged = gw:serve({ timeout = 5, until_ = function()
-            return count_lines(rlogs(), "control: reply failed") > failed_before
-        end })
-        for _, l in ipairs(rlogs()) do
-            if l:find("control: reply failed", 1, true) then t:log("log: " .. l); break end
+        -- Neither name is answered while its client is present. Once that
+        -- client leaves, any stray retry would be answered and cached.
+        for _, case in ipairs({ { "late.example.test", false }, { "late2.example.test", true } }) do
+            local name, tcp = case[1], case[2]
+            behave[name] = silent
+            dns.forget(gw)
+            local before = count_lines(rlogs(), "control: reply failed")
+            local fd
+            if tcp then
+                fd = assert(ntfe.tcp_connect(sut, "127.0.0.53", 53, 2000))
+                local q = dns.encode(dns.query(name, "A", { id = 777 }))
+                ntfe.send(sut, fd, string.pack(">I2", #q) .. q)
+            else
+                -- An any-family lookup must cancel both A and AAAA.
+                fd = send_native({ query = "lookup", name = name, family = "any" }).fd
+            end
+            local first_count = tcp and 1 or 2
+            t:assert(gw:serve({ timeout = 5, until_ = function() return #asked(name) >= first_count end }),
+                "all initial transactions reached upstream")
+            if tcp then
+                local reset = sut:syscall(ntfe.NR.setsockopt, { args = { fd, 1, 13, 0, 8 },
+                    bufs = { string.pack("<i4i4", 1, 0) }, ptrs = { 3 } })
+                t:assert_eq(reset.ret, 0, "SO_LINGER requests a definite reset")
+            end
+            sys.close(sut, fd)
+            behave[name] = nil
+            gw:serve({ timeout = 6.5 })
+            t:assert_eq(#asked(name), first_count, "no retries after definite departure")
+            t:assert_eq(count_lines(rlogs(), "control: reply failed"), before, "no abandoned answer write")
+            local result = resolve(name, T.A)
+            t:assert_eq(result.source, "dns", "abandoned query did not populate the cache")
+            t:assert_eq(result.outcome, "found", "a later asker resolves normally")
         end
-        t:assert(logged, "the answer's write failed and was logged")
-        dns.forget(gw)
-        report(t, resolve("late.example.test", T.A), { "found", "cache", "10.77.0.1", nil, 0, "A 10.77.0.92" },
-            "late.example.test, asked again")
-
-        -- A stub TCP client that hangs up: the same, and nothing is logged.
-        local lines_before = #rlogs()
-        local warn_before = count_lines(rlogs(), "resolvd: warn:")
-        local fd = assert(ntfe.tcp_connect(sut, "127.0.0.53", 53, 2000))
-        local p = dns.encode(dns.query("late2.example.test", "A", { id = 777 }))
-        ntfe.send(sut, fd, string.pack(">I2", #p) .. p)
-        t:assert(gw:serve({ timeout = 5, until_ = function() return #asked("late2.example.test") >= 1 end }),
-            "the stub question's first attempt went out")
-        sys.close(sut, fd)
-        t:assert(gw:serve({ timeout = 15, until_ = function() return #asked("late2.example.test") >= 3 end }),
-            "its retries went out after the client hung up")
-        gw:serve({ timeout = 2 })
-        local logs = rlogs()
-        t:log(string.format("resolvd log lines: %d before, %d after", lines_before, #logs))
-        for i = 1, #logs - lines_before do t:log("new: " .. logs[i]) end
-        t:assert_eq(count_lines(logs, "resolvd: warn:"), warn_before, "no warning was logged for the stub client")
-        report(t, resolve("late2.example.test", T.A), { "found", "cache", "10.77.0.1", nil, 0, "A 10.77.0.93" },
-            "late2.example.test, asked again")
     end)
 
 test("an upstream AD bit is not forwarded, and no stub reply carries AD: resolvd never validates to secure",
@@ -567,7 +558,7 @@ test("every answer and addresses reply carries validation, and it is unvalidated
         check(resolve("nope.example.test", T.A), "dns notfound")
         check(resolve("nope.example.test", T.A), "cache notfound")
         check(ask({ query = "reverse", address = "127.0.0.1" }), "reverse")
-        check(ask({ query = "lookup", name = "back.example.test" }), "lookup from the network")
+        check(ask({ query = "lookup", name = "lookup.example.test" }), "lookup from the network")
         check(ask({ query = "lookup", name = "localhost" }), "lookup synthetic")
         check(ask({ query = "lookup", name = "a..b" }), "lookup unparseable")
         -- Take every server away: unavailable.

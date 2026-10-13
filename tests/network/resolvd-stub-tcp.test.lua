@@ -35,11 +35,13 @@ local sys = require("helpers.sys")
 peinit.claim(2)
 
 local slow_silenced = 0
+local hold_budget = true
 local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
 dns.serve(gw, {
     zone = {
+        ["budget.example.test"] = { { type = "A", ttl = 0, data = "10.77.0.97" } },
         ["first.example.test"] = { { type = "A", ttl = 60, data = "10.77.0.91" } },
         ["second.example.test"] = { { type = "A", ttl = 60, data = "10.77.0.92" } },
         ["halfclose.example.test"] = { { type = "A", ttl = 60, data = "10.77.0.93" } },
@@ -50,6 +52,7 @@ dns.serve(gw, {
     soa = { name = "example.test", data = { minimum = 30 } },
     on = function(q, default, ctx)
         local n = (q.questions[1] and q.questions[1].name or ""):lower()
+        if n == "budget.example.test" and hold_budget then return false end
         if n == "slow.example.test" and ctx.transport == "udp" and slow_silenced == 0 then
             slow_silenced = slow_silenced + 1
             return false
@@ -247,6 +250,35 @@ test("when 256 accepted stub connections are still sending, the next one is clos
         for _, fd in ipairs(held) do sys.close(sut, fd) end
     end)
 
+test("a TCP question awaiting resolution retains its connection slot until the answer completes",
+    { spec = "resolvd *stub-receive.tcp-pending-cap-256 PSPU *nri-limits.stub-tcp-clients", tags = { "pei-1343" } }, function(t)
+        ready(t)
+        local pid = resolvd_pid()
+        local pending = connect()
+        ntfe.send(sut, pending, frame(query("budget.example.test", 0x7110)))
+        t:assert(gw:serve({ timeout = 5, until_ = function() return #asked("budget.example.test") > 0 end }),
+            "the first connection is resolving")
+        local base = resolvd_fds(pid)
+        local held = {}
+        for i = 1, 255 do held[i] = open_raw() end
+        t:assert(wait_until(function() return resolvd_fds(pid) == base + 255 end,
+            { timeout = 1, interval = 0.01, desc = "255 readers and one resolving query" }), "all reader slots occupied")
+        local excess = open_raw()
+        local bytes, err = ntfe.recv(sut, excess, 1000)
+        t:assert(bytes == "" or err == sys.E.CONNRESET, "resolving query still consumes the 256th slot")
+        hold_budget = false
+        local r = read_reply(pending, 4)
+        t:assert(r.reply and r.reply.answers[1].data == "10.77.0.97", "pending question completes")
+        sys.close(sut, pending)
+        local next_client = connect()
+        ntfe.send(sut, next_client, frame(query("localhost", 0x7111)))
+        local next_reply = read_reply(next_client, 2)
+        t:assert(next_reply.reply and next_reply.reply.rcode == 0, "completion frees a slot without closing the idle readers")
+        sys.close(sut, next_client)
+        sys.close(sut, excess)
+        for _, fd in ipairs(held) do sys.close(sut, fd) end
+    end)
+
 test("a TCP connection from a non-loopback source is closed at once, without a reply",
     { spec = "resolvd *stub-receive.tcp-non-loopback-source-closed" }, function(t)
         ready(t)
@@ -408,7 +440,7 @@ test("once its query has arrived, a connection is held past ten seconds until th
 
 -- ---- writing the reply -----------------------------------------------------
 
-test("a TCP reply that cannot be written is not logged",
+test("a definite TCP reset abandons the question without writing or caching its delayed reply",
     { spec = "resolvd *stub-render.tcp-write-failure-not-logged" }, function(t)
         ready(t)
         dns.forget(gw)
@@ -425,10 +457,9 @@ test("a TCP reply that cannot be written is not logged",
             bufs = { string.pack("<i4i4", 1, 0) }, ptrs = { 3 } })
         t:assert_eq(so.ret, 0, "SO_LINGER set")
         sys.close(sut, fd)
-        t:assert(gw:serve({ timeout = 10, until_ = function()
-            return rstatus().counters.upstream_answered > before.upstream_answered
-        end }), "the answer arrived and was delivered to the reset connection")
-        gw:serve({ timeout = 1 })
+        gw:serve({ timeout = 3 })
+        t:assert_eq(rstatus().counters.upstream_answered, before.upstream_answered,
+            "the delayed reply belongs to a cancelled transaction and is ignored")
         local after_logs = rlogs()
         -- The lines new since before (newest first, so a prefix).
         local new = {}
@@ -445,5 +476,6 @@ test("a TCP reply that cannot be written is not logged",
         local r = read_reply(probe, 5)
         sys.close(sut, probe)
         t:assert(r.reply and r.reply.answers[1] and r.reply.answers[1].data == "10.77.0.96",
-            "and the answer it could not deliver was cached and is served")
+            "and a new client can resolve the name")
+        t:assert_eq(#asked("late.example.test"), 2, "the abandoned reply was not cached")
     end)

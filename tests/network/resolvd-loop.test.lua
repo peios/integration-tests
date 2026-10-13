@@ -313,9 +313,9 @@ test("resolvd is one thread, and at rest it is blocked in poll(2) over its liste
         local busy = blocked_poll(pid)
         t:log("with three upstream questions: " .. busy.raw)
         t:assert_eq(#sut:listdir("/proc/" .. pid .. "/task"), 1, "still one thread")
-        t:assert_eq(busy.nfds, 8, "the same poll, now with the three upstream sockets")
+        t:assert_eq(busy.nfds, 11, "the same poll, with three upstream sockets and three clients watched for departure")
         for _, fd in ipairs(fds) do sys.close(sut, fd) end
-        sut:run("sleep 6.5")
+        t:assert_eq(quiesce(pid).nfds, 5, "departed clients and their transactions leave the poll set")
     end)
 
 -- ---------------------------------------------------------------------------

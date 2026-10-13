@@ -1,7 +1,7 @@
 -- resolvd §2.4 — the native socket and its directory (modes, the DACL
 -- written on both, their owners, a stale socket), the stub listener's two
--- sockets and nothing else bound, and connections that no longer count
--- against the 256 once their request has been read.
+-- sockets and nothing else bound, and connections that retain an admission
+-- slot while their completed requests await answers.
 --
 -- Harness: the scripted gateway (helpers.gateway) with its DNS server
 -- (helpers.dns), and a whole Peios (helpers.network). Descriptors are
@@ -47,7 +47,7 @@ dns.serve(gw, {
         if name:lower():match("^slow") then return false end
     end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = network.test_binary("resolvd", {}) })
 
 local SOCK = "/run/resolvd/resolv.sock"
 local DIR = "/run/resolvd"
@@ -337,14 +337,17 @@ test("a start after a stop, svctl restart, and a restart after SIGKILL each remo
 -- The 256
 -- ---------------------------------------------------------------------------
 
-test("a native or stub TCP connection whose request has been read no longer counts against the 256",
-    { spec = "resolvd *sockets.answered-connections-not-counted" }, function(t)
+test("native and stub TCP questions retain their admission slots after reading",
+    { spec = "resolvd *sockets.answered-connections-not-counted", tags = { "pei-1343" } }, function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "eth0 bound")
         wait_until(function()
             local s = rcall({ query = "status" })
             return s and s.scopes[1] and s.scopes[1].servers[1] == "10.77.0.1"
         end, { timeout = 30, interval = 0.25, desc = "eth0's server in resolvd" })
 
+        sut:run("svctl stop timed"):assert_ok()
+        gw:serve({ timeout = 7 })
+        local baseline_fds = #sut:listdir("/proc/" .. rpid() .. "/fd")
         -- Control: 256 connections still sending fill the count, and the
         -- 257th is turned away.
         local held = {}
@@ -359,13 +362,13 @@ test("a native or stub TCP connection whose request has been read no longer coun
         sut:run("sleep 0.5")
 
         -- Native: 256 complete requests, each waiting on a server that
-        -- never answers; the 257th is served.
+        -- never answers; the 257th must still be refused.
         held = {}
         for i = 1, 256 do held[i] = native_request({ query = "resolve", name = "slow-" .. i .. ".sock.test", type = 1 }) end
         sut:run("sleep 0.3")
         extra = native_request({ query = "status" })
         r, why = native_reply(extra, 2000)
-        t:assert(r and r.ok, "with 256 requests read and waiting, a 257th connection is served (" .. tostring(why) .. ")")
+        t:assert(r == nil, "with 256 requests resolving, the 257th is refused (" .. tostring(why) .. ")")
         sys.close(sut, extra)
         local answered = 0
         for _, fd in ipairs(held) do
@@ -373,8 +376,10 @@ test("a native or stub TCP connection whose request has been read no longer coun
         end
         t:assert_eq(answered, 0, "and none of the 256 had been answered: they were all still waiting")
         for _, fd in ipairs(held) do sys.close(sut, fd) end
-        -- Let those questions run out (three 2 s attempts).
-        sut:run("sleep 7")
+        t:assert(wait_until(function()
+            return #sut:listdir("/proc/" .. rpid() .. "/fd") <= baseline_fds
+        end, { timeout = 1.5, interval = 0.01, desc = "cancel abandoned native questions" }),
+            "closing the native clients cancels upstream sockets before timeout")
 
         -- Stub TCP: the same with DNS queries.
         held = {}
@@ -386,13 +391,13 @@ test("a native or stub TCP connection whose request has been read no longer coun
         end
         sut:run("sleep 0.3")
         local tfd = ntfe.tcp_connect(sut, "127.0.0.53", 53, 2000)
-        t:assert(tfd ~= nil, "a 257th stub TCP connection is accepted")
+        t:assert(tfd ~= nil, "the 257th TCP handshake completes before admission")
         if tfd then
             local q = dns.encode(dns.query("localhost", "A", { id = 999 }))
             ntfe.send(sut, tfd, string.pack(">I2", #q) .. q)
-            local rep = ntfe.recv(sut, tfd, 2000, 4096)
-            t:assert(rep and #rep > 2 and dns.decode(rep:sub(3)).id == 999,
-                "and its query answered while 256 read queries wait")
+            local rep, err = ntfe.recv(sut, tfd, 2000, 4096)
+            t:assert(rep == "" or err == sys.E.CONNRESET,
+                "the 257th TCP query is refused while 256 read queries wait")
             sys.close(sut, tfd)
         end
         answered = 0
