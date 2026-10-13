@@ -278,14 +278,14 @@ test("re-using an active transaction id returns RSI_INVALID",
     function() end)
 
 -- The RSI_BEGIN_TRANSACTION mode field is filled by the kernel on every
--- begin; a guest cannot emit a mode-less frame. loregd's decoder defaults
--- an absent mode to read-write, and TestTransactionWriteAndCommit begins
--- with an 8-byte (mode-less) payload then performs a mutating write.
-test("an absent mode field means read-write",
-    { spec = "loregd *txn.an-absent-mode-field-means-read-write",
+-- begin; a guest cannot emit a truncated frame or an unknown mode. The
+-- host handler regression proves rejection leaves no transaction state,
+-- cannot authorize a write, and leaves the id usable for a valid BEGIN.
+test("a malformed mode returns INVALID without recording a transaction",
+    { spec = "loregd *txn.malformed-mode-is-rejected-without-recording-a-transaction",
       skip = "the mode field is a wire detail the kernel always fills; a guest " ..
-             "cannot send an absent-mode RSI_BEGIN_TRANSACTION frame",
-      covered_by = "go:loregd internal/handler::TestTransactionWriteAndCommit" },
+             "cannot send a malformed-mode RSI_BEGIN_TRANSACTION frame",
+      covered_by = "go:loregd internal/handler::TestBeginTransactionRejectsMalformedModeWithoutState" },
     function() end)
 
 -- The kernel hive-scopes a request before it reaches loregd (the book
