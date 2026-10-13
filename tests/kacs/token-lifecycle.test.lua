@@ -368,6 +368,15 @@ test("primary installation serialises with exec without losing pending identity 
              "primary_exec_pending_install_keeps_npm cover lagging exec derivation" },
     function(t) end)
 
+test("a lagging exec takes the installed token's Linux identity, with setuid on top",
+    { spec = "PKM *token.install.lagging-exec-takes-installed-identity",
+      covered_by = "kunit:pkm_kunit_primary_epoch",
+      skip = "the exec has to start before the sibling services its queued install; " ..
+             "primary_exec_pending_install_projects_ids derives exec credentials from " ..
+             "a pending token with a different projection and checks uid, gid, groups " ..
+             "and user, an unprojected control, and a setuid euid over the projection" },
+    function(t) end)
+
 test("KACS_IOC_INSTALL replaces the primary token of the calling process",
     { spec = "PKM *token.install.process-wide" }, function(t)
         local worker = vm:spawn_worker()
