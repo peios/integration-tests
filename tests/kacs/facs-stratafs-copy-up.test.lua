@@ -213,7 +213,7 @@ test("there is no userspace surface for the context",
         -- enters or arms a copy-up context.
         local strata = names_under(at .. "/stratafs/hooks")
         t:assert_eq(table.concat(strata, ","),
-            "copy-up-begin,copy-up-publish,link-install,rename-provider",
+            "copy-up-begin,copy-up-publish,link-install,rename-provider,staging-recover,supersede-publish,supersede-remove",
             "the stratafs directory holds only the test rendezvous points")
     end)
 

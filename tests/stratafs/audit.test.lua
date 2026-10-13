@@ -285,7 +285,8 @@ test("a deferred deletion refused by the arrangement is audited",
 -- runs before stratafs's unlink is entered, so a refusal there produced
 -- an empty ring; KACS now raises the stratafs record for it.
 test("a refused deferred deletion is audited on any non-zero result",
-    { spec = "PKM *audit.deferred-deletion-audited-on-any-error" },
+    { spec = { "PKM *audit.deferred-deletion-audited-on-any-error",
+               "PKM *create.deferred-delete-audits-failure" } },
     function(t)
         stratafs.with(vm, "audit-deferred", {
             { name = "dest", flags = { "create" }, entries = { ["d/f"] = "x" } },
@@ -307,8 +308,11 @@ test("a refused deferred deletion is audited on any non-zero result",
             local e = only(t, events, REFUSED,
                 "a deferred deletion refused by an access check")
             t:assert_eq(e.payload.outcome.deferred, true, "with the deferred flag set")
-            t:assert(e.payload.outcome.errno and e.payload.outcome.errno < 0,
-                "carrying the non-zero result, as a negative errno")
+            t:assert_eq(e.payload.outcome.errno, -sys.E.ACCES,
+                "the refused delete-child check is recorded as EACCES")
+            t:assert_eq(e.payload.operation.name, "unlink", "the deferred operation")
+            t:assert_eq(e.payload.object.file["path-relative"], "/d/f",
+                "the precise object whose close-time deletion failed")
         end)
     end)
 

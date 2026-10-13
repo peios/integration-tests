@@ -382,6 +382,17 @@ test("every stack-wide configuration error collapses to EINVAL",
         end
     end)
 
+test("the descriptor is present at inode creation before content or publication",
+    { spec = "PKM *security.descriptor-installed-before-publication",
+      covered_by = "kunit:pkm_kunit_copy_up",
+      skip = "pkm_kunit_copy_up_named_flow_is_exact_and_exempt performs a real " ..
+             "VFS create and compares the stored SD and cache with the provider " ..
+             "before bind/populate/publish; " ..
+             "pkm_kunit_copy_up_exact_sd_is_installed_and_cached checks the " ..
+             "inode-init-security hook directly. A guest observing only the " ..
+             "published object cannot establish this ordering" },
+    function(t) t:fail("requires the kernel creation-phase observation") end)
+
 -- Four of §4.A's constants are source-level invariants: that the
 -- appendix is generated rather than written, that the marker struct has
 -- a given layout, and that two sets of discriminants agree between the
