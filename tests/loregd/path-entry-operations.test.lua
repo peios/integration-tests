@@ -100,16 +100,16 @@ test("create entry on an unresolvable parent returns not-found",
             .. "(ENOENT): ret=" .. tostring(cr.ret) .. " errno=" .. sys.errname(cr.errno or 0))
     end)
 
--- §5: the target table follows the child key's volatile flag; "A child GUID in
+-- §5: the target table follows the store containing the child key; "A child GUID in
 -- neither store lands in the persistent table." Not observable in isolation
 -- (the child is unknown for every guest create, since create-entry precedes
 -- create-key), but it is exactly what the reboot case below relies on and
 -- proves: a volatile child's entry, written before its key, lands persistent
--- and so outlives the key. The store-by-flag routing (when the key is known
+-- and so outlives the key. The schema-based routing (when the key is known
 -- first) is the cited Go test.
-test("create entry targets the store of the child key's volatile flag",
+test("create entry targets the child key's store",
     {
-        spec = "loregd *entry.create-entry-targets-the-store-of-the-child-keys-volatile-flag",
+        spec = "loregd *entry.create-entry-targets-the-child-keys-store",
         skip = true,
         covered_by = "go:loregd internal/handler::TestCreateEntryVolatileTarget",
     }, function() end)
@@ -243,11 +243,11 @@ test("a hide-entry tombstone has type one and a null target",
         covered_by = "go:loregd internal/handler::TestHideEntry",
     }, function() end)
 
--- §5: "The target table follows the parent key's volatile flag." Not
+-- §5: "The target table follows the store containing the parent key." Not
 -- observable at the guest (which store holds the tombstone is internal).
-test("hide entry targets the store of the parent key's volatile flag",
+test("hide entry targets the parent key's store",
     {
-        spec = "loregd *entry.hide-entry-targets-the-store-of-the-parent-keys-volatile-flag",
+        spec = "loregd *entry.hide-entry-targets-the-parent-keys-store",
         skip = true,
         covered_by = "go:loregd internal/handler::TestHideEntryVolatileParent",
     }, function() end)

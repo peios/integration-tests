@@ -295,8 +295,8 @@ test("query values sorts value entries and blanket tombstones", {
 -- store holds a value is not inspectable from a guest. TestSetValueVolatileKey
 -- sets a value on a volatile key and asserts it lands in volatile.[values]
 -- with zero rows in main.[values].
-test("set value targets the store of the key's volatile flag", {
-    spec = "loregd *value.set-value-targets-the-store-of-the-keys-volatile-flag",
+test("set value targets the key's store", {
+    spec = "loregd *value.set-value-targets-the-keys-store",
     skip = true,
     covered_by = "go:loregd internal/handler::TestSetValueVolatileKey",
 }, function() end)
@@ -304,8 +304,8 @@ test("set value targets the store of the key's volatile flag", {
 -- Same store-routing question for blanket tombstones, same guest-blindness.
 -- TestSetBlanketTombstoneVolatileKey asserts a blanket set on a volatile key
 -- lands in volatile.blanket_tombstones with zero rows in main.
-test("set blanket tombstone targets the store of the key's volatile flag", {
-    spec = "loregd *value.set-blanket-tombstone-targets-the-store-of-the-keys-volatile-flag",
+test("set blanket tombstone targets the key's store", {
+    spec = "loregd *value.set-blanket-tombstone-targets-the-keys-store",
     skip = true,
     covered_by = "go:loregd internal/handler::TestSetBlanketTombstoneVolatileKey",
 }, function() end)
