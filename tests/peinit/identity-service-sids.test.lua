@@ -56,8 +56,8 @@ test("every service token carries the SID derived from its service's name",
         },
     },
     function(t)
-        -- Eight of the image's own daemons, four minted by peinit and
-        -- four attested by the authority, each checked against the SID
+        -- Eight of the image's own daemons, minted by peinit or
+        -- attested by the authority, each checked against the SID
         -- the published rule produces from its name alone.
         local checked = 0
         for service, expected in pairs(DERIVED) do
@@ -76,20 +76,20 @@ test("every service token carries the SID derived from its service's name",
         -- The group belongs to the service, not to the principal: two
         -- daemons sharing an identity carry different ones, which is the
         -- whole reason the SID exists.
-        t:assert(DERIVED.registryd ~= DERIVED.eventd,
+        t:assert(DERIVED.registryd ~= DERIVED.authd,
             "two SYSTEM daemons are told apart by these SIDs")
     end)
 
 test("peinit and the authority derive the same SID for a service",
     { spec = "peinit *sid.peinit-and-authd-derive-the-same-sid" },
     function(t)
-        -- eventd's SID was computed by peinit, which mints SYSTEM tokens
+        -- registryd's SID was computed by peinit, which mints SYSTEM tokens
         -- itself; resolvd's was computed by the authority, which peinit
         -- asked for a LocalService token. Both match the same published
         -- rule, so the two implementations agree on a running machine and
         -- not only in the shared test vector.
-        local eventd = groups_of(vm, pid_of(vm, "eventd"))
-        t:assert(eventd[DERIVED.eventd],
+        local registryd = groups_of(vm, pid_of(vm, "registryd"))
+        t:assert(registryd[DERIVED.registryd],
             "the SID in a token peinit minted matches the rule")
 
         local resolvd = groups_of(vm, pid_of(vm, "resolvd"))
