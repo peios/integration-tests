@@ -273,7 +273,7 @@ test("TCP: a connection that is refused, or closed before a whole reply, fails t
     end)
 
 test("the TCP retry has its own 2 s deadline and spends one of the three attempts",
-    { spec = "resolvd *engine-servers.tcp-retry-not-an-attempt" }, function(t)
+    { spec = "resolvd *engine-servers.tcp-retry-spends-an-attempt" }, function(t)
         gw.ticks.dns = function(g)   -- held UDP replies only; TCP is never read
             local now, keep = g.vm:clock():get(), {}
             for _, p in ipairs(g.dns_pending) do if p.due <= now then p.send() else keep[#keep + 1] = p end end
