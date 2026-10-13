@@ -1,5 +1,6 @@
 -- netd §11.1 — Failure modes, where the evidence is: every netd log line
--- goes to standard error, which peinit forwards to eventd, and is
+-- goes to stdout (info) or stderr (warnings/errors), is forwarded to
+-- eventd by peinit, and is
 -- mirrored to /dev/kmsg at KERN_INFO, KERN_WARNING or KERN_ERR.
 --
 -- Harness: the scripted gateway (helpers.gateway) and a whole Peios
@@ -51,7 +52,8 @@ local function log_since(since)
         local msg = line:match('message="(.-)"  origin=')
         local ts = tonumber(line:match("timestamp=(%d+)"))
         if msg and ts and ts > since then
-            newest_first[#newest_first + 1] = { ts = ts, msg = (msg:gsub("\\(.)", "%1")) }
+            newest_first[#newest_first + 1] = { ts = ts, msg = (msg:gsub("\\(.)", "%1")),
+                is_error = line:match("is_error=(%a+)") }
         end
     end
     local out = {}
@@ -89,7 +91,9 @@ local function kmsg_seq()
 end
 
 --- Match netd's eventd lines since `mark` against the kmsg records
---- after `seq0`, in order. Returns the pairs and the records' texts.
+--- after `seq0`. peinit reads stdout/stderr independently, so their
+--- interleaving in eventd need not match the kernel log. Match each
+--- occurrence once. Returns the pairs and the records' texts.
 local function mirror(mark, seq0)
     local lines = log_since(mark)
     local recs = {}
@@ -98,13 +102,15 @@ local function mirror(mark, seq0)
             recs[#recs + 1] = r
         end
     end
-    local pairs_, at = {}, 1
+    local pairs_, used = {}, {}
     for _, l in ipairs(lines) do
         local found
-        for k = at, #recs do
-            if recs[k].text == l.msg then found = recs[k]; at = k + 1; break end
+        for k, rec in ipairs(recs) do
+            if not used[k] and rec.text == l.msg then
+                found = rec; used[k] = true; break
+            end
         end
-        pairs_[#pairs_ + 1] = { line = l.msg, rec = found, ts = l.ts }
+        pairs_[#pairs_ + 1] = { line = l.msg, rec = found, ts = l.ts, is_error = l.is_error }
     end
     return pairs_, recs
 end
@@ -129,7 +135,7 @@ local SPACE = "sleep 6"
 
 local orig_duid
 
-test("each log line reaches eventd through stderr and the kernel log at its own level",
+test("each log line reaches eventd through its output stream and the kernel log at its own level",
     { spec = "netd *failure.log-mirrored-to-kmsg" }, function(t)
         local s = network.serve_until(gw, sut, network.bound, { iface = "eth0", timeout = 60 })
         t:assert(s, "bound")
@@ -164,12 +170,15 @@ test("each log line reaches eventd through stderr and the kernel log at its own 
         for _, w in ipairs(want) do
             local hit
             for _, p in ipairs(pairs_) do if p.line == w[1] then hit = p end end
-            t:assert(hit, "eventd has it (netd's stderr): " .. w[1])
+            t:assert(hit, "eventd has it: " .. w[1])
             t:assert(hit.rec, "/dev/kmsg has it: " .. w[1])
         end
         t:assert(#pairs_ >= 5, "lines were logged")
         for _, p in ipairs(pairs_) do
             t:assert(p.rec, "mirrored: " .. p.line)
+            local level = p.line:match("^netd: (%a+):")
+            t:assert_eq(p.is_error, level == "info" and "false" or "true",
+                "eventd keeps informational output out of errors: " .. p.line)
             t:assert_eq(p.rec.prio & 7, LEVEL[p.line:match("^netd: (%a+):")], "at its level: " .. p.line)
         end
     end)
