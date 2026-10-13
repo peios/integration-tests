@@ -301,6 +301,72 @@ local function overlay(t, name, lower)
     return root .. "/mnt", root .. "/up"
 end
 
+test("a cold lower symlink descriptor resolves through an overlay xattr read",
+    { spec = "PKM *facs.storage.resolution-no-nested-inode-locks" }, function(t)
+        local lower = B .. "/cold-symlink-lower"
+        local mnt, policy_fd, link_fd
+        local ok, stage, errno = kacs.new_mount(vm, "ramfs", lower,
+            kacs.MOUNT_POLICY.SYNTHESIZE_EPHEMERAL)
+        t:assert(ok, "the unlabelled lower filesystem mounts: " ..
+            tostring(stage) .. " " .. sys.errname(errno or 0))
+
+        local passed, err = pcall(function()
+            t:assert_eq(sys.symlink(vm, "/missing-pei-1477-target",
+                lower .. "/link").ret, 0, "the lower symlink exists")
+            mnt = overlay(t, "cold-symlink", lower)
+            policy_fd = assert(sys.open(vm, lower, sys.O.PATH))
+            local before = assert(kacs.get_mount_policy_ex(vm, policy_fd))
+            local template = access.sd({
+                owner = token.SID.TEST_USER_2,
+                group = token.SID.LOCAL_SYSTEM,
+                dacl = access.acl({ access.ace(access.ACE.ALLOWED,
+                    kacs.ALL_RIGHTS, token.SID.EVERYONE, OI_CI) }),
+            })
+            t:assert_eq(kacs.set_mount_policy_ex(vm, policy_fd,
+                kacs.MOUNT_POLICY.SYNTHESIZE_EPHEMERAL,
+                { template = template }).ret, 0,
+                "a new template invalidates every lower synthetic cache")
+            local after = assert(kacs.get_mount_policy_ex(vm, policy_fd))
+            t:assert_neq(after.generation, before.generation,
+                "the policy generation actually changed")
+            t:assert_eq(after.template, template, "the new template is installed")
+            sys.close(vm, policy_fd)
+            policy_fd = nil
+
+            -- No lower symlink SD read occurs after invalidation. An overlay
+            -- probes regular files for metacopy during lookup, which can warm
+            -- their lower SD; a symlink avoids that unrelated warm-up path.
+            -- O_PATH|O_NOFOLLOW also keeps the missing target out of this test.
+            local open_errno
+            link_fd, open_errno = sys.open(vm, mnt .. "/link",
+                sys.O.PATH | sys.O.NOFOLLOW)
+            t:assert(link_fd, "the outer symlink opens without following it: " ..
+                sys.errname(open_errno or 0))
+            local bytes, query_errno = kacs.get_sd_fd(vm, link_fd, ALL_INFO,
+                kacs.AT_EMPTY_PATH | sys.AT_SYMLINK_NOFOLLOW)
+            t:assert(bytes, "the cold lower descriptor resolves through overlay: " ..
+                sys.errname(query_errno or 0))
+            local sd = access.parse_sd(bytes)
+            t:assert_eq(sd.owner, token.SID.TEST_USER_2,
+                "the descriptor uses the new lower template, not an old cache")
+            t:assert_eq(sd.group, token.SID.LOCAL_SYSTEM, "the template group survives")
+            t:assert_eq(sd.dacl.count, 1, "the inherited DACL is present")
+            t:assert_eq(sd.dacl.aces[1].sid, token.SID.EVERYONE,
+                "the lower template's ACE reaches the outer descriptor")
+            t:assert(sd.dacl.aces[1].flags & access.ACE_FLAG.INHERITED ~= 0,
+                "the symlink inherited its parent's descriptor")
+            sys.close(vm, link_fd)
+            link_fd = nil
+        end)
+        if link_fd then sys.close(vm, link_fd) end
+        if policy_fd then sys.close(vm, policy_fd) end
+        local unmounted = mnt and sys.umount(vm, mnt)
+        local lower_unmounted = sys.umount(vm, lower)
+        if not passed then error(err, 0) end
+        t:assert_eq(unmounted.ret, 0, "the overlay unmounts")
+        t:assert_eq(lower_unmounted.ret, 0, "the lower filesystem unmounts")
+    end)
+
 test("a descriptor set through a stacking filesystem reaches the inode beneath as well",
     { spec = "PKM *facs.storage.stacking-two-inodes" }, function(t)
         local lower = B .. "/two-lower"
