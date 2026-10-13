@@ -219,9 +219,9 @@ test("RCU-walk is refused unconditionally",
         end)
     end)
 
-test("inode numbers are allocated, not derived from the provider's",
-    { spec = "PKM *inode.number-allocated-not-derived" }, function(t)
-        stratafs.with(vm, "allocated-inodes", {
+test("inode numbers derive from the provider identity",
+    { spec = "PKM *inode.number-derived-from-provider" }, function(t)
+        stratafs.with(vm, "derived-inodes", {
             { name = "top", flags = { "create" }, entries = { f = "f", d = stratafs.DIR } },
             { name = "bot", entries = { g = "g" } },
         }, function(s)
@@ -233,14 +233,15 @@ test("inode numbers are allocated, not derived from the provider's",
             t:assert_neq(through.dev, direct.dev,
                 "nor the reported device")
 
-            -- The counter is per-mount, monotone and pre-incremented,
-            -- so the first number handed out is 2 — the root's.
-            t:assert_eq(sys.stat(vm, s.at).ino, 2,
-                "the first number allocated is 2, and the root has it")
+            -- A representable provider identity uses the derived namespace.
+            local root = sys.stat(vm, s.at)
+            t:assert(root.ino > 0, "the root has a derived inode number")
+            t:assert_eq(sys.stat(vm, s.at).ino, root.ino,
+                "repeated resolution preserves the root identity")
 
             -- Two names resolving to one provider object compare equal,
-            -- because the map is keyed on the object and not on the
-            -- path or stratum that reached it.
+            -- because derivation uses the filesystem and object identity,
+            -- not the path or stratum that reached it.
             local link = s:in_stratum("top", "hardlink")
             local r = vm:syscall(265, { -- linkat
                 args = { sys.AT_FDCWD, 0, sys.AT_FDCWD, 0, 0 },
@@ -251,13 +252,25 @@ test("inode numbers are allocated, not derived from the provider's",
                 sys.errname(r.errno))
             t:assert_eq(sys.stat(vm, s:join("hardlink")).ino, through.ino,
                 "and both names report one number through the mount")
+
+            local nested = s.root .. "/nested"
+            stratafs.mount(vm, { at = nested, strata = { s.at } })
+            local ok, err = pcall(function()
+                local a = sys.stat(vm, nested .. "/f")
+                local b = sys.stat(vm, nested .. "/hardlink")
+                t:assert(a and b, "a nested StrataFS view resolves both aliases")
+                t:assert_eq(a.ino, b.ino, "nested hard links retain one identity")
+                t:assert_neq(a.dev, through.dev, "each view reports its own device")
+            end)
+            stratafs.umount(vm, nested)
+            if not ok then error(err, 0) end
         end)
     end)
 
 test("one directory reached through two strata compares equal",
-    { spec = "PKM *inode.number-allocated-not-derived" }, function(t)
-        -- The map is keyed on the provider inode object, so a directory
-        -- reachable two ways is one object and gets one number.
+    { spec = "PKM *inode.number-derived-from-provider" }, function(t)
+        -- The provider identity is independent of the stratum, so a
+        -- directory reachable two ways is one object and gets one number.
         local s = stratafs.scenario(vm, "one-object-two-paths", {
             { name = "top", entries = { real = stratafs.DIR, ["real/x"] = "x" } },
             { name = "bot" },
@@ -357,10 +370,9 @@ test("the root's number agrees with other paths to the same provider",
     end)
 
 -- Red until kernel 0.20.1-rc13-9 (PEI-575): a root with no provider
--- could not be stat'd at all, so the bare counter value it keeps could
--- not be read.
-test("a root with no provider keeps the bare counter value",
-    { spec = "PKM *inode.root.bare-counter-without-a-provider" }, function(t)
+-- could not be stat'd at all, so its synthetic identity could not be read.
+test("a root with no provider keeps a stable synthetic identity",
+    { spec = "PKM *inode.root.synthetic-without-a-provider" }, function(t)
         local s = stratafs.scenario(vm, "bare-counter", {
             { name = "gone", flags = { "am" } },
         }, { mount = false })
@@ -369,8 +381,12 @@ test("a root with no provider keeps the bare counter value",
         local ok, err = pcall(function()
             local st, errno = sys.stat(vm, s.at)
             t:assert(st, "the root stats: " .. sys.errname(errno or 0))
-            t:assert_eq(st.ino, 2,
-                "and keeps the counter value allocated for it")
+            t:assert_neq(st.ino, 0, "the synthetic identity is nonzero")
+            t:assert_eq(sys.stat(vm, s.at).ino, st.ino,
+                "and stays stable while no provider exists")
+            vm:rename(s.root .. "/moved", s:in_stratum("gone"))
+            t:assert_neq(sys.stat(vm, s.at).ino, st.ino,
+                "an appearing provider has a distinct derived identity")
         end)
         stratafs.umount(vm, s.at)
         if not ok then error(err, 0) end
@@ -490,13 +506,11 @@ test("a descriptor keeps its inode across its own copy-up",
         end)
     end)
 
-test("the identity map pins a provider for the life of the mount",
-    { spec = "PKM *inode.pins-provider-until-unmount" }, function(t)
-        -- The map holds a reference on every provider inode ever
-        -- reached, so the object cannot be freed and its address reused
-        -- while the mount lives — which is what makes the number stable
-        -- across a name coming and going.
-        stratafs.with(vm, "pins-provider", {
+test("a provider keeps its identity when its name disappears and returns",
+    { spec = "PKM *inode.stable-across-cache-reclaim" }, function(t)
+        -- A rename does not change the filesystem's provider identity;
+        -- stability does not require retaining the provider inode in RAM.
+        stratafs.with(vm, "stable-provider", {
             { name = "top", entries = { f = "top" } },
             { name = "bot", flags = { "create" } },
         }, function(s)
@@ -513,6 +527,6 @@ test("the identity map pins a provider for the life of the mount",
 
             vm:rename(s.root .. "/f-aside", s:in_stratum("top", "f"))
             t:assert_eq(sys.stat(vm, s:join("f")).ino, first.ino,
-                "the same provider object is still mapped to its number")
+                "the same provider object still derives the same number")
         end)
     end)

@@ -132,7 +132,7 @@ test("dot and dot-dot are synthesised once, however many participants",
 test("an entry's inode number is the one stat reports",
     { spec = "PKM *enumerate.entry-inode-matches-stat" }, function(t)
         -- The number comes from looking the child up in the providing
-        -- participant and mapping it through the identity table, so
+        -- participant and deriving its provider identity, so
         -- getdents and stat agree.
         stratafs.with(vm, "ino-agrees", {
             { name = "top", entries = { file = "f", dir = stratafs.DIR,
