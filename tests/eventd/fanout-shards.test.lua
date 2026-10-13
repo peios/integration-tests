@@ -130,6 +130,39 @@ test("counted groups come back by count descending, then TAKE", {
         "GROUP … COUNT with TAKE keeps the two largest")
 end)
 
+-- PSPU §3.21: numeric groups have one order regardless of shard arrival.
+test("numeric GROUP defaults to key order across shards before paging", {
+    spec = "eventd *fanout.numeric-groups-are-sorted-by-keys-before-pagination", tags = { "pei1491" },
+}, function(t)
+    local tag = eventd.marker("group-order")
+    -- Put z in shard 0 and a in shard 1 so encounter order cannot
+    -- accidentally agree with key order, whichever CPU feeds each shard.
+    local zcpu = SHARD_OF_CPU[0] == 0 and 0 or 1
+    pinned(zcpu, "pt.fan.grouporder", {
+        { tag = tag, g = "z", h = 2, n = 10 },
+        { tag = tag, g = "z", h = 1, n = 20 },
+    })
+    pinned(1 - zcpu, "pt.fan.grouporder", {
+        { tag = tag, g = "a", h = 2, n = 30 },
+        { tag = tag, g = "a", h = 1, n = 40 },
+    })
+    local base = 'EVENTS pt.fan.grouporder WHERE tag == "' .. tag .. '"'
+    eventd.wait_rows(vm, base, function(rows) return #rows == 4 end)
+    local function keys(rows)
+        local result = {}
+        for _, row in ipairs(rows) do result[#result + 1] = row.g .. tostring(row.h) end
+        return table.concat(result, ",")
+    end
+    for _, function_name in ipairs({ "SUM", "AVG", "MIN", "MAX" }) do
+        local query = base .. " GROUP g, h " .. function_name .. " n"
+        t:assert_eq(keys(eventd.rows(vm, query)), "a1,a2,z1,z2", function_name .. " by keys")
+        t:assert_eq(keys(eventd.rows(vm, query .. " SKIP 1 TAKE 2")), "a2,z1", "paging follows ordering")
+        t:assert_eq(keys(eventd.rows(vm, query .. " SORT g DESC, h")), "z1,z2,a1,a2", "explicit SORT overrides")
+        t:assert_eq(keys(eventd.rows(vm, query .. " SORT g SKIP 1 TAKE 2")), "a2,z1",
+            "ties in explicit SORT use stable key order before paging")
+    end
+end)
+
 -- "GROUP … SUM: the exact integer sum while every value is an integer and
 --  it fits, and the binary64 sum."
 test("a group sum across shards is exact for integers and binary64 once a float joins", {
