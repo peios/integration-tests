@@ -328,7 +328,7 @@ test("a zero or unknown security_info is EINVAL, rejected before the source is c
         local probes = {
             { "GET_SECURITY with zero", function() return lcs.get_security(nil, w, fd, 0) end },
             { "GET_SECURITY with an unknown flag",
-              function() return lcs.get_security(nil, w, fd, 0x10) end },
+              function() return lcs.get_security(nil, w, fd, 0x20) end },
             { "SET_SECURITY with zero",
               function() return lcs.set_security(nil, w, fd, 0, sd) end },
             { "SET_SECURITY with an unknown flag",

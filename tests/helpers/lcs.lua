@@ -81,7 +81,8 @@ M.RIGHT = {
 }
 M.KEY_ALL_ACCESS = M.RIGHT.KEY_ALL_ACCESS
 
-M.SI = { OWNER = 0x1, GROUP = 0x2, DACL = 0x4, SACL = 0x8, ALL = 0xF }
+-- ALL requests the complete descriptor; SACL and LABEL cannot be combined.
+M.SI = { OWNER = 0x1, GROUP = 0x2, DACL = 0x4, SACL = 0x8, LABEL = 0x10, ALL = 0xF }
 
 M.TYPE = {
     NONE = 0, SZ = 1, EXPAND_SZ = 2, BINARY = 3, DWORD = 4,
