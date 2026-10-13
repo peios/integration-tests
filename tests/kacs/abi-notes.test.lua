@@ -135,6 +135,7 @@ test("each token query class returns the payload the appendix tabulates",
                              { "IMPERSONATION_LEVEL", C.IMPERSONATION_LEVEL, 4 },
                              { "ORIGIN", C.ORIGIN, 8 },
                              { "SOURCE", C.SOURCE, 16 },
+                             { "GUID", C.GUID, 16 },
                              { "STATISTICS", C.STATISTICS, 40 },
                              { "PRIVILEGES", C.PRIVILEGES, 32 } }) do
             t:assert_eq(#payload(c[2]), c[3],
@@ -316,8 +317,8 @@ test("the fields with no query class are not reportable through any of them",
             return without, with
         end
         -- The four scalars and the two booleans: every class answers
-        -- identically whether the field is set or not. STATISTICS is
-        -- excluded, and only because it carries the token's own id.
+        -- identically whether the field is set or not. STATISTICS and GUID
+        -- are excluded because they carry each token instance's own identity.
         for _, c in ipairs({
             { "audit_policy", 0x0F },
             { "projected_uid", 0x5A5A5A5A },
@@ -329,7 +330,7 @@ test("the fields with no query class are not reportable through any of them",
             local a, b = pair_differing(c[1], c[2], c[3])
             local pa, pb = all_payloads(a), all_payloads(b)
             for name in pairs(pa) do
-                if name ~= "STATISTICS" then
+                if name ~= "STATISTICS" and name ~= "GUID" then
                     t:assert_eq(pa[name], pb[name],
                         "no class reports " .. c[1] .. " (differs in " ..
                         name .. ")")
@@ -346,7 +347,7 @@ test("the fields with no query class are not reportable through any of them",
             { flags = token.RESTRICT_WRITE_RESTRICTED }))
         local pp, pr = all_payloads(plain), all_payloads(restricted)
         for name in pairs(pp) do
-            if name ~= "STATISTICS" then
+            if name ~= "STATISTICS" and name ~= "GUID" then
                 t:assert_eq(pp[name], pr[name],
                     "no class reports write_restricted (differs in " ..
                     name .. ")")
