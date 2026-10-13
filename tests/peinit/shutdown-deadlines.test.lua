@@ -18,6 +18,7 @@ local peinit = require("helpers.peinit")
 peinit.claim(1)
 
 local function with_vm(opts, body)
+    opts.files = peinit.test_binary("peinit", opts.files)
     local vm = peinit.boot(opts)
     local ok, err = pcall(body, vm)
     pcall(function() vm:shutdown() end)
@@ -366,12 +367,11 @@ test("a participant whose stop evidence is gone is killed at once, and only it l
 test("an operation that expires while Pending fails, and its service is not signalled before its wave",
     { spec = "peinit *graceful.a-pending-operations-expiry-does-not-signal-the-service-early" },
     function(t)
-        -- A shutdown creates no operations of its own (op.shutdown-is-
-        -- declared-but-not-produced) and refuses the commands that would,
-        -- so a Pending operation during one is one that was queued before
-        -- it began. The one that can be arranged is a start queued behind
-        -- an explicit stop: StartTimeout 3, measured from creation, while
-        -- the stop has sixty seconds to run.
+        -- Exercise an administrator operation already queued when shutdown
+        -- begins. Shutdown also creates its own stop observations; neither
+        -- their creation nor expiry may disturb this existing stop budget.
+        -- The queued Start has StartTimeout 3 while the in-flight Stop has
+        -- sixty seconds to run.
         --
         -- pt-back is the service it is for. pt-stubborn requires it, which
         -- keeps pt-back's wave back until pt-stubborn's twenty seconds are

@@ -20,6 +20,7 @@ local revstrm = require("helpers.revstrm")
 peinit.claim(1)
 
 local function with_vm(opts, body)
+    opts.files = peinit.test_binary("peinit", opts.files)
     local vm = peinit.boot(opts)
     local ok, err = pcall(body, vm)
     pcall(function() vm:shutdown() end)
@@ -521,43 +522,102 @@ local function operation_events(vm)
     return out
 end
 
-test("the shutdown stops services directly, creating no operations for the stops",
-    -- §8.2's claim that Shutdown is an operation source declared and never
-    -- produced. The evidence is a shutdown in progress, so it lives here.
-    { spec = "peinit *op.shutdown-is-declared-but-not-produced" },
+test("shutdown creates per-service Stop operations and reports their wave lifecycle",
+    { spec = { "peinit *op.shutdown-creates-per-service-stop-operations",
+        "peinit *graceful.shutdown-stop-observations-follow-the-waves" } },
     function(t)
-        with_vm({
-            name = "shutdown-noops",
-            append = "peios.quiet=0",
-            files = peinit.seed("pt-noops", {
-                { path = [[Machine\System]] },
-                { path = [[Machine\System\Services]] },
-                stubborn(30),
+        local keys = {
+            { path = [[Machine\System]] },
+            { path = [[Machine\System\Services]] },
+            stubborn(60),
+            resident("pt-polite", {
+                { name = "Triggers", type = "multi", data = { "boot" } },
             }),
+        }
+        for _, value in ipairs(keys[3].values) do
+            if value.name == "Arguments" then
+                value.data = { "-c", "trap '' TERM; echo ready > /run/pt-shutdown-trap; while :; do sleep 1; done" }
+            end
+        end
+        for _, key in ipairs(peinit.verbose_events_keys()) do keys[#keys + 1] = key end
+        with_vm({ name = "shutdown-operations", append = "peios.quiet=0",
+            files = peinit.seed("pt-shutdown-operations", keys),
         }, function(vm)
             settle(vm)
+            -- The test service writes this only after installing its trap.
+            wait_until(function()
+                return vm:run("test -f /run/pt-shutdown-trap"):ok()
+            end, { timeout = 20, interval = 0.25, desc = "stubborn service trap installed" })
             trigger(vm, "svctl shutdown poweroff")
             vm:console():expect("peinit: shutdown stopping pt-stubborn", 30)
-
-            -- pt-stubborn is in its wave, holding the shutdown open for
-            -- thirty seconds, and nothing stands behind that stop.
             local status = vm:run("svctl --json status pt-stubborn").stdout
-            t:assert(status:find('"state":"stopping"', 1, true),
-                "the shutdown is stopping pt-stubborn: " .. status)
-            t:assert(status:find('"current_operation":null', 1, true),
-                "with no operation behind the stop: " .. status)
-
+            t:assert(status:find('"state":"stopping"', 1, true), status)
+            t:assert(not status:find('"current_operation":null', 1, true),
+                "shutdown stop is observable through status: " .. status)
             local seen = {}
-            for _, event in ipairs(operation_events(vm)) do
-                seen[#seen + 1] = event.type .. " " .. tostring(event.fields.type) .. " "
-                    .. tostring(event.fields.service) .. " " .. tostring(event.fields.source)
-                t:assert(event.fields.source ~= "shutdown",
-                    "no operation has Shutdown as its source: " .. seen[#seen])
-                t:assert(not (event.fields.service == "pt-stubborn" and event.fields.type == "stop"),
-                    "and none was created to stop pt-stubborn: " .. seen[#seen])
+            wait_until(function()
+                seen = {}
+                for _, event in ipairs(operation_events(vm)) do
+                    if event.fields.source == "shutdown" then
+                        t:assert_eq(event.fields.type, "stop", "shutdown operations are stops")
+                        seen[event.fields.service .. "/" .. event.type] = true
+                    end
+                end
+                return seen["pt-polite/peinit.operation.ended"]
+                    and seen["pt-stubborn/peinit.operation.started"]
+            end, { timeout = 20, interval = 0.5, desc = "shutdown operation events in KMES" })
+            for _, service in ipairs({ "pt-polite", "pt-stubborn" }) do
+                t:assert(seen[service .. "/peinit.operation.requested"], service .. " requested")
+                t:assert(seen[service .. "/peinit.operation.started"], service .. " started")
             end
-            -- The ring does hold operations — the boot's starts — so an
-            -- empty result is not what the assertions above passed on.
-            t:assert(#seen > 0, "the ring holds this boot's operations to look through")
+            t:assert(not seen["pt-stubborn/peinit.operation.ended"], "live stop has not ended")
+        end)
+    end)
+
+test("an expired shutdown Stop observation does not signal a later wave early",
+    { spec = "peinit *graceful.a-pending-operations-expiry-does-not-signal-the-service-early" },
+    function(t)
+        local keys = {
+            { path = [[Machine\System]] },
+            { path = [[Machine\System\Services]] },
+            stubborn(60, { { name = "Requires", type = "multi", data = { "pt-back" } } }),
+            resident("pt-back", { { name = "StopTimeout", type = "dword", data = 6 } }),
+        }
+        for _, value in ipairs(keys[3].values) do
+            if value.name == "Arguments" then
+                value.data = { "-c", "trap '' TERM; echo ready > /run/pt-expiry-trap; while :; do sleep 1; done" }
+            end
+        end
+        with_vm({ name = "shutdown-observation-expiry", append = "peios.quiet=0",
+            files = peinit.seed("pt-shutdown-expiry", keys),
+        }, function(vm)
+            settle(vm)
+            wait_until(function() return vm:run("test -f /run/pt-expiry-trap"):ok() end,
+                { timeout = 20, interval = 0.25, desc = "stubborn service trap installed" })
+            local front_pid = json.decode(vm:run("svctl --json status pt-stubborn").stdout).current_job.pid
+            local back_pid = json.decode(vm:run("svctl --json status pt-back").stdout).current_job.pid
+            local from = #vm:console():read_log()
+            trigger(vm, "svctl shutdown poweroff")
+            vm:console():expect("peinit: shutdown stopping pt-stubborn", 30)
+            local status = json.decode(vm:run("svctl --json status pt-back").stdout)
+            t:assert_eq(status.state, "active", "the later wave is still active")
+            t:assert(status.current_operation and status.current_operation.id,
+                "shutdown has requested an operation for the later wave")
+            local id = status.current_operation.id
+            local view
+            wait_until(function()
+                view = json.decode(vm:run("svctl --json operation-status " .. id).stdout).operation
+                return view.state == "failed"
+            end, { timeout = 20, interval = 0.5, desc = "pending shutdown Stop expiry" })
+            t:assert_eq(view.source, "shutdown", "this is shutdown's own record")
+            t:assert_eq(view.type, "stop", "the pending operation is a stop")
+            t:assert_eq(states(vm)["pt-back"], "active", "expiry sent no stop signal")
+            t:assert(vm:run("kill -0 " .. back_pid):ok(), "the later-wave process is alive")
+            t:assert(not vm:console():read_log():sub(from):find("shutdown stopping pt-back", 1, true),
+                "no early wave dispatch")
+            vm:run("kill -9 " .. front_pid):assert_ok()
+            vm:console():expect("peinit: shutdown stopping pt-back", 30)
+            vm:console():expect("reboot: Power down", 90)
+            t:assert(true, "the expired observation did not erase the stop obligation")
         end)
     end)
