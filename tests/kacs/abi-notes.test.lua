@@ -180,7 +180,7 @@ test("each token query class returns the payload the appendix tabulates",
 test("a token query class outside the enumeration is EINVAL",
     { spec = "PKM *abi-notes.token-query-invalid-class" }, function(t)
         local fd = mint({})
-        for _, class in ipairs({ 0x00, 0x19, 0x1A, 0x80, 0xFFFF }) do
+        for _, class in ipairs({ 0x00, 0x1A, 0x1B, 0x80, 0xFFFF }) do
             local p, e = token.query(vm, fd, class)
             t:assert(not p, ("class 0x%X is not a class"):format(class))
             t:assert_eq(e, sys.E.INVAL, "and is refused EINVAL")
@@ -189,7 +189,7 @@ test("a token query class outside the enumeration is EINVAL",
         -- class never gets as far as reporting a size.
         local r = vm:syscall(sys.NR.ioctl, {
             args = { fd, token.IOC.QUERY, 0 },
-            bufs = { string.pack("<I4I4I8", 0x19, 0, 0) }, ptrs = { 2 },
+            bufs = { string.pack("<I4I4I8", 0x1A, 0, 0) }, ptrs = { 2 },
         })
         t:assert_eq(r.errno, sys.E.INVAL,
             "including the size probe: " .. sys.errname(r.errno))
@@ -373,12 +373,12 @@ test("the fields with no query class are not reportable through any of them",
                 "the LCS credentials are absent from " .. name)
         end
         sys.close(vm, lcs)
-        -- created_at and token_guid have nowhere to live: STATISTICS is
+        -- created_at is not in STATISTICS; GUID has its own class. STATISTICS is
         -- forty bytes and every one of them is spoken for.
         local plain = mint({})
         t:assert_eq(#assert(token.query(vm, plain, token.CLASS.STATISTICS)), 40,
             "STATISTICS is token id, session id, modified id, type, a " ..
-            "reserved word and expiration — no room for either")
+            "reserved word and expiration — no created_at")
         -- The supplementary GIDs are the one projected field that is
         -- reportable, which is what makes the rest of the list a rule.
         sys.close(vm, plain)
