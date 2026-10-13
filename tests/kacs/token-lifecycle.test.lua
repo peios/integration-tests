@@ -358,6 +358,25 @@ test("a label at or above the token's level leaves the token unchanged",
 
 -- Self-installation ------------------------------------------------------------------------
 
+test("primary installation serialises with exec without losing pending identity or NEW_PROCESS_MIN",
+    { spec = "PKM *token.install.serialized-with-exec",
+      covered_by = "kunit:pkm_kunit_primary_epoch",
+      skip = "primary_install_waits_for_exec holds the real signal exec guard " ..
+             "and observes a killable blocked installer with unchanged credentials; " ..
+             "primary_install_error_releases_exec_guard covers cleanup, and " ..
+             "primary_exec_selects_pending_install plus " ..
+             "primary_exec_pending_install_keeps_npm cover lagging exec derivation" },
+    function(t) end)
+
+test("a lagging exec takes the installed token's Linux identity, with setuid on top",
+    { spec = "PKM *token.install.lagging-exec-takes-installed-identity",
+      covered_by = "kunit:pkm_kunit_primary_epoch",
+      skip = "the exec has to start before the sibling services its queued install; " ..
+             "primary_exec_pending_install_projects_ids derives exec credentials from " ..
+             "a pending token with a different projection and checks uid, gid, groups " ..
+             "and user, an unprojected control, and a setuid euid over the projection" },
+    function(t) end)
+
 test("KACS_IOC_INSTALL replaces the primary token of the calling process",
     { spec = "PKM *token.install.process-wide" }, function(t)
         local worker = vm:spawn_worker()
