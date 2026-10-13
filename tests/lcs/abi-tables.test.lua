@@ -424,9 +424,12 @@ test("each security information flag selects its own part of the descriptor",
             -- SACL_SECURITY_INFORMATION 0x08 is the privileged one.
             t:assert_eq(lcs.get_security(src, w, key, 0x8).errno, sys.E.ACCES,
                 "SACL_SECURITY_INFORMATION (0x08) needs ACCESS_SYSTEM_SECURITY")
-            -- REG_VALID_SECURITY_INFORMATION is 0x0F exactly.
-            t:assert_eq(lcs.get_security(src, w, key, 0x10).errno, sys.E.INVAL,
-                "0x10 is outside REG_VALID_SECURITY_INFORMATION (0x0F)")
+            t:assert_eq(lcs.get_security(src, w, key, 0x10).ret, 0,
+                "LABEL_SECURITY_INFORMATION (0x10) needs only READ_CONTROL")
+            t:assert_eq(lcs.get_security(src, w, key, 0x20).errno, sys.E.INVAL,
+                "0x20 is outside REG_VALID_SECURITY_INFORMATION (0x1F)")
+            t:assert_eq(lcs.get_security(src, w, key, 0x18).errno, sys.E.INVAL,
+                "LABEL and SACL selectors are mutually exclusive")
             t:assert_eq(lcs.get_security(src, w, key, 0x0).errno, sys.E.INVAL,
                 "and naming nothing is not a request either")
             sys.close(w, key)
