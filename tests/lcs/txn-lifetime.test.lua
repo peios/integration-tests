@@ -524,6 +524,14 @@ test("the mutation-log entry allocated for a refused bind is freed on the way ou
     end)
 
 -- ---- the timeout ------------------------------------------------------
+
+test("the lifetime timer and task callers share a softirq-safe state lock",
+    { spec = "PKM *txn.lifetime.timer-state-lock-softirq-safe",
+      covered_by = "kunit:pkm_lcs_kunit_transaction",
+      skip = "requires PROVE_LOCKING to check task and timer contexts; " ..
+             "pkm_lcs_kunit_transaction_timeout_marks_timed_out runs the " ..
+             "real timer, queries its terminal state and checks that " ..
+             "lockdep remains enabled" }, function(t) end)
 --
 -- These hot-swap TransactionTimeoutMs down to its range minimum of one
 -- second and put the default back before returning.
