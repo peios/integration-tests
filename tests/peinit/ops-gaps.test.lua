@@ -124,10 +124,9 @@ local SERVICES = {
     }),
 }
 
-local vm = peinit.boot({
-    name = "ops-gaps",
-    files = peinit.merge(peinit.tool("pt-notify"), peinit.seed("pt-ops-gaps", SERVICES)),
-})
+local files = peinit.merge(peinit.tool("pt-notify"), peinit.seed("pt-ops-gaps", SERVICES))
+files = peinit.test_binary("peinit", files)
+local vm = peinit.boot({ name = "ops-gaps", files = files })
 
 --- `svctl <command>` as JSON, with the operation identifier pulled out.
 local function send(command)
@@ -302,11 +301,7 @@ test("an on-demand start of a dependent of a target in Backoff is held, not refu
             "peinit *op.a-held-start-has-no-lifetime",
             "peinit *state.a-dependent-of-a-service-in-backoff-waits-rather-than-failing",
         },
-        tags = { "known-bug" },
-        -- PEI-1379, peinit 0.0.10: the boot graph holds a dependent of a target in
-        -- Backoff (the test above), but `svctl start` of the same kind of
-        -- dependent is answered INTERNAL_ERROR "control request failed",
-        -- for Requires and Wants alike, and no operation is created.
+        tags = { "pei-1379" },
     },
     function(t)
         vm:run("rm -f /run/pt-flaky2-ok")
