@@ -213,6 +213,16 @@ test("lazy population from the xattr installs the parsed object by compare-and-s
              "cas_loser_frees_copy and pkm_kunit_file_sd_cache_population_" ..
              "from_valid_xattr" }, function(t) end)
 
+test("native and legacy opens resolve a cold descriptor before taking the CAAP lock",
+    { spec = "PKM *facs.storage.open-resolves-before-caap",
+      covered_by = "kunit:pkm_kunit_file",
+      skip = "the lock order requires a deliberately cold inode cache and " ..
+             "active PROVE_LOCKING checks, not a guest-visible access result; " ..
+             "runs under pkm_kunit_native_cold_open_and_set_sd_lock_order and " ..
+             "pkm_kunit_legacy_cold_open_and_set_sd_lock_order, which perform " ..
+             "a cold open followed by set-SD and assert lockdep stays enabled" },
+    function(t) end)
+
 test("eviction frees the cached descriptor RCU-safely",
     { spec = "PKM *facs.storage.eviction-rcu-safe",
       covered_by = "kunit:pkm_kunit_file",
