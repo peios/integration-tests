@@ -202,6 +202,15 @@ test("inbound UDP to a multicast group one socket receives is still shared",
 
 -- ---- inbound: by tuple -----------------------------------------------
 
+test("an expired early-demux receiver falls back to tuple lookup",
+    { spec = "PKM *ntfe-identity.early-receiver-pin-or-lookup",
+      covered_by = "kunit:pkm_kunit_ntfe",
+      skip = "ntfe_kunit_early_receiver_pin_v4 and " ..
+             "ntfe_kunit_early_receiver_pin_v6 model a zero-reference " ..
+             "early socket under RCU, prove real bound-receiver lookup " ..
+             "and the no-receiver result, and check live-pin balance" },
+    function(t) end)
+
 test("inbound TCP and UDP find their receiver by tuple, the most specific socket first",
     { spec = "PKM *ntfe-identity.inbound-transport-lookup-by-tuple" }, function(t)
         E:replace(id.policy())
