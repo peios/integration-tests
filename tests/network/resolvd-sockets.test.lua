@@ -338,7 +338,7 @@ test("a start after a stop, svctl restart, and a restart after SIGKILL each remo
 -- ---------------------------------------------------------------------------
 
 test("native and stub TCP questions retain their admission slots after reading",
-    { spec = "resolvd *sockets.answered-connections-not-counted", tags = { "pei-1343" } }, function(t)
+    { spec = "resolvd *sockets.resolving-connections-keep-their-slot", tags = { "pei-1343" } }, function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "eth0 bound")
         wait_until(function()
             local s = rcall({ query = "status" })

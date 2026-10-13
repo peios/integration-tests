@@ -946,7 +946,7 @@ test("a connection that has not delivered a whole request five seconds after it 
     end)
 
 test("256 native slots count both readers and questions already being resolved",
-    { spec = "resolvd *native-framing.pending-connection-cap-closes-silently resolvd *sockets.answered-connections-not-counted", tags = { "pei-1343" } }, function(t)
+    { spec = "resolvd *native-framing.pending-connection-cap-closes-silently resolvd *sockets.resolving-connections-keep-their-slot", tags = { "pei-1343" } }, function(t)
         ready(t)
         t:log("agent limits: " .. ((sut:read_file("/proc/self/limits"):match("Max open files[^\n]*")) or "?"))
         -- Three connections whose requests resolvd has read and is still

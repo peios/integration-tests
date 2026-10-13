@@ -8,8 +8,8 @@
 -- and every_send_checks_capacity_but_replacing_a_transaction_can_reuse_its_slot:
 -- PSPU *nri-limits.upstream-in-flight
 -- resolvd *engine-servers.in-flight-ceiling-value
--- resolvd *engine-servers.in-flight-ceiling-refuses-first-attempts
--- resolvd *engine-servers.retries-not-checked-against-ceiling
+-- resolvd *engine-servers.in-flight-ceiling-refuses-new-transactions
+-- resolvd *engine-servers.retries-checked-against-ceiling
 -- resolvd *engine-servers.local-answers-unaffected-by-ceiling
 -- resolvd *engine-flow.report-in-flight-ceiling
 -- These are engine-unit coverage, not claims of reaching 4 096 through a VM door.

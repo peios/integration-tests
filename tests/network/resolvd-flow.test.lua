@@ -478,7 +478,7 @@ test("an answer through the fallback scope has no interface: a server's reply, a
     end)
 
 test("definite native hangup and TCP reset cancel pending questions without retries, caching or answer writes",
-    { spec = "resolvd *engine-flow.departed-asker-transactions-continue resolvd *engine-flow.departed-asker-reply-cached resolvd *engine-flow.departed-asker-answer-write-fails", tags = { "pei-1343" } },
+    { spec = "resolvd *engine-flow.departed-asker-transactions-cancelled resolvd *engine-flow.cancelled-replies-not-cached resolvd *engine-flow.departed-asker-not-answered", tags = { "pei-1343" } },
     function(t)
         -- Neither name is answered while its client is present. Once that
         -- client leaves, any stray retry would be answered and cached.
