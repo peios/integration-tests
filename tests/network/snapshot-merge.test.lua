@@ -1,8 +1,7 @@
 -- netd §8.3 "Merging DNS facts" — the servers and search domains a scope
 -- (and the status reply's `dns` and `search`) carries: the profile's own,
 -- then, with Dns.Offered, the lease's, the routers' and the DHCPv6
--- reply's, link-local IPv6 servers withheld, and adjacent duplicates
--- (only adjacent ones, PEI-1332) removed.
+-- reply's, link-local IPv6 servers included, and duplicates removed while retaining the first occurrence.
 --
 -- Harness: the scripted gateway (helpers.gateway) plays all three
 -- sources at once: a DHCPv4 server whose lease carries options 6, 15 and
@@ -48,7 +47,8 @@ local RA = {
 }
 gw:router(RA)
 
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local sut = network.boot({ bridges = { lan }, gateway = gw,
+    files = network.test_binary("netd", network.test_binary("resolvd", {})) })
 
 local function list_text(l) return "[" .. table.concat(l or {}, ", ") .. "]" end
 
@@ -100,18 +100,18 @@ local function expect(t, servers, domains, what)
     t:assert_eq(list_text(sc.domains), want_d, what .. ": snapshot domains")
 end
 
-test("servers: the profile's, then the lease's, then the routers' non-link-local RDNSS; domains: the profile's, then option 119 (else 15), then DNSSL; without Dns.Offered only the profile's",
+test("servers: the profile's, then the lease's, then the routers' RDNSS; domains: the profile's, then option 119 (else 15), then DNSSL; without Dns.Offered only the profile's",
     { spec = "netd *snapshot.dns-merge" }, function(t)
         profile({ ["Dns.Servers"] = "multi:10.77.0.9,fd77::9", ["Dns.Domains"] = "multi:prof.example" })
-        expect(t, { "10.77.0.9", "fd77::9", "10.77.0.1", "fd77::53" },
+        expect(t, { "10.77.0.9", "fd77::9", "10.77.0.1", "fd77::53", "fe80::53" },
             { "prof.example", "a.example", "b.example", "ra.example" },
-            "profile, lease (119 over 15), RDNSS (fe80::53 withheld), DNSSL")
+            "profile, lease (119 over 15), RDNSS (including fe80::53), DNSSL")
 
         -- A lease with no search list: its domain name instead.
         lease_with({ dns = { "10.77.0.1" }, options = { OPT15 } })
         gw:forget()
         t:assert(network.call(sut, { query = "renew", interface = "eth0" }).ok, "renew")
-        expect(t, { "10.77.0.9", "fd77::9", "10.77.0.1", "fd77::53" },
+        expect(t, { "10.77.0.9", "fd77::9", "10.77.0.1", "fd77::53", "fe80::53" },
             { "prof.example", "dn.example", "ra.example" }, "no option 119: option 15")
 
         -- Without Dns.Offered: the profile's alone.
@@ -119,25 +119,24 @@ test("servers: the profile's, then the lease's, then the routers' non-link-local
         expect(t, { "10.77.0.9", "fd77::9" }, { "prof.example" }, "Dns.Offered off")
 
         profile({ ["Dns.Offered"] = "dword:1", ["Dns.Servers"] = false, ["Dns.Domains"] = false })
-        expect(t, { "10.77.0.1", "fd77::53" }, { "dn.example", "ra.example" }, "the profile's own values removed")
+        expect(t, { "10.77.0.1", "fd77::53", "fe80::53" }, { "dn.example", "ra.example" }, "the profile's own values removed")
     end)
 
--- PEI-1332: de-duplication is of adjacent entries only. This is the
--- documented current behaviour; the test passes on it.
-test("each list loses adjacent duplicates only: a server or domain repeated with something between keeps both (PEI-1332)",
-    { spec = "netd *snapshot.adjacent-duplicates-only" }, function(t)
+-- PEI-1332: current netd removes repeated entries across the complete list.
+test("each list retains the first occurrence of a server or domain (PEI-1332)",
+    { spec = "netd *snapshot.first-occurrence-deduplication" }, function(t)
         lease_with({ dns = { "10.77.0.1", "10.77.0.2", "10.77.0.1" },
             options = { { 119, gateway.opt.names({ "x.example", "y.example", "x.example" }) } } })
         profile({ ["Dns.Servers"] = "multi:10.77.0.1", ["Dns.Domains"] = "multi:x.example" })
         -- profile 10.77.0.1 + lease 10.77.0.1 (adjacent: one goes),
-        -- 10.77.0.2, 10.77.0.1 (not adjacent: kept), then RDNSS.
-        expect(t, { "10.77.0.1", "10.77.0.2", "10.77.0.1", "fd77::53" },
-            { "x.example", "y.example", "x.example", "ra.example" },
-            "adjacent duplicates dropped, separated ones kept")
+        -- 10.77.0.2, then repeated 10.77.0.1 (removed), then RDNSS.
+        expect(t, { "10.77.0.1", "10.77.0.2", "fd77::53", "fe80::53" },
+            { "x.example", "y.example", "ra.example" },
+            "duplicates dropped across the whole list")
         profile({ ["Dns.Servers"] = false, ["Dns.Domains"] = false })
     end)
 
-test("with Dns.Offered the DHCPv6 reply's non-link-local servers and its domains come last",
+test("with Dns.Offered the DHCPv6 reply's servers and its domains come last",
     { spec = "netd *snapshot.dns-merge" }, function(t)
         lease_with({ dns = { "10.77.0.1" }, options = { OPT119 } })
         gw:dhcp6({ dns = { "fd77::54", "fe80::54" }, domains = { "v6.example" } })
@@ -146,7 +145,7 @@ test("with Dns.Offered the DHCPv6 reply's non-link-local servers and its domains
         profile({ ["Dns.Domains"] = "multi:prof.example" })
         -- Before alpha9 the shipped policy dropped the gateway's REPLY,
         -- so fd77::54 and v6.example never appeared (PEI-1366).
-        local ok, err = pcall(expect, t, { "10.77.0.1", "fd77::53", "fd77::54" },
+        local ok, err = pcall(expect, t, { "10.77.0.1", "fd77::53", "fe80::53", "fd77::54", "fe80::54" },
             { "prof.example", "a.example", "b.example", "ra.example", "v6.example" },
             "with a DHCPv6 reply")
         local asked = 0

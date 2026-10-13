@@ -763,8 +763,8 @@ test("three failures exhaust the question budget; advancing NXDOMAIN is refunded
 -- Send failures, link-local and zoned servers (last: edits the profile)
 -- ---------------------------------------------------------------------------
 
-test("a send that fails is logged `upstream <server>: <error>` and fails the attempt at once; a timeout or a later TCP failure is not logged. A bare link-local server is sent to unscoped, so every attempt to it fails so",
-    { spec = "resolvd *engine-query.send-failure-logged resolvd *engine-query.link-local-server-sent-unscoped" },
+test("a send that fails is logged `upstream <server>: <error>` and fails the attempt at once; a timeout or a later TCP failure is not logged. An unreachable IPv6 destination fails before sending",
+    { spec = "resolvd *engine-query.send-failure-logged" },
     function(t)
         up(t)
         -- The earlier tests had timeouts, mismatched TCP replies and TCP
@@ -774,15 +774,15 @@ test("a send that fails is logged `upstream <server>: <error>` and fails the att
             t:assert(l == nil, "no `upstream " .. srv .. "` line for a timeout or a TCP failure (" .. tostring(l) .. ")")
         end
 
-        network.write(sut, "Profiles\\default", { ["Dns.Servers"] = "multi:fe80::1" })
+        network.write(sut, "Profiles\\default", { ["Dns.Servers"] = "multi:2001:db8:ffff::1" })
         local ok = gw:serve({ timeout = 40, until_ = function()
             local s = network.call(sut, { query = "status" }, { path = RSOCK })
             local sc = s and s.ok and eth0_scope(s)
-            return sc ~= nil and table.concat(sc.servers or {}, ",") == "fe80::1," .. S1 .. "," .. S2
+            return sc ~= nil and table.concat(sc.servers or {}, ",") == "2001:db8:ffff::1," .. S1 .. "," .. S2
         end })
-        t:assert(ok, "resolvd has eth0's servers as fe80::1, then the lease's")
+        t:assert(ok, "resolvd has eth0's servers as 2001:db8:ffff::1, then the lease's")
         local before = demoted()
-        local name, good = fresh("linklocal")
+        local name, good = fresh("unroutable")
         dns.forget(gw)
         local c0 = counters()
         local t0 = gw.vm:clock():get()
@@ -790,18 +790,18 @@ test("a send that fails is logged `upstream <server>: <error>` and fails the att
         local took = gw.vm:clock():get() - t0
         local d = delta(c0, counters())
         local qs = dns.queries(gw, is(name))
-        local line = logged("upstream fe80::1: ")
+        local line = logged("upstream 2001:db8:ffff::1: ")
         local after = demoted()
-        t:log(string.format("linklocal: %s %s via %s; %s; demoted before [%s] after [%s]; log: %s", tostring(r and r.outcome),
+        t:log(string.format("unroutable: %s %s via %s; %s; demoted before [%s] after [%s]; log: %s", tostring(r and r.outcome),
             texts(r), tostring(r and r.server), dtext(d), before, after, tostring(line)))
         qlog(t, qs)
         t:assert(r and r.outcome == "found" and texts(r) == good, "found at the next server")
         t:assert_eq(#qs, 1, "one query reached the gateway")
-        t:assert(took < 1.5, string.format("answered in %.2f s: fe80::1's attempt failed at once, not at a deadline", took))
-        t:assert_eq(d.sent, 2, "two transactions started: fe80::1's and the next")
-        t:assert_eq(d.failed, 1, "fe80::1's failed")
-        t:assert(line ~= nil, "the failure is logged `upstream fe80::1: <error>`")
-        t:assert(after:find("fe80::1", 1, true) ~= nil, "fe80::1 is demoted")
+        t:assert(took < 1.5, string.format("answered in %.2f s: 2001:db8:ffff::1's attempt failed at once, not at a deadline", took))
+        t:assert_eq(d.sent, 2, "two transactions started: 2001:db8:ffff::1's and the next")
+        t:assert_eq(d.failed, 1, "2001:db8:ffff::1's failed")
+        t:assert(line ~= nil, "the failure is logged `upstream 2001:db8:ffff::1: <error>`")
+        t:assert(after:find("2001:db8:ffff::1", 1, true) ~= nil, "2001:db8:ffff::1 is demoted")
 
         network.reg(sut, { "del", network.KEY .. "\\Profiles\\default", "Dns.Servers" })
         gw:serve({ timeout = 40, until_ = function()
@@ -811,8 +811,8 @@ test("a send that fails is logged `upstream <server>: <error>` and fails the att
         end })
     end)
 
-test("an address with a zone is not a server: FallbackServers skips fe80::1%eth0 and logs it",
-    { spec = "resolvd *engine-query.zoned-server-address-dropped" }, function(t)
+test("FallbackServers has no interface scope: it skips fe80::1%eth0 and logs it",
+    { spec = "resolvd *engine-query.fallback-zone-unsupported" }, function(t)
         up(t)
         network.write(sut, "Dns", { FallbackServers = "multi:fe80::1%eth0,10.77.0.1" })
         local s
