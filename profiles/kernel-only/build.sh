@@ -33,6 +33,8 @@
 #                                    beside each as a sidecar — the
 #                                    tests stamp it into the xattr on
 #                                    a filesystem that carries xattrs
+#     ext4.img                       an empty ext4 volume, for inode
+#                                    reclaim tests (needs mkfs.ext4)
 #     ntfs.img                       a small empty NTFS volume, for a
 #                                    loop mount
 #
@@ -217,6 +219,16 @@ if command -v mkntfs >/dev/null 2>&1; then
     mkntfs -F -Q -q "$tree/fixtures/ntfs.img" >/dev/null 2>&1
 else
     warn "no mkntfs (ntfs-3g); the NTFS fixture will be missing"
+fi
+
+# A bounded persistent-inode fixture. tmpfs cannot demonstrate cache reclaim:
+# linked tmpfs inodes hold their data in memory until the files are removed.
+if command -v mkfs.ext4 >/dev/null 2>&1; then
+    truncate -s 16M "$tree/fixtures/ext4.img"
+    mkfs.ext4 -F -q -N 4096 -E lazy_itable_init=0,lazy_journal_init=0 \
+        "$tree/fixtures/ext4.img"
+else
+    warn "no mkfs.ext4 (e2fsprogs); the inode-reclaim fixture will be missing"
 fi
 
 # Pack. Sorted, epoch-dated, root-owned: the same archive for the same
