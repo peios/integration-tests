@@ -108,6 +108,17 @@ local SEED = {
     counted("pt-lp-routed", "Requires", { "pt-lp-exact:routed" }),
     counted("pt-lp-addressed", "Requires", { "pt-lp-exact:addressed" }),
 
+    -- Whole-set replacement, duplicates/empty members, a no-LEVEL
+    -- datagram, subset retraction, and finally a complete clear.
+    publisher("pt-lp-set", join(
+        level("pt-lp-set", "link\nLEVEL=addressed\nLEVEL=routed\nLEVEL=addressed\nLEVEL=", "published"),
+        { "sleep", "15", "send", "STATUS=still ready", "write", "/run/pt-lp-set.status", "ok",
+          "sleep", "15" }, level("pt-lp-set", "link", "subset"),
+        { "sleep", "15" }, level("pt-lp-set", "", "cleared"))),
+    counted("pt-lp-setlink", "Requires", { "pt-lp-set:link" }),
+    counted("pt-lp-setaddr", "Requires", { "pt-lp-set:addressed" }),
+    counted("pt-lp-setroute", "Requires", { "pt-lp-set:routed" }),
+
     -- Retraction: `up`, then six seconds later the empty value.
     publisher("pt-lp-retract", join(level("pt-lp-retract", "up", "published"),
         { "sleep", "6" }, level("pt-lp-retract", "", "retracted"))),
@@ -146,8 +157,8 @@ local SEED = {
 local vm = peinit.boot({
     memory = "800M",
     name = "levelspub",
-    files = peinit.merge(peinit.tool("pt-notify"), peinit.tool("pt-unixpeer", { signed = true }),
-        peinit.seed("zz-pt-levelspub", SEED)),
+    files = peinit.test_binary("peinit", peinit.merge(peinit.tool("pt-notify"), peinit.tool("pt-unixpeer", { signed = true }),
+        peinit.seed("zz-pt-levelspub", SEED))),
 })
 
 local function run(command, seconds)
@@ -195,8 +206,8 @@ local function held(t, name, times, seconds, why)
         why .. ": its start is still pending: " .. view.raw)
 end
 
-test("a level is matched exactly: `routed` does not satisfy a dependency on `addressed`",
-    { spec = "peinit *ready.a-level-is-matched-exactly-and-never-implied" },
+test("a one-member routed set does not imply addressed",
+    { spec = "peinit *ready.a-level-matches-membership-in-the-published-set" },
     function(t)
         start("pt-lp-exact")
         marker("pt-lp-exact", "published")
@@ -210,6 +221,28 @@ test("a level is matched exactly: `routed` does not satisfy a dependency on `add
         -- does not guess.
         start("pt-lp-addressed")
         held(t, "pt-lp-addressed", 0, 5, "a dependency on `addressed` is not met by `routed`")
+    end)
+
+test("one datagram replaces the whole readiness set; no LEVEL preserves it and empty clears it",
+    { tags = { "readiness-set" }, spec = "peinit *ready.a-datagram-replaces-the-whole-level-set " ..
+             "peinit *ready.a-level-matches-membership-in-the-published-set " ..
+             "peinit *ready.an-empty-level-retracts-it" },
+    function(t)
+        start("pt-lp-set")
+        marker("pt-lp-set", "published")
+        local names = { "pt-lp-setlink", "pt-lp-setaddr", "pt-lp-setroute" }
+        for _, name in ipairs(names) do start(name); ran(name, 1) end
+        marker("pt-lp-set", "status")
+        for _, name in ipairs(names) do start(name); ran(name, 2) end
+        marker("pt-lp-set", "subset")
+        start("pt-lp-setlink"); ran("pt-lp-setlink", 3)
+        for _, name in ipairs({ "pt-lp-setaddr", "pt-lp-setroute" }) do
+            start(name)
+            held(t, name, 2, 1, "replacement omits the requested member")
+        end
+        marker("pt-lp-set", "cleared")
+        start("pt-lp-setlink")
+        held(t, "pt-lp-setlink", 3, 1, "empty-only set retracts the remaining member")
     end)
 
 test("an empty LEVEL= retracts the level",
