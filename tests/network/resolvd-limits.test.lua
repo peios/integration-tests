@@ -35,7 +35,7 @@ local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
 dns.serve(gw, { zone = { ["www.example.test"] = { { type = "A", ttl = 60, data = "10.77.0.80" } } } })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = network.test_binary("resolvd", {}) })
 
 local function rstatus()
     local s, err = network.call(sut, { query = "status" }, { path = SOCK })
@@ -76,6 +76,10 @@ local function close_all(fds) for _, fd in ipairs(fds) do sys.close(sut, fd) end
 test("upstream queries advertise an EDNS0 buffer of 1 232 bytes",
     { spec = "PSPU *nri-limits.edns0-buffer" }, function(t)
         t:assert(network.serve_until(gw, sut, network.bound, { iface = true, timeout = 60 }), "netd bound a lease")
+        -- Resolving requests now retain admission slots. Quiesce the
+        -- background time client before asserting an exact free-slot count.
+        sut:run("svctl stop timed"):assert_ok()
+        gw:serve({ timeout = 7 })
         local p = sut:run_async("sh", { args = { "-c", "resolv query www.example.test A" } })
         gw:serve({ timeout = 15, until_ = function() return p:status() == "exited" end })
         t:assert(p:wait(5).stdout:match("^found"), "answered")
