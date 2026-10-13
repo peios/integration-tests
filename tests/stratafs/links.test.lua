@@ -258,16 +258,20 @@ test("a lock is taken on the provider's object, in its own lock space",
         end)
     end)
 
-test("locking needs no write access and cannot cause a copy-up",
-    { spec = "PKM *lock.taken-on-the-provider-object" }, function(t)
+test("locking respects descriptor grants without causing a copy-up",
+    { spec = { "PKM *lock.taken-on-the-provider-object", "PKM *lock.no-copy-up-and-facs-rights-still-apply" } }, function(t)
         stratafs.with(vm, "lock-no-write", {
             { name = "dest", flags = { "create" } },
             { name = "src", flags = { "ro" }, entries = { f = "original" } },
         }, function(s)
             local fd = sys.open(vm, s:join("f"), sys.O.RDONLY)
             t:assert(fd, "a read-only descriptor opens")
+            local exclusive = sys.flock(vm, fd, sys.LOCK_EX)
+            t:assert_eq(exclusive.ret, -1,
+                "FACS refuses an exclusive lock without a write grant")
+            t:assert_eq(exclusive.errno, sys.E.ACCES, "with EACCES")
             t:assert_eq(sys.flock(vm, fd, sys.LOCK_SH).ret, 0,
-                "and carries a shared lock")
+                "the read grant permits a shared lock")
             sys.flock(vm, fd, sys.LOCK_UN)
             sys.close(vm, fd)
             t:assert(sys.stat(vm, s:in_stratum("dest", "f")) == nil,
@@ -446,7 +450,7 @@ test("fsync follows the descriptor, not the path",
     end)
 
 test("synchronising a merged directory covers every stratum holding it",
-    { spec = "PKM *durability.dirsync-covers-every-stratum" }, function(t)
+    { spec = "PKM *durability.dirsync-covers-every-stratum-at-call-time" }, function(t)
         -- The set is evaluated when the operation runs, not when the
         -- descriptor was opened — which is exactly what a creation
         -- through that descriptor needs, since §4.5.3 materialises its

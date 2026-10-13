@@ -63,7 +63,7 @@ test("merging is recursive and recomputed, never cached",
     end)
 
 test("the mount root is a merged directory of the stratum roots",
-    { spec = "PKM *resolution.merge-participants" }, function(t)
+    { spec = { "PKM *resolution.merge-participants", "PKM *resolution.root-participation" } }, function(t)
         -- And it has one special case: where the ordinary provider rule
         -- would pick a stratum root that is present but not a
         -- directory, the root takes the first that is both present and
@@ -319,7 +319,7 @@ test("a non-directory provider masks every lower entry of that name",
     end)
 
 test("masking hides the whole subtree, and modifies nothing",
-    { spec = "PKM *resolution.masking-hides-whole-subtree" }, function(t)
+    { spec = { "PKM *resolution.masking-hides-whole-subtree", "PKM *resolution.masking-does-not-modify-strata" } }, function(t)
         stratafs.with(vm, "masking-total", {
             { name = "top", flags = { "create" }, entries = { x = "a file at x" } },
             { name = "mid", entries = { ["x/y/z/deep"] = "m", ["x/shallow"] = "m" } },
