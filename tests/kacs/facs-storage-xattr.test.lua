@@ -204,6 +204,15 @@ test("a writer swaps the pointer atomically — every observation is a complete 
         t:assert(sizes[#small] or sizes[#large], "and at least one length was observed")
     end)
 
+test("concurrent StrataFS descriptor reads complete without publication retries",
+    { spec = "PKM *facs.storage.stratafs-read-contention",
+      covered_by = "kunit:pkm_kunit_sd_cache",
+      skip = "deterministic provider-read counts and release order require the " ..
+             "private VFS xattr fixture; pkm_sd_test_contended_* covers valid, " ..
+             "missing, corrupt, reverse completion, later missing, read errors, " ..
+             "explicit invalidation, policy changes, ticket wrap and old tickets" },
+    function(t) end)
+
 test("lazy population from the xattr installs the parsed object by compare-and-swap",
     { spec = "PKM *facs.storage.population-lazy-cas",
       covered_by = "kunit:pkm_kunit_file",
