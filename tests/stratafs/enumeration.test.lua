@@ -5,6 +5,7 @@
 local sys = require("helpers.sys")
 local kacs = require("helpers.kacs")
 local stratafs = require("helpers.stratafs")
+local unix = require("helpers.unixsock")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
@@ -346,5 +347,106 @@ test("enumeration needs rights on every participant, or none at all",
                 t:assert(ok, "while the readable stratum opens on its own")
                 if ok then sys.close(worker, ok) end
             end)
+        end)
+    end)
+
+-- PEI-751: cross several capture-hash growth boundaries, then exercise the
+-- ordinal index with a one-record buffer and nonmonotonic seeks.
+test("small reads and seeks retain the capture across index growth",
+    { spec = "PKM *enumerate.offsets-are-plain-ordinals" }, function(t)
+        local upper, lower = {}, {}
+        for i = 1, 257 do
+            local name = string.format("entry-%04d", i)
+            upper[name] = "upper"
+            lower[name] = "shadowed"
+        end
+        lower.last = "lower"
+        stratafs.with(vm, "indexed", {
+            { name = "upper", entries = upper },
+            { name = "lower", entries = lower },
+        }, function(s)
+            local fd = open_dir(t, s.at)
+            local expected = entries(t, fd)
+            t:assert_eq(#expected, 260, "258 unique names plus dots")
+            t:assert_eq(sys.lseek(vm, fd, 0, 0).ret, 0, "rewind")
+            local small = sys.getdents_all(vm, fd, 32)
+            t:assert_eq(#small, #expected, "small reads do not skip entries")
+            for i, e in ipairs(small) do
+                t:assert_eq(e.name, expected[i].name, "same capture order")
+                t:assert_eq(e.off, i, "one ordinal per emitted entry")
+                t:assert_eq(e.ino, expected[i].ino, "same provider identity")
+            end
+            for _, position in ipairs({ 129, 2, 259, 1, 0, 258 }) do
+                t:assert_eq(sys.lseek(vm, fd, position, 0).ret, position, "seek")
+                local too_small, errno = sys.getdents(vm, fd, 1)
+                t:assert_eq(too_small, nil, "one byte cannot hold an entry")
+                t:assert_eq(errno, sys.E.INVAL, "short buffer returns EINVAL")
+                t:assert_eq(sys.lseek(vm, fd, 0, 1).ret, position,
+                    "failed emission does not consume a position")
+                local batch = sys.getdents(vm, fd, 32)
+                t:assert_eq(#batch, 1, "one entry fits")
+                t:assert_eq(batch[1].name, expected[position + 1].name,
+                    "seek resumes at the exact original entry")
+            end
+            local past_end = 0x100000002
+            t:assert_eq(sys.lseek(vm, fd, past_end, 0).ret, past_end, "large seek")
+            t:assert_eq(#sys.getdents(vm, fd, 32), 0, "large seek does not wrap")
+            t:assert_eq(sys.lseek(vm, fd, 2, 0).ret, 2, "rewind after EOF")
+            t:assert_eq(sys.getdents(vm, fd, 32)[1].name, expected[3].name,
+                "EOF does not discard the index")
+            sys.close(vm, fd)
+        end)
+    end)
+
+-- The first getdents is deliberately made only after transfer to a receiver
+-- which cannot open the participating directory in its own right.
+test("a transferred directory serves the opener's capture to a denied receiver",
+    { spec = "PKM *enumerate.captured-at-open" }, function(t)
+        stratafs.with(vm, "capture-transfer", {
+            { name = "upper", entries = { before = "visible at open" } },
+            { name = "lower", entries = { other = "also visible" } },
+        }, function(s)
+            local fd = open_dir(t, s.at)
+            vm:write_file(s:in_stratum("upper", "after"), "not captured")
+            vm:unlink(s:in_stratum("upper", "before"))
+            t:assert_eq(kacs.set_sd(vm, s:in_stratum("lower"),
+                kacs.grant_all_but(kacs.RIGHT.LIST_DIRECTORY)).ret, 0,
+                "withdraw list access after the opener captured the names")
+            local listener = assert(unix.socket(vm, unix.AF_UNIX, unix.SOCK.STREAM))
+            local socket_path = s.root .. "/transfer.sock"
+            t:assert_eq(unix.bind(vm, listener, socket_path).ret, 0, "bind")
+            t:assert_eq(unix.listen(vm, listener).ret, 0, "listen")
+            kacs.as_dacl_bound(t, vm, function(receiver)
+                local fresh, errno = sys.open(receiver, s.at,
+                    sys.O.RDONLY | sys.O.DIRECTORY)
+                t:assert_eq(fresh, nil, "receiver cannot reopen the directory")
+                t:assert_eq(errno, sys.E.ACCES, "receiver lacks list rights")
+                local client = assert(unix.socket(receiver, unix.AF_UNIX, unix.SOCK.STREAM))
+                t:assert_eq(unix.connect(receiver, client, socket_path).ret, 0, "connect")
+                local sender = assert(unix.accept(vm, listener))
+                local control = string.pack("<I8I4I4i4i4", 20, 1, 1, fd, 0)
+                t:assert_eq(unix.sendmsg(vm, sender, "!", { raw_control = control }).ret,
+                    1, "send directory through SCM_RIGHTS")
+                local message = unix.recvmsg(receiver, client, 1, { cmsg = 128 })
+                t:assert_eq(message.ret, 1, "receive directory")
+                t:assert(not message.ctrunc, "ancillary data fits")
+                local received
+                for _, cmsg in ipairs(message.cmsgs) do
+                    if cmsg.level == 1 and cmsg.type == 1 then
+                        received = string.unpack("<i4", cmsg.data)
+                    end
+                end
+                t:assert(received and received >= 0, "received a file descriptor")
+                local got = assert(sys.getdents_all(receiver, received, 32))
+                local names = by_name(got)
+                t:assert_eq(#got, 4, "two captured names and dots")
+                t:assert(names.before and names.other, "the opener's names survive")
+                t:assert(not names.after, "the receiver cannot trigger a new capture")
+                sys.close(receiver, received)
+                sys.close(receiver, client)
+                sys.close(vm, sender)
+            end)
+            sys.close(vm, fd)
+            sys.close(vm, listener)
         end)
     end)
