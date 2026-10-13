@@ -46,7 +46,7 @@ dns.serve(gw, {
     end,
 })
 local sut = network.boot({ bridges = { lan }, gateway = gw,
-    files = network.test_binary("resolvd") })
+    files = network.test_binary("resolvd", network.test_binary("netd")) })
 
 local SOCK = "/run/resolvd/resolv.sock"
 local SID = "S-1-5-80-3864064249-1823296737-2008945602-1354971773-2894779966"
