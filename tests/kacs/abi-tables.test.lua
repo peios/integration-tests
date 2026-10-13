@@ -633,7 +633,7 @@ test("the eleven token-handle ioctl commands are the published values",
         sys.close(vm, fd); sys.close(vm, source)
     end)
 
-test("the twenty-four token information classes are 0x01 through 0x18",
+test("the twenty-five token information classes are 0x01 through 0x19",
     { spec = "PKM *kacs-abi.token-information-classes" }, function(t)
         local fd = assert(token.open_self(vm))
         local seen = 0
@@ -643,8 +643,8 @@ test("the twenty-four token information classes are 0x01 through 0x18",
                 :format(name, class, sys.errname(e or 0)))
             seen = seen + 1
         end
-        t:assert_eq(seen, 24, "twenty-four classes are defined")
-        for _, class in ipairs({ 0x00, 0x19, 0x20, 0xFF }) do
+        t:assert_eq(seen, 25, "twenty-five classes are defined")
+        for _, class in ipairs({ 0x00, 0x1A, 0x20, 0xFF }) do
             local p, e = token.query(vm, fd, class)
             t:assert(not p, ("0x%02X is outside the enumeration"):format(class))
             t:assert_eq(e, sys.E.INVAL, "and is refused EINVAL")
