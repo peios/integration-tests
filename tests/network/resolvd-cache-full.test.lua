@@ -13,30 +13,21 @@
 -- is answered NXDOMAIN with no SOA, a zero lifetime that is never
 -- stored, so every entry in the cache is the test's.
 --
--- Names are `<letter><ttl>-<n>.fill.test`, an A record with that TTL:
---   e1750  the designated earliest entry
---   s1800  "short" fillers        l7200  "long" fillers
---   o<ttl> overflow entries, each a little shorter than the last
---   p320, m3600, d86400, t295, t310  single entries for the sweep steps
--- and three negative names with an SOA whose TTL and MINIMUM are set:
---   nxcap  NXDOMAIN, SOA TTL 100 000, MINIMUM 100 000 (capped to 300)
---   nxttl  NXDOMAIN, SOA TTL 290, MINIMUM 100 000 (290, the lesser)
---   nxmin  NODATA,   SOA TTL 100 000, MINIMUM 285 (285, the lesser)
+-- Names normally carry their positive TTL: <letter><ttl>-<n>.fill.test.
+-- Selected held keys are overwritten with short positive or negative
+-- replies to test expiry and compare lifetimes without refilling the cache.
+-- New keys at capacity remove expired entries, then only the earliest
+-- live entry if still full. The incoming answer's lifetime is irrelevant.
 --
--- A full cache is fragile: storing any new key at 8 192 sweeps every
--- entry due to expire a second or more before the new one. So the steps
--- are ordered, each starts from the state the last one left, and every
--- check that must not store anything is asked in "verify" mode, in
--- which the gateway answers with TTL 0 (a zero lifetime is not stored):
--- `source` then tells a hit (`cache`) from a miss (`dns`).
+-- In "verify" mode the gateway answers with a zero lifetime, so a cache
+-- miss cannot insert a replacement and perturb subsequent observations.
+-- The negative-lifetime test observes eviction order against positive
+-- controls. It bounds the 300-second cap between 270 and 330 seconds
+-- without a five-minute wait. Exact cap/expiry arithmetic is also covered
+-- by engine host tests expanded_nodata_cname_uses_the_negative_lifetime_and_ages_with_the_cache
+-- and hostile_ttls_and_missing_soa_are_bounded.
 --
--- The 300-second negative cap cannot be waited out in a test, so the
--- sweep is the instrument: negative entries stored next to positive
--- entries of known lifetime, then a positive entry of a chosen TTL
--- stored at a full cache. Which of them it sweeps brackets their
--- lifetimes.
---
--- Own VMs: two whole fills of the cache.
+-- Own VMs: one whole fill of the cache.
 
 local peinit = require("helpers.peinit")
 local gateway = require("helpers.gateway")
@@ -54,7 +45,7 @@ local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
 
 local verify = false   -- answer every owned name with TTL 0
-local answered = 0     -- owned questions the gateway has answered
+local overrides = {}  -- alternate replies under already-held keys
 
 local function soa(ttl, minimum)
     return { { name = "fill.test", type = "SOA", ttl = ttl, data = { minimum = minimum } } }
@@ -65,20 +56,16 @@ dns.serve(gw, {
         local qn = q.questions[1]
         local label = qn and qn.name:lower():match("^([^.]+)%.fill%.test$")
         if not label then return nil end   -- NXDOMAIN, no SOA: never stored
-        answered = answered + 1
         default.answers, default.authority = {}, {}
         local function negative(rcode, ttl, minimum)
             -- In verify mode without the SOA: a zero lifetime, not stored.
             default.rcode, default.authority = rcode, verify and {} or soa(ttl, minimum)
         end
-        if label == "nxcap" then
-            negative(dns.RCODE.NXDOMAIN, 100000, 100000)
-        elseif label == "nxttl" then
-            negative(dns.RCODE.NXDOMAIN, 290, 100000)
-        elseif label == "nxmin" then
-            negative(dns.RCODE.NOERROR, 100000, 285)
+        local reply = overrides[label]
+        if reply and reply.rcode then
+            negative(reply.rcode, reply.ttl, reply.minimum)
         else
-            local ttl = assert(tonumber(label:match("^%a+(%d+)")), "a fill name carries its TTL")
+            local ttl = reply and reply.ttl or assert(tonumber(label:match("^%a+(%d+)")), "a fill name carries its TTL")
             default.rcode = dns.RCODE.NOERROR
             default.answers = { { name = qn.name, type = "A", ttl = verify and 0 or ttl, data = "10.77.1.1" } }
         end
@@ -173,11 +160,12 @@ test("the cache holds 8 192 entries; a new key at a full cache with nothing to s
         fill(t, "l7200", 1, L)
         t:log(string.format("filled %d entries (%d short, %d long) in ~%d s", CAP, S, L, os.time() - c0))
         t:assert_eq(entries(), CAP, "full at 8 192")
+        t:assert(os.time() - c0 < 600, "fill completed before the overflow TTL can overtake a filler")
 
         -- Five more keys, one at a time, each expiring before everything
         -- held: the sweep finds nothing, so each evicts the earliest.
         for k = 1, 5 do
-            local o = query(name("o" .. (1700 - 2 * k), 0))
+            local o = query(name("o" .. (900 - 2 * k), 0))
             t:assert_eq(o.source, "dns", "overflow " .. k .. " asked upstream")
             t:assert_eq(entries(), CAP, "after overflow " .. k .. " the cache still holds 8 192")
         end
@@ -185,10 +173,10 @@ test("the cache holds 8 192 entries; a new key at a full cache with nothing to s
         hit = cached(t, name("e1750", 0))
         t:assert(not hit, "the designated earliest entry was evicted by the first overflow")
         for k = 1, 4 do
-            hit = cached(t, name("o" .. (1700 - 2 * k), 0))
+            hit = cached(t, name("o" .. (900 - 2 * k), 0))
             t:assert(not hit, "overflow " .. k .. " was the earliest when overflow " .. (k + 1) .. " came, and was evicted")
         end
-        t:assert((cached(t, name("o1690", 0))), "the last overflow entry is held")
+        t:assert((cached(t, name("o890", 0))), "the last overflow entry is held")
         t:assert((cached(t, name("s1800", 1))), "the first short filler is held")
         t:assert((cached(t, name("l7200", 1))), "the first long filler is held")
         t:assert_eq(entries(), CAP, "verification stored nothing")
@@ -208,70 +196,101 @@ test("storing under a key the full cache already holds replaces it and evicts no
         local new_ttl = after.records[1] and after.records[1].ttl
         t:assert(new_ttl and new_ttl >= 1795 and new_ttl > old_ttl,
             string.format("its entry is the new one: TTL %s, was %s", tostring(new_ttl), tostring(old_ttl)))
-        t:assert((cached(t, name("o1690", 0))), "the earliest-expiring entry was not evicted")
+        t:assert((cached(t, name("o890", 0))), "the earliest-expiring entry was not evicted")
     end)
 
-test("a new key at a full cache sweeps every entry expiring a second or more before it, live or not",
-    { spec = "resolvd *engine-cache.eviction-sweeps-against-new-expiry" }, function(t)
+test("a new key at a full cache removes expired entries without evicting a live entry when that makes room",
+    { spec = "resolvd *engine-cache.eviction-sweeps-expired-entries" }, function(t)
         t:assert_eq(entries(), CAP, "the cache is full")
-        t:assert((cached(t, name("s1800", 3))), "a short filler is live before the sweep")
+        -- Overwrite two existing keys: no capacity eviction happens here.
+        for _, k in ipairs({ 4, 5 }) do
+            overrides["s1800-" .. k] = { ttl = 2 }
+            t:assert_eq(query(name("s1800", k), { no_cache = true }).source, "dns", "a held key now expires in two seconds")
+        end
+        gw:serve({ timeout = 4 })
+        t:assert_eq(entries(), CAP, "untouched expired entries still count")
+        t:assert((cached(t, name("o890", 0))), "the earliest live entry is still held")
         local r = query(name("m3600", 0))
         t:assert_eq(r.source, "dns", "the new key is asked upstream")
-        -- Swept: the 4 096 shorts and the overflow entry (all due before
-        -- now + 3 599 s, all live); kept: the longs; then the new key.
-        t:assert_eq(entries(), L + 1, string.format("only the %d long fillers and the new entry are left", L))
-        t:assert(not (cached(t, name("s1800", 3))), "the live short filler was swept")
-        t:assert(not (cached(t, name("o1690", 0))), "the overflow entry was swept")
-        t:assert((cached(t, name("l7200", 3))), "a long filler, due after the new entry, is kept")
+        t:assert_eq(entries(), CAP - 1, "two expired entries removed, one inserted")
+        for _, k in ipairs({ 4, 5 }) do
+            t:assert(not (cached(t, name("s1800", k))), "the expired entry was removed")
+        end
+        t:assert((cached(t, name("o890", 0))), "no extra live victim was needed")
+        t:assert((cached(t, name("s1800", 3))), "the live short filler was not swept")
+        t:assert((cached(t, name("l7200", 3))), "the long filler was not swept")
         t:assert((cached(t, name("m3600", 0))), "the new entry is held")
+        t:assert_eq(entries(), CAP - 1, "verification stored nothing")
     end)
 
-test("negative answers live for the lesser of the SOA's TTL and MINIMUM, capped at 300 s, for NXDOMAIN and NODATA alike",
+test("NXDOMAIN and NODATA use the lesser SOA TTL or MINIMUM and cap long negative lifetimes",
     { spec = "resolvd *engine-cache.negative-lifetime-from-soa resolvd *engine-cache.nxdomain-uses-negative-lifetime resolvd *engine-cache.nodata-uses-negative-lifetime PSPU *nri-resolution.negative-ttl-soa-minimum-capped PSPU *nri-limits.negative-ttl-cap" },
     function(t)
-        -- Room for exactly four: the three negative entries and p320.
-        fill(t, "l7200", L + 1, CAP - 4 - entries())
-        local nxcap = query("nxcap.fill.test")
-        local nxttl = query("nxttl.fill.test")
-        local nxmin = query("nxmin.fill.test")
-        local p = query(name("p320", 0))
-        t:log(string.format("nxcap %s/%s exit %s; nxttl %s/%s; nxmin %s/%s records %d",
-            tostring(nxcap.outcome), tostring(nxcap.source), tostring(nxcap.exit), tostring(nxttl.outcome),
-            tostring(nxttl.source), tostring(nxmin.outcome), tostring(nxmin.source), #nxmin.records))
-        t:assert(nxcap.outcome == "notfound" and nxttl.outcome == "notfound", "NXDOMAIN is notfound")
-        t:assert(nxmin.outcome == "found" and #nxmin.records == 0, "NODATA is found with no records")
-        t:assert_eq(p.source, "dns", "p320 asked upstream")
-        t:assert_eq(entries(), CAP, "all four stored: the cache is full")
-        for _, n in ipairs({ "nxcap", "nxttl", "nxmin" }) do
-            t:assert((cached(t, n .. ".fill.test")), n .. " is held")
+        fill(t, "l7200", 10000, CAP - entries())
+        -- All nine keys already exist. Replacing them avoids an admission
+        -- eviction until all the comparison lifetimes have been installed.
+        local cases = {
+            { k = 10, rcode = dns.RCODE.NXDOMAIN, ttl = 190, minimum = 100000 },
+            { k = 11, rcode = dns.RCODE.NXDOMAIN, ttl = 100000, minimum = 190 },
+            { k = 12, rcode = dns.RCODE.NOERROR, ttl = 190, minimum = 100000 },
+            { k = 13, rcode = dns.RCODE.NOERROR, ttl = 100000, minimum = 190 },
+            { k = 14, rcode = dns.RCODE.NXDOMAIN, ttl = 100000, minimum = 100000 },
+            { k = 15, rcode = dns.RCODE.NOERROR, ttl = 100000, minimum = 100000 },
+            { k = 16, ttl = 160 }, { k = 17, ttl = 270 }, { k = 18, ttl = 330 },
+        }
+        local started = os.time()
+        for _, c in ipairs(cases) do
+            overrides["s1800-" .. c.k] = c
+            local r = query(name("s1800", c.k), { no_cache = true })
+            t:assert_eq(r.source, "dns", "the held key was overwritten upstream")
+            if c.rcode == dns.RCODE.NXDOMAIN then
+                t:assert_eq(r.outcome, "notfound", "NXDOMAIN is notfound")
+            elseif c.rcode then
+                t:assert(r.outcome == "found" and #r.records == 0, "NODATA is found with no records")
+            end
+            t:assert((cached(t, name("s1800", c.k))), "the replacement is cached")
+            t:assert_eq(entries(), CAP, "overwriting did not evict a neighbour")
         end
-
-        -- A 295-second entry sweeps what is due before now + 294 s. A
-        -- lifetime of 100 000 would survive it; so would one of 300.
-        t:assert_eq(query(name("t295", 0)).source, "dns", "t295 asked upstream")
-        t:assert_eq(entries(), CAP - 1, "exactly two entries swept, then one stored")
-        t:assert(not (cached(t, "nxttl.fill.test")), "nxttl (SOA TTL 290 < MINIMUM 100 000) lived less than 295 s")
-        t:assert(not (cached(t, "nxmin.fill.test")), "nxmin, NODATA (MINIMUM 285 < SOA TTL 100 000) lived less than 295 s")
-        t:assert((cached(t, "nxcap.fill.test")), "nxcap (both 100 000) outlives a 295-second entry")
-        t:assert((cached(t, name("p320", 0))), "p320 outlives it too")
-
-        -- Full again, then a 310-second entry sweeps what is due before
-        -- now + 309 s: nxcap and t295, but not p320.
-        fill(t, "l7200", 10000, 1)
-        t:assert_eq(query(name("t310", 0)).source, "dns", "t310 asked upstream")
-        t:assert_eq(entries(), CAP - 1, "exactly two entries swept (nxcap, t295), then one stored")
-        t:assert(not (cached(t, "nxcap.fill.test")), "nxcap is gone: its lifetime was capped below 310 s")
-        t:assert((cached(t, name("p320", 0))), "p320 is kept: the sweep reached no further than it should")
-        t:assert((cached(t, name("l7200", 1))), "the long fillers are kept")
+        local overflow = 0
+        local function evict(n)
+            for _ = 1, n do
+                overflow = overflow + 1
+                t:assert_eq(query(name("v1000", overflow)).source, "dns", "overflow asked upstream")
+                t:assert_eq(entries(), CAP, "one live victim per new key")
+            end
+        end
+        local function held(k) return cached(t, name("s1800", k)) end
+        evict(1)
+        t:assert(not held(16), "the 160-second control expires before the negative answers")
+        for k = 10, 15 do t:assert(held(k), "negative answer outlives the 160-second control") end
+        evict(4)
+        for k = 10, 13 do t:assert(not held(k), "the lesser SOA field bounds both NXDOMAIN and NODATA") end
+        t:assert(held(17), "the 270-second control outlives the 190-second negative answers")
+        t:assert(held(14) and held(15), "both capped answers outlive the shorter negatives")
+        evict(1)
+        t:assert(not held(17), "the 270-second control expires before the capped answers")
+        t:assert(held(14) and held(15), "both capped answers outlive 270 seconds")
+        evict(2)
+        t:assert(not held(14) and not held(15), "both capped answers expire before the 330-second control")
+        t:assert(held(18), "the 330-second control was kept")
+        evict(1)
+        t:assert(not held(18), "the last control was the next earliest entry")
+        -- Minimum separation is 30 seconds; reject a stalled run rather
+        -- than interpreting clock drift as evidence about lifetime order.
+        t:assert(os.time() - started < 20, "comparisons completed within their TTL separation margin")
+        t:assert((cached(t, name("s1800", 1))), "other live short fillers are retained")
+        t:assert((cached(t, name("l7200", 1))), "other live long fillers are retained")
     end)
 
-test("a day-long answer arriving at a full cache of shorter-lived answers empties it",
-    { spec = "resolvd *engine-cache.long-lived-entry-empties-full-cache" }, function(t)
-        local room = CAP - entries()
-        if room > 0 then fill(t, "l7200", 20000, room) end
+test("a day-long answer at capacity evicts only the earliest live entry",
+    { spec = "resolvd *engine-cache.long-lived-entry-preserves-live-entries" }, function(t)
         t:assert_eq(entries(), CAP, "the cache is full of shorter-lived answers")
         t:assert_eq(query(name("d86400", 0)).source, "dns", "the day-long answer is asked upstream")
-        t:assert_eq(entries(), 1, "every other entry was swept")
+        t:assert_eq(entries(), CAP, "one entry was replaced, not the whole cache")
         t:assert((cached(t, name("d86400", 0))), "the day-long answer is held")
-        t:assert(not (cached(t, name("l7200", 2))), "a long filler is gone")
+        t:assert(not (cached(t, name("o890", 0))), "the earliest overflow entry was evicted")
+        for k = 1, 9 do t:assert((cached(t, name("v1000", k))), "later overflow entries survive") end
+        t:assert((cached(t, name("s1800", 1))), "a short filler survives")
+        t:assert((cached(t, name("l7200", 2))), "a long filler survives")
+        t:assert_eq(entries(), CAP, "verification stored nothing")
     end)

@@ -29,7 +29,7 @@
 --
 -- The two in-flight invalidation cases require an image containing the
 -- PEI-1339 source correction (resolvd bc4efa36dd72a942169e4d5ad849f5806a4fd7f1).
--- Their source-only update has not been run in a VM; older images can fail.
+-- Older images without that correction can fail these cases.
 --
 -- Own VMs: the lease's DNS servers are changed.
 
@@ -359,16 +359,27 @@ test("stub queries, lookup and reverse consult the cache",
         t:assert_eq(rstatus().counters.cache_hits, hits + 3, "three cache hits: stub, lookup's A, reverse")
     end)
 
-test("expired entries stay, counted, until something replaces them",
+test("expired entries stay counted until lookup removes them before the replacement arrives",
     { spec = "resolvd *engine-cache.expired-entries-linger-and-are-counted" }, function(t)
         local before = entries()
         t:assert_eq(query(t, "linger.example.test", "A").source, "dns", "a 2-second answer stored")
         t:assert_eq(entries(), before + 1, "one entry more")
         gw:serve({ timeout = 4 })
         t:assert_eq(entries(), before + 1, "four seconds on, the expired entry is still counted")
-        local r = query(t, "linger.example.test", "A")
-        t:assert_eq(r.source, "dns", "but it is not served: the question goes upstream")
-        t:assert_eq(entries(), before + 1, "the fresh answer replaced it")
+        local count = #asked("linger.example.test")
+        hold["linger.example.test"] = true
+        local p = sut:run_async("sh", { args = { "-c", "resolv query linger.example.test A" } })
+        t:assert(gw:serve({ timeout = 10, until_ = function() return #asked("linger.example.test") > count end }),
+            "the expired lookup went upstream; its replacement reply is held")
+        t:assert_eq(entries(), before, "lookup removed the expired entry before any replacement arrived")
+        t:assert_eq(release(), 1, "release the replacement reply")
+        hold["linger.example.test"] = nil
+        t:assert(gw:serve({ timeout = 10, until_ = function() return p:status() == "exited" end }),
+            "the requester received its replacement")
+        local result = p:wait(5)
+        t:assert_eq(result.exit_code, 0, "the replacement query succeeded")
+        t:assert_eq(parse(result.stdout).source, "dns", "the expired entry was not served")
+        t:assert_eq(entries(), before + 1, "the fresh answer inserted a new entry")
     end)
 
 test("a reply that arrives after a flush answers its requester without being cached",
@@ -405,7 +416,7 @@ test("a reply that arrives after a flush answers its requester without being cac
     end)
 
 test("an entry's key is the candidate in lower case, the record type and the scope; the class is not in it",
-    { spec = "resolvd *engine-cache.key-is-lowercase-candidate-type-scope PSPU *nri-resolution.cache-keyed-by-name-type-scope" },
+    { spec = "resolvd *engine-cache.key-is-lowercase-candidate-type-scope resolvd *stub-receive.unsupported-class-notimp PSPU *nri-resolution.cache-keyed-by-name-type-scope" },
     function(t)
         -- The lease loses its server and default DNS claim: no domain
         -- claims these names, so the fallback scope takes questions.
@@ -429,15 +440,20 @@ test("an entry's key is the candidate in lower case, the record type and the sco
         for _, q in ipairs(asked("key.example.test")) do
             t:assert_eq(q.msg.questions[1].class, dns.CLASS.IN, "every question upstream is class IN")
         end
-        -- A stub question of class CH finds the IN entry.
+        -- Class is absent from the engine key because only IN reaches it.
+        -- Even with a matching cached answer, the stub rejects CH first.
         local hits = rstatus().counters.cache_hits
         local fd = assert(ntfe.udp_connect(sut, "127.0.0.53", 53))
         ntfe.send(sut, fd, dns.encode(dns.query("key.example.test", "A", { id = 778, class = dns.CLASS.CH })))
         local got
         gw:serve({ timeout = 5, until_ = function() got = ntfe.recv(sut, fd, 50, 4096); return got ~= nil end })
         sys.close(sut, fd)
-        t:assert(got ~= nil, "the stub door answered the CH question")
-        t:assert_eq(rstatus().counters.cache_hits, hits + 1, "from the class-IN entry")
+        local reply = got and dns.decode(got)
+        t:assert(reply and reply.id == 778, "the stub door answered the CH question")
+        t:assert_eq(reply.rcode, dns.RCODE.NOTIMP, "unsupported class is rejected before cache lookup")
+        t:assert_eq(#reply.answers, 0, "the class-IN cached answer was not exposed")
+        t:assert_eq(reply.questions[1] and reply.questions[1].class, dns.CLASS.CH, "the original question class is echoed")
+        t:assert_eq(rstatus().counters.cache_hits, hits, "the rejected question never consulted the cache")
         t:assert_eq(#asked("key.example.test", "A"), 1, "nothing more went upstream")
 
         -- The lease's server returns: step 5 takes the same name and
