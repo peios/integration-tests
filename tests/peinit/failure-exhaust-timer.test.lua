@@ -39,9 +39,11 @@ local function ticker(name, schedule, persistent)
 end
 
 local function boot_with(name, timer)
+    -- PEINIT_TEST_BINARY, when set, boots a candidate PID 1 in place of the
+    -- shipped one, so the writer's descriptor cleanup is the candidate's.
     local vm = peinit.boot({
         name = name,
-        files = peinit.seed("pt-" .. name, {
+        files = peinit.test_binary("peinit", peinit.seed("pt-" .. name, {
             { path = [[Machine\System]] },
             { path = [[Machine\System\Services]] },
             -- login-console takes /dev/console once the boot settles, after
@@ -51,7 +53,7 @@ local function boot_with(name, timer)
                 { name = "Disabled", type = "dword", data = 1 },
             } },
             timer,
-        }),
+        })),
     })
     peinit.settle(vm)
     return vm
@@ -106,6 +108,115 @@ local function stable_sample(vm, service, pid1_exe, pid1_cgroup)
         if a == b then return { fired = a, forks = forks } end
         return nil
     end, { timeout = 15, interval = 0.2, desc = "a sample with no firing mid-read" })
+end
+
+-- PEI-1498: hold the writer in real LCS I/O, inspect its descriptors, then
+-- prove that closing inherited handles did not break either storage layout.
+for _, per_trigger in ipairs({ false, true }) do
+    local layout = per_trigger and "per-trigger" or "single"
+    test("a " .. layout .. " timer writer drops supervision descriptors and still records its timestamp",
+        { spec = "peinit *evalt.timer-writer-closes-inherited-descriptors-before-opening-its-key" },
+        function(t)
+            local service = "pt-fd-" .. layout
+            local timer = ticker(service, "timer:*-*-* *:*:5/10", true)
+            if per_trigger then
+                for _, value in ipairs(timer.values) do
+                    if value.name == "Triggers" then
+                        value.data = { "timer:*-*-* *:*:5/10", "timer:*-*-* *:*:6/10" }
+                    end
+                end
+            end
+            local vm = boot_with("timer-fds-" .. layout, timer)
+            local key = [[Machine\System\Services\]] .. service .. (per_trigger and [[\TimerState]] or "")
+            local names = per_trigger and {
+                "%2A-%2A-%2A%20%2A%3A%2A%3A5%2F10",
+                "%2A-%2A-%2A%20%2A%3A%2A%3A6%2F10",
+            } or { "LastTimerRun" }
+            local function timestamps()
+                local out = vm:run("reg get '" .. key .. "'")
+                local values = {}
+                if out.exit_code == 0 then
+                    for _, line in ipairs(peinit.lines(out.stdout)) do
+                        local name, ty, data = line:match("^(%S+) = (%S+) (.*)$")
+                        if name and ty == "REG_QWORD" then values[name] = tonumber(data) end
+                    end
+                end
+                return values
+            end
+            local before = wait_until(function()
+                local values = timestamps()
+                for _, name in ipairs(names) do if not values[name] then return nil end end
+                return values
+            end, { timeout = 20, interval = 0.3, desc = "initial " .. layout .. " history" })
+            local pid1_exe = trim(assert(peinit.proc_link(vm, 1, "exe")))
+            local pid1_cgroup = trim(assert(peinit.proc(vm, 1, "cgroup")))
+            local parent_fds = peinit.fds(vm, 1)
+            local has_epoll = false
+            for fd, target in pairs(parent_fds) do
+                if fd >= 3 and target:find("eventpoll", 1, true) then has_epoll = true end
+            end
+            t:assert(has_epoll, "premise: PID 1 holds a supervision epoll descriptor")
+            local registryd = json.decode(vm:run("svctl --json status registryd").stdout).current_job.pid
+            t:assert(registryd, "registryd is running")
+            wait_for_second(0, 2)
+            wait_until(function() return #bare_forks(vm, pid1_exe, pid1_cgroup) == 0 or nil end,
+                { timeout = 8, interval = 0.1, desc = "no prior writer before freezing registryd" })
+            local baseline = started(vm, service)
+            vm:run("kill -STOP " .. registryd):assert_ok()
+            local stopped_ns
+            local ok, err = pcall(function()
+                local clock = vm:syscall(228, { -- CLOCK_REALTIME, without launching a process
+                    args = { 0, 0 }, bufs = { string.rep("\0", 16) }, ptrs = { 1 },
+                })
+                local seconds, nanos = string.unpack("<i8i8", clock.out_bufs[1])
+                stopped_ns = seconds * 1000000000 + nanos
+                wait_until(function()
+                    return started(vm, service) >= baseline + #names or nil
+                end, { timeout = 15, interval = 0.2, desc = "fresh " .. layout .. " firings" })
+                local writers = bare_forks(vm, pid1_exe, pid1_cgroup)
+                t:assert(#writers >= #names, "each fresh timestamp write is still held in LCS")
+                for _, writer in ipairs(writers) do
+                    local wchan = trim(peinit.proc(vm, writer, "wchan") or "")
+                    t:assert(wchan:find("lcs", 1, true) or wchan:find("source_response", 1, true),
+                        "writer is blocked in LCS: " .. wchan)
+                    local fds = peinit.fds(vm, writer)
+                    local own_keys = 0
+                    for fd, target in pairs(fds) do
+                        if fd >= 3 then
+                            t:assert_eq(target, "anon_inode:[lcs-key]",
+                                "writer " .. writer .. " fd " .. fd .. " is its own registry key")
+                            own_keys = own_keys + 1
+                        end
+                    end
+                    t:assert(own_keys <= 1, "only the writer's freshly opened key can remain")
+                    for fd = 0, 2 do
+                        if parent_fds[fd] then
+                            t:assert_eq(fds[fd], parent_fds[fd], "standard descriptor " .. fd .. " retained")
+                        end
+                    end
+                end
+                local current = peinit.fds(vm, 1)
+                for fd, target in pairs(parent_fds) do
+                    if target:find("eventpoll", 1, true) then
+                        t:assert_eq(current[fd], target, "PID 1 retains its supervision descriptor")
+                    end
+                end
+            end)
+            -- Always resume the source, including assertion/setup failures.
+            vm:run("kill -CONT " .. registryd):assert_ok()
+            if not ok then error(err, 0) end
+            wait_until(function()
+                local values = timestamps()
+                for _, name in ipairs(names) do
+                    if not values[name] or values[name] <= before[name] or values[name] < stopped_ns then
+                        return nil
+                    end
+                end
+                return true
+            end, { timeout = 12, interval = 0.2, desc = "held writes advance every " .. layout .. " REG_QWORD" })
+            wait_until(function() return #bare_forks(vm, pid1_exe, pid1_cgroup) == 0 or nil end,
+                { timeout = 8, interval = 0.1, desc = "completed writers are reaped" })
+        end)
 end
 
 test("a persistent timer's firing forks PID 1 for its last-run write, and that is the only fork outside the launch path",
