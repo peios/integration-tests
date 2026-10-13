@@ -542,7 +542,7 @@ test("demotion does not move routing: a scope whose every server is demoted stil
 -- ---------------------------------------------------------------------------
 
 test("with no scope able to take a question and no fallback servers, it is unavailable at once, without a query",
-    { spec = "PSPU *nri-resolution.no-scope-is-unavailable-without-query" }, function(t)
+    { spec = "resolvd *engine-flow.unroutable-candidate-is-unavailable PSPU *nri-resolution.no-scope-is-unavailable-without-query" }, function(t)
         setup(t)
         fallback(t, nil)
         configure(t, { dummy0 = { addr = { "10.91.0.1/24" } }, dummy1 = {}, eth0 = false, eth0_default = false },
@@ -563,7 +563,7 @@ test("with no scope able to take a question and no fallback servers, it is unava
     end)
 
 test("with no earlier claimant and no interface servers the fallback scope takes the question: FallbackServers and ExtraSearchDomains; once an interface has a server the fallback takes nothing, and what was cached through it is not consulted",
-    { spec = "resolvd *engine-routing.serverless-scope-keeps-selection PSPU *nri-resolution.fallback-scope-from-registry PSPU *nri-resolution.route-fallback-only-without-interface-servers" },
+    { spec = "resolvd *engine-routing.fallback-unused-while-any-interface-has-a-server resolvd *engine-routing.serverless-scope-keeps-selection PSPU *nri-resolution.fallback-scope-from-registry PSPU *nri-resolution.route-fallback-only-without-interface-servers" },
     function(t)
         setup(t)
         ZONE["r7c.fb.test"] = { { type = "A", ttl = 300, data = "10.77.0.87" } }

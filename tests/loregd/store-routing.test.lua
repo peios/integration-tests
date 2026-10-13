@@ -2,27 +2,11 @@
 -- `main` schema and the attached `volatile` schema, and the operations that
 -- span both.
 --
--- What is reachable end to end:
---   * Create-key routes on the request's volatile flag, and a single-key
---     operation routes on the key's own volatile column: create a volatile and
---     a persistent key, watch loregd report each key's store (`reg info`
---     volatile flag comes from loregd, per §3.2) and serve value operations on
---     each. A value op on the volatile-only key is served only because routing
---     found the key by its volatile column.
---   * The spanning operations (LOOKUP, ENUM_CHILDREN, ...) combine both stores
---     via UNION ALL: a persistent parent enumerates its volatile child.
---   * The deletions do not route: they delete from both schemas
---     unconditionally, so a value on a volatile key is removed by a delete that
---     never consulted the column.
---
--- What a guest cannot observe (unit-cited, each read and run — all PASS):
---   * The two stores differ observably only by persistence across a restart;
---     the *table* a row physically lives in is otherwise invisible, and the
---     column/table divergence the spec warns about needs an external DB edit
---     (no sqlite3 in the image). RSI_NOT_FOUND for an unknown GUID is masked by
---     the kernel's own path-walk ENOENT. The cross-store duplicate the
---     no-dedup anchors describe cannot be created (the cross-schema guards
---     reject it). Those are homed on internal/handler unit tests.
+-- Ordinary requests create keys with consistent metadata in the selected
+-- schema. Guest cases exercise both stores and operations spanning them.
+-- Contradictory metadata needs a direct database edit, so the host regression
+-- covers that case and verifies that the other schema remains unchanged.
+-- Missing GUIDs and cross-store duplicates are also covered by host fixtures.
 --
 -- Structure mirrors volatile-store.test.lua: a mediated disk, per-case daemons
 -- on distinct hive names SIGKILLed at the end, and the one reboot case last.
@@ -54,17 +38,11 @@ end
 
 -- ==== reachable cases (own daemon, distinct name, SIGKILL at end) ======
 
--- §5.1: "RSI_CREATE_KEY ... routes on the volatile flag carried in the request
--- instead." And: "For an operation that names a single key, the key's own
--- `volatile` column selects the store. loregd reads it with one statement
--- across both schemas." A create routes each key to the store its flag names
--- (loregd reports the stored column back through `reg info`), and a value
--- operation on the volatile-only key is served — isVolatileQ found it by its
--- column and routed to the volatile store; consulting only the persistent
--- table would answer not-found.
-test("create-key routes on the request flag; a single-key op routes on the column", {
+-- Create-key chooses the request's store. Later writes use the schema
+-- containing that key, including the volatile-only case.
+test("create-key routes on the request flag; a single-key op routes on the containing schema", {
     spec = "loregd *route.create-key-routes-on-the-requests-volatile-flag " ..
-        "*route.an-operation-naming-one-key-routes-on-the-keys-volatile-column",
+        "*route.an-operation-naming-one-key-routes-on-the-keys-store",
 }, function(t)
     local proc = start(t, "PtR1", "/mnt/pt-hive/r1.hive")
 
@@ -82,14 +60,13 @@ test("create-key routes on the request flag; a single-key op routes on the colum
     t:assert(rp.stdout:match('"volatile"%s*:%s*false'),
         "the plain request routed the key into the persistent store: " .. rp.stdout)
 
-    -- A single-key value op on the volatile-only key is served: routing read
-    -- the key's own volatile column and went to the volatile store.
+    -- A single-key value op finds its key in the volatile schema.
     loregd.set(vm, [[PtR1\Vk]], "V", "dword:7"):assert_ok()
     local r, v = loregd.get(vm, [[PtR1\Vk]], "V")
     r:assert_ok()
     t:assert_eq(v, "7",
         "a value op on the volatile-only key was served — routed by the key's " ..
-        "own volatile column, not defaulted to the persistent store")
+        "containing schema")
 
     loregd.set(vm, [[PtR1\Pk]], "V", "dword:9"):assert_ok()
     local r2, v2 = loregd.get(vm, [[PtR1\Pk]], "V")
@@ -149,7 +126,7 @@ end)
 
 -- ==== reboot: an unknown child GUID's entry goes to the persistent table
 
--- §5.1: "RSI_CREATE_ENTRY routes on the volatile flag of the child key the
+-- §5.1: "RSI_CREATE_ENTRY routes to the store containing the child key the
 -- entry points at ... When that child GUID is present in neither store, the
 -- entry is written to the persistent table." LCS dispatches RSI_CREATE_ENTRY
 -- before RSI_CREATE_KEY, so a volatile child's entry is always created while
@@ -206,29 +183,25 @@ test("a GUID in neither store produces RSI_NOT_FOUND", {
     covered_by = "go:loregd internal/handler::TestSetValueKeyNotFound",
 }, function() end)
 
--- §5.1: "routing follows the column value, not which table the row came from
--- ... the distinction only matters if a database were modified externally."
--- isVolatileQ (handler.go:211) selects the `volatile` column and routes on its
--- value. TestSetValueVolatileKey shows a key whose column is 1 routes its value
--- to the volatile store; TestSetValue shows a column of 0 routes to main.
--- Route closed: rows loregd writes are always column/table-consistent, and the
--- divergence needs an external DB edit — no sqlite3 ships in the image.
-test("routing follows the column value, not the source table", {
-    spec = "loregd *route.routing-follows-the-column-value-not-the-source-table",
+-- A database edit can contradict the redundant flag in either schema. The
+-- host fixture exercises key/value/blanket/entry writes and checks untouched
+-- rows in the other store; ordinary RSI writes cannot create this metadata.
+test("routing follows the source table despite contradictory metadata", {
+    spec = "loregd *route.routing-follows-the-source-table-despite-contradictory-metadata",
     skip = true,
-    covered_by = "go:loregd internal/handler::TestSetValueVolatileKey",
+    covered_by = "go:loregd internal/handler::TestExistingKeyWritesUseContainingSchema",
 }, function() end)
 
--- §5.1: "RSI_CREATE_ENTRY routes on the volatile flag of the child key the
+-- §5.1: "RSI_CREATE_ENTRY routes to the store containing the child key the
 -- entry points at." TestCreateEntryVolatileTarget seeds a volatile child key,
 -- then creates its entry, and asserts the entry lands in
 -- volatile.path_entries (not main). Route closed: LCS dispatches
 -- RSI_CREATE_ENTRY before RSI_CREATE_KEY, so a guest cannot present the entry
--- with the child key already stored; the flag-consulting branch runs only when
+-- with the child key already stored; the schema-selection branch runs only when
 -- the key row pre-exists, which the unit test constructs. (The always-taken
 -- unknown-child branch is the known-bug case above.)
-test("create-entry routes on the child key's volatile flag", {
-    spec = "loregd *route.create-entry-routes-on-the-child-keys-volatile-flag",
+test("create-entry routes to the child key's store", {
+    spec = "loregd *route.create-entry-routes-on-the-child-keys-store",
     skip = true,
     covered_by = "go:loregd internal/handler::TestCreateEntryVolatileTarget",
 }, function() end)
