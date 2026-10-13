@@ -232,6 +232,16 @@ test("native and legacy opens resolve a cold descriptor before taking the CAAP l
              "a cold open followed by set-SD and assert lockdep stays enabled" },
     function(t) end)
 
+test("opens pin the selected descriptor across cache invalidation and the CAAP wait",
+    { spec = "PKM *facs.storage.open-pins-selected-descriptor",
+      covered_by = "kunit:pkm_kunit_file",
+      skip = "the exact selection-to-stamp window needs a fixture-local rendezvous; " ..
+             "pkm_kunit_native_open_keeps_selected_sd_snapshot and " ..
+             "pkm_kunit_legacy_open_keeps_selected_sd_snapshot cover warm/cold " ..
+             "cache selection, post-setxattr invalidation and replacement, " ..
+             "allow-then-deny, missing/corrupt fail-closed, and pin release" },
+    function(t) end)
+
 test("eviction frees the cached descriptor RCU-safely",
     { spec = "PKM *facs.storage.eviction-rcu-safe",
       covered_by = "kunit:pkm_kunit_file",
