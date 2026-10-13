@@ -12,10 +12,9 @@
 -- (a warning) and a profile with an unknown value (a refused
 -- generation, an error). Both are undone.
 --
--- The kernel rate-limits /dev/kmsg writes per open file (ten lines per
--- five seconds by default), and netd opens it once: the first test
--- spaces its steps out, the second makes a burst and shows the lines
--- past the limit missing from the kernel log (PEI-1371).
+-- Each mirrored record uses a fresh /dev/kmsg descriptor. The second
+-- test puts more than ten records inside the kernel's five-second
+-- per-open window and requires every one at its original severity.
 --
 -- The other half of the paragraph (the mirror that cannot be opened is
 -- reported once on stderr) needs a netd that may not write /dev/kmsg,
@@ -33,7 +32,8 @@ peinit.claim(2)
 local lan = network.bridge("lan")
 local gw = gateway.boot({ bridge = lan })
 gw:dhcp({ pool = { "10.77.0.50" }, lease = 3600 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local files = network.test_binary("netd", {})
+local sut = network.boot({ bridges = { lan }, gateway = gw, files = files })
 
 local KEY = network.KEY
 
@@ -174,51 +174,27 @@ test("each log line reaches eventd through stderr and the kernel log at its own 
         end
     end)
 
-test("in a burst the kernel log has the first ten lines and not those after them; eventd has every one",
+test("a burst of more than ten log lines reaches both eventd and the kernel log",
     { spec = "netd *failure.log-mirrored-to-kmsg" }, function(t)
-        -- PEI-1371: netd opens /dev/kmsg once and the kernel rate-limits
-        -- writes through one open file (printk.devkmsg=ratelimit, ten
-        -- lines per five seconds), so in a burst every line past the
-        -- tenth in the window is dropped from the kernel log. They all
-        -- still reach eventd. This is the documented current behaviour.
-        -- The window opens at the burst's first line (the SPACE before it
-        -- lets the previous one lapse); lines within half a second of its
-        -- end are not asserted either way, nor are those after it, which
-        -- a new window may mirror.
+        -- A fresh per-record descriptor must preserve a burst that the
+        -- old lifetime descriptor lost after its first ten records.
         sut:run(SPACE)
         local mark, seq0 = guest_ns(), kmsg_seq()
-        -- Twelve hostname changes in quick succession: each is logged as
-        -- a configuration change and a new hostname.
         for i = 1, 12 do
             network.reg(sut, { "set", KEY, "Hostname", "sz:pt-burst-" .. i }):assert_ok()
             sut:run("net reconcile"):assert_ok()
         end
         sut:run(SPACE)
-        sut:run("net reconcile"):assert_ok()
         local pairs_, recs = mirror(mark, seq0)
         show(t, pairs_, recs)
-        local missing = 0
-        for _, p in ipairs(pairs_) do if not p.rec then missing = missing + 1 end end
-        t:log(#pairs_ .. " lines in eventd, " .. missing .. " of them not in /dev/kmsg")
         t:assert(#pairs_ > 10, "a burst of more than ten lines reached eventd")
-        for k = 1, 10 do
-            t:assert(pairs_[k].rec, "line " .. k .. " of the burst is in the kernel log: " .. pairs_[k].line)
-        end
-        -- mirror() pairs lines with records by text, in order, so a line
-        -- whose text recurs (`configuration changed`) could be paired with
-        -- a later line's record from a new window: only lines whose text
-        -- is unique in the burst (`hostname is pt-burst-N`) are judged.
-        local seen = {}
-        for _, p in ipairs(pairs_) do seen[p.line] = (seen[p.line] or 0) + 1 end
+        local within_window = 0
         local window_end = pairs_[1].ts + 4500000000
-        local dropped = 0
-        for k = 11, #pairs_ do
-            local p = pairs_[k]
-            if p.ts < window_end and seen[p.line] == 1 then
-                t:assert(p.rec == nil, "line " .. k .. ", inside the first five seconds, is not in the kernel log: " .. p.line)
-                dropped = dropped + 1
-            end
+        for _, p in ipairs(pairs_) do
+            if p.ts < window_end then within_window = within_window + 1 end
+            t:assert(p.rec, "mirrored without burst loss: " .. p.line)
+            t:assert_eq(p.rec.prio & 7, LEVEL[p.line:match("^netd: (%a+):")],
+                "at its level: " .. p.line)
         end
-        t:log(dropped .. " lines past the tenth fell inside the window")
-        t:assert(dropped > 0, "the burst put more than ten lines inside one window")
+        t:assert(within_window > 10, "the burst exceeded the old per-open budget inside one window")
     end)
