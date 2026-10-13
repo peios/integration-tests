@@ -7,7 +7,7 @@
 -- (helpers.dns), and a whole Peios (helpers.network) with resolvd under
 -- peinit. resolvd is read where it publishes: its native socket
 -- (`status`), the registry, /proc, peinit (`svctl`, eventd's events) and
--- eventd's copy of its standard error (`evctl LOGS FROM resolvd`).
+-- eventd's copies of stdout and stderr (`evctl LOGS FROM resolvd`).
 --
 -- Own VMs: the tests restart resolvd, kill it, stop netd, set the
 -- kernel's hostname, and in the last test delete and re-apply resolvd's
@@ -45,12 +45,13 @@ dns.serve(gw, {
         end
     end,
 })
-local sut = network.boot({ bridges = { lan }, gateway = gw })
+local sut = network.boot({ bridges = { lan }, gateway = gw,
+    files = network.test_binary("resolvd") })
 
 local SOCK = "/run/resolvd/resolv.sock"
 local SID = "S-1-5-80-3864064249-1823296737-2008945602-1354971773-2894779966"
 local SERVICE_KEY = [[Machine\System\Services\resolvd]]
-local MIRROR = "resolvd: warn: /dev/kmsg mirror unavailable (Permission denied (os error 13)): log lines go to stderr only"
+local MIRROR = "resolvd: warn: /dev/kmsg mirror unavailable (Permission denied (os error 13)): log lines go to stdout/stderr only"
 
 -- ---------------------------------------------------------------------------
 -- Local instruments
@@ -138,7 +139,7 @@ local function ask(req, timeout, observe)
 end
 
 --- resolvd's log lines newer than `since` (guest ns), oldest first, each
---- {msg, job, ts}. evctl lists newest first in the order eventd recorded
+--- {msg, job, ts, is_error}. evctl lists newest first in the order eventd recorded
 --- them; lines written together can carry one timestamp, so that order
 --- (not the timestamp) is the sequence.
 local function log_since(since)
@@ -150,7 +151,8 @@ local function log_since(since)
         local ts = tonumber(line:match("timestamp=(%d+)"))
         local job = line:match('job_id="(.-)"')
         if msg and ts and ts > (since or 0) then
-            newest_first[#newest_first + 1] = { ts = ts, job = job, msg = (msg:gsub("\\(.)", "%1")) }
+            newest_first[#newest_first + 1] = { ts = ts, job = job, msg = (msg:gsub("\\(.)", "%1")),
+                is_error = line:match("is_error=(%a+)") }
         end
     end
     local out = {}
@@ -534,7 +536,7 @@ test("until netd is reached again, a restarted resolvd has no scopes and the ker
 -- Log lines
 -- ---------------------------------------------------------------------------
 
-test("every line resolvd logs is `resolvd: <info|warn|error>: <text>` on standard error, read through eventd",
+test("resolvd preserves log text and reports info separately from stderr diagnostics",
     { spec = "resolvd *service.log-line-format" }, function(t)
         -- Make a warning and some info lines.
         network.write(sut, "Dns", { FallbackServers = "multi:pt-not-an-address" })
@@ -548,16 +550,24 @@ test("every line resolvd logs is `resolvd: <info|warn|error>: <text>` on standar
             t:assert(level == "info" or level == "warn" or level == "error",
                 "`" .. l.msg .. "` has the resolvd: <level>: form")
             levels[level or "?"] = true
+            t:assert_eq(l.is_error, level == "info" and "false" or "true",
+                "eventd preserves the producer's stdout/stderr classification")
         end
         t:assert(levels.info and levels.warn, "info and warn lines were both seen")
-        -- peinit's forwarder records them as the service's standard error.
-        local r = sut:run("evctl 'LOGS FROM resolvd SINCE 1h ago TAKE 3'")
+        local r = sut:run("evctl 'LOGS FROM resolvd SINCE 1h ago WHERE is_error == true TAKE 5000'")
+        r:assert_ok()
+        local diagnostics = 0
         for line in r.stdout:gmatch("[^\n]+") do
-            t:assert(line:find("is_error=true", 1, true) ~= nil, "eventd holds the line as stderr output")
+            if line:find('message="resolvd:', 1, true) then
+                diagnostics = diagnostics + 1
+                t:assert(not line:find('message="resolvd: info:', 1, true),
+                    "the errors-only query excludes informational lines")
+            end
         end
+        t:assert(diagnostics > 0, "the errors-only query still contains diagnostics")
     end)
 
-test("the /dev/kmsg mirror fails once per process, directly after the first line, and nothing reaches the kernel log",
+test("the /dev/kmsg mirror reports one stderr warning per process and nothing reaches the kernel log",
     { spec = "resolvd *service.kmsg-mirror-fails-once" }, function(t)
         local mark = guest_ns()
         -- A run that fails at once: the first line is its fatal error. A
@@ -608,19 +618,35 @@ test("the /dev/kmsg mirror fails once per process, directly after the first line
             local n = 0
             for _, m in ipairs(j) do if m == MIRROR then n = n + 1 end end
             t:assert_eq(n, 1, "run " .. job .. " writes the mirror line once")
-            t:assert_eq(j[2], MIRROR, "run " .. job .. ": the mirror line is the second line")
-            if j[1]:find("resolvd: error: native socket:", 1, true) then failed = j end
-            if j[1]:find("Dns FallbackServers", 1, true) then warned = j end
+            -- Only ordering within stderr is guaranteed; an initial info
+            -- line can be forwarded independently from the mirror warning.
+            local stderr = {}
+            for _, l in ipairs(lines) do
+                if l.job == job and l.is_error == "true" then
+                    stderr[#stderr + 1] = l.msg
+                end
+            end
+            local position = stderr[1] == MIRROR and 1 or 2
+            t:assert_eq(stderr[position], MIRROR,
+                "run " .. job .. ": mirror warning follows at most one stderr line")
+            if stderr[1]:find("resolvd: error: native socket:", 1, true) then failed = stderr end
+            if stderr[1]:find("Dns FallbackServers", 1, true) then warned = { first = stderr[1], lines = j } end
         end
-        local boot = jobs[order[1]]
-        t:assert_eq(boot[1], "resolvd: info: subscribed to netd", "boot: the first line is the first netd attempt")
-        t:assert_eq(boot[3], "resolvd: info: listening on /run/resolvd/resolv.sock and 127.0.0.53:53",
-            "which comes before the listening line")
+        local boot_info = {}
+        for _, l in ipairs(lines) do
+            if l.job == order[1] and l.is_error == "false" then
+                boot_info[#boot_info + 1] = l.msg
+            end
+        end
+        t:assert_eq(boot_info[1], "resolvd: info: subscribed to netd",
+            "boot: the first stdout line is the first netd attempt")
+        t:assert_eq(boot_info[2], "resolvd: info: listening on /run/resolvd/resolv.sock and 127.0.0.53:53",
+            "which precedes the listening line on stdout")
         t:assert(failed ~= nil, "a run whose first line is an error also writes the mirror line second")
         t:assert(warned ~= nil, "a run with a Dns warning")
-        t:assert_eq(warned[1], 'resolvd: warn: Dns FallbackServers: ignoring malformed address "pt-bad-address"',
+        t:assert_eq(warned.first, 'resolvd: warn: Dns FallbackServers: ignoring malformed address "pt-bad-address"',
             "with a Dns warning and no stale socket: the first line is the warning")
-        t:assert(#warned >= 5, "that run logged on after the mirror line, and nothing more about the mirror")
+        t:assert(#warned.lines >= 5, "that run logged on after the mirror line, and nothing more about the mirror")
 
         -- Nothing of resolvd's reaches the kernel log; netd's (SYSTEM) does.
         local kmsg = sh("timeout 2 cat /dev/kmsg; true").stdout
