@@ -11,6 +11,16 @@ local hooks = require("helpers.hooks")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
+test("content copying releases the outer freeze writer before I/O",
+    { spec = "PKM *lock.copy-up-content-without-outer-writer",
+      covered_by = "kunit:stratafs_copy_contents",
+      skip = "stratafs_kunit_copy_contents_releases_writer exercises the " ..
+             "real KACS-bound anonymous stage and checks lockdep; " ..
+             "stratafs_kunit_copy_contents_with_pending_freezer queues " ..
+             "freeze_super at its writer barrier before the same copy, " ..
+             "then verifies copying, freeze and thaw all complete" },
+    function(t) end)
+
 -- §4.A: the staging attribute and its marker.
 local STAGING_XATTR = "security.peios.stratafs_staging"
 local STAGE_MAGIC, STAGE_VERSION, STAGE_SIZE = 0x53544731, 1, 24
