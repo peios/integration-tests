@@ -191,9 +191,9 @@ test("a CPU possible but offline at initialisation has a ring",
 test("suspend keeps the ring and the sequence, jumping only the clock",
     { spec = "PKM *failure.suspend-no-sequence-gap" }, function(t)
         -- The guest puts itself into S3 (a worker writes `mem` to
-        -- /sys/power/state and blocks there until resume); the host
-        -- wakes it with vm:wakeup(), which QEMU refuses until the
-        -- guest is actually suspended — so retrying it is the wait.
+        -- /sys/power/state and blocks there until resume). The host must
+        -- observe S3 without waking it, hold it there for two seconds,
+        -- then wake it. Polling wakeup itself guarantees no minimum sleep.
         -- Ring contents survive, the sequence is contiguous across the
         -- sleep, and only the wall clock shows the gap.
         local vs3 = provium:vm("vs3", "kernel-only"):boot()
@@ -202,13 +202,26 @@ test("suspend keeps the ring and the sequence, jumping only the clock",
             sys.errname(errno or 0))
         t:assert(vs3:read_file("/sysk/power/mem_sleep"):match("deep"),
             "the guest offers suspend to RAM")
+        t:assert(not vs3:is_suspended(), "running guest is not suspended")
         local pre_ok = pcall(vs3.wakeup, vs3)
         t:assert(not pre_ok, "a wake before any suspend is refused")
+
+        local function clock_ns(id)
+            local r = vs3:syscall(228, {
+                args = { id, 0 }, bufs = { string.rep("\0", 16) }, ptrs = { 1 },
+            })
+            t:assert_eq(r.ret, 0, "read suspend accounting clock")
+            local sec, nsec = string.unpack("<i8i8", r.out_bufs[1])
+            return sec * 1000000000 + nsec
+        end
 
         local ring = kmes.attach(vs3, 0)
         t:assert(ring, "a ring attaches")
         t:assert_eq(kmes.emit(vs3, "PIT_SLEEP", kmes.PAYLOAD).ret, 0,
             "an event before sleeping")
+        -- BOOTTIME includes suspend; MONOTONIC excludes it. Read in opposite
+        -- orders around S3 so syscall overhead makes this a lower bound.
+        local mono_before, boot_before = clock_ns(1), clock_ns(7)
 
         local w = vs3:spawn_worker()
         local ok2, err = pcall(function()
@@ -217,15 +230,24 @@ test("suspend keeps the ring and the sequence, jumping only the clock",
             local pending = w:syscall_async(sys.NR.write, {
                 args = { fd, 0, 3 }, bufs = { "mem" }, ptrs = { 1 },
             })
-            wait_until(function() return pcall(vs3.wakeup, vs3) end,
-                { timeout = 10, interval = "200ms",
-                  desc = "the guest reaching S3" })
+            wait_until(function() return vs3:is_suspended() end,
+                { timeout = 10, interval = "20ms", desc = "the guest reaching S3" })
+            -- The suspended guest cannot serve RPCs; use the awake VM's clock
+            -- to wait while QEMU leaves vs3 in S3.
+            vm2:clock():sleep("2s")
+            t:assert(vs3:is_suspended(), "the guest remained in S3")
+            vs3:wakeup()
             local r = pending:await()
             t:assert_eq(r.ret, 3, "the suspend write returns after the wake: " ..
                 sys.errname(r.errno))
         end)
         w:kill(); w:join()
         if not ok2 then error(err, 0) end
+        t:assert(not vs3:is_suspended(), "wake leaves S3")
+        local boot_after, mono_after = clock_ns(7), clock_ns(1)
+        local suspended_ns = (boot_after - boot_before) - (mono_after - mono_before)
+        t:log("measured S3 interval: " .. suspended_ns // 1000000 .. " ms")
+        t:assert(suspended_ns >= 1000000000, "at least one second elapsed in S3")
 
         t:assert_eq(kmes.emit(vs3, "PIT_SLEEP", kmes.PAYLOAD).ret, 0,
             "an event after waking")
@@ -235,6 +257,6 @@ test("suspend keeps the ring and the sequence, jumping only the clock",
         t:assert_eq(events[2].sequence, events[1].sequence + 1,
             "with no sequence gap")
         local gap_ms = (events[2].timestamp - events[1].timestamp) // 1000000
-        t:assert(gap_ms >= 150,
+        t:assert(gap_ms >= suspended_ns // 1000000,
             "while the wall clock jumped by the sleep: " .. gap_ms .. " ms")
     end)

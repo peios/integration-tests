@@ -3,6 +3,7 @@
 -- the per-CPU scope of the sequence counter (on a two-CPU VM).
 
 local sys = require("helpers.sys")
+local kacs = require("helpers.kacs")
 local kmes = require("helpers.kmes")
 
 local vm = provium:vm("v", "kernel-only"):boot()
@@ -121,7 +122,10 @@ test("within one CPU, sequence orders and the timestamp does not",
 
 -- ---- two CPUs -------------------------------------------------------
 
-local vm2 = provium:vm("v2", "kernel-only", { cpus = 2 }):boot()
+-- Keep CPU 1 offline until the first-sequence case: boot-time audit events
+-- may otherwise legitimately reach its ring before the test does.
+local vm2 = provium:vm("v2", "kernel-only", { cpus = 2 })
+    :boot({ kernel_cmdline_append = "maxcpus=1" })
 
 test("a second CPU is a second slot",
     { spec = "PKM *attach.query-slots" }, function(t)
@@ -136,15 +140,21 @@ test("a second CPU is a second slot",
 
 test("each CPU counts its own sequence, from one",
     { spec = "PKM *event.sequence-starts-at-one" }, function(t)
-        -- Nothing in this kernel-only guest emits on cpu 1 unprompted,
-        -- so its ring is untouched since boot: the counter starts at
-        -- zero when PKM loads and is incremented before it is taken,
-        -- so the first event carries 1 — and cpu 0's counter, long
-        -- since advanced, has no bearing on it.
+        local ok, step, errno = kacs.new_mount(vm2, "sysfs", "/sysk")
+        t:assert(ok, "sysfs mounts: " .. tostring(step) .. " " ..
+            sys.errname(errno or 0))
+        local online = "/sysk/devices/system/cpu/cpu1/online"
+        t:assert_eq(vm2:read_file(online):sub(1, 1), "0", "CPU 1 never ran")
+        -- Advance CPU 0 explicitly; CPU 1 must still start at one.
+        for _ = 1, 3 do pinned_emit(vm2, 0, "PIT_OTHER_CPU") end
         local r1 = kmes.attach(vm2, 1)
         t:assert(r1, "ring 1 attaches")
         local write_pos = kmes.positions(r1)
         t:assert_eq(write_pos, 0, "and has never been written")
+        local fd = sys.open(vm2, online, sys.O.WRONLY)
+        t:assert(fd, "the online file opens for writing")
+        t:assert_eq(sys.write(vm2, fd, "1").ret, 1, "CPU 1 comes online")
+        sys.close(vm2, fd)
         pinned_emit(vm2, 1, "PIT_FIRST")
         local events = kmes.of_type(kmes.drain(r1), "PIT_FIRST")
         kmes.detach(r1)
