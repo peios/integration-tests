@@ -22,6 +22,7 @@ local peinit = require("helpers.peinit")
 peinit.claim(1)
 
 local vm = eventd.boot({ name = "ev-health" })
+eventd.set(vm, "MetricMaxBatchSize", "dword:100")
 eventd.set(vm, "HealthMetricIntervalSeconds", "dword:1")
 
 -- Rows of a health metric over the last ten minutes, waiting briefly for the
@@ -220,3 +221,15 @@ test("rejected ingestion input and kernel socket drops are not health metrics", 
             .. "none counting rejected input or socket drops: " .. r[1])
     end
 end)
+
+-- Queries can coalesce several commits, so their row counts do not expose
+-- transaction boundaries. The host regression exercises the writer's health
+-- flush with real SQLite commits, including pending producer samples and
+-- live increases/decreases of the cap, then checks all persisted sample IDs.
+-- The native cases above run at the minimum supported batch size and check
+-- ordinary health sampling, counters, catalogue and access control.
+test("health samples obey the pending and current transaction size limits", {
+    spec = "eventd *health.health-samples-respect-the-metric-transaction-size-cap",
+    skip = true,
+    covered_by = "cargo:eventd eventd metric_ingest::tests::health_samples_respect_transaction_caps_without_losing_or_reordering_records",
+}, function() end)
