@@ -200,7 +200,7 @@ test("storing under a key the full cache already holds replaces it and evicts no
     end)
 
 test("a new key at a full cache removes expired entries without evicting a live entry when that makes room",
-    { spec = "resolvd *engine-cache.eviction-sweeps-against-new-expiry" }, function(t)
+    { spec = "resolvd *engine-cache.eviction-sweeps-expired-entries" }, function(t)
         t:assert_eq(entries(), CAP, "the cache is full")
         -- Overwrite two existing keys: no capacity eviction happens here.
         for _, k in ipairs({ 4, 5 }) do
@@ -283,7 +283,7 @@ test("NXDOMAIN and NODATA use the lesser SOA TTL or MINIMUM and cap long negativ
     end)
 
 test("a day-long answer at capacity evicts only the earliest live entry",
-    { spec = "resolvd *engine-cache.long-lived-entry-empties-full-cache" }, function(t)
+    { spec = "resolvd *engine-cache.long-lived-entry-preserves-live-entries" }, function(t)
         t:assert_eq(entries(), CAP, "the cache is full of shorter-lived answers")
         t:assert_eq(query(name("d86400", 0)).source, "dns", "the day-long answer is asked upstream")
         t:assert_eq(entries(), CAP, "one entry was replaced, not the whole cache")
