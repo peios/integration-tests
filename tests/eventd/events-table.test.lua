@@ -808,11 +808,7 @@ test("retention removes a type its deletes orphaned, once rechecked, and never a
             end)
     end
     applied("AdaptiveIndexCreateThreshold", 20)
-    -- The policy run that change triggers can still judge by the threshold
-    -- it held before; one more applied change (15 days: 14 is the default,
-    -- and no change) runs it again under 20.
-    applied("LogRetentionDays", 15)
-    eventd.unset(craft, "LogRetentionDays")
+    -- This one applied change recomputes with the new threshold (PEI-1447).
     local built = pcall(wait_until, function() return eventd.schema(craft, SHARD0).idx_events_event_type ~= nil end,
         { timeout = 60, interval = 0.5, desc = "idx_events_event_type to be built" })
     t:assert(built, "idx_events_event_type was built; counters "
