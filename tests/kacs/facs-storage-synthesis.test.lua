@@ -23,6 +23,23 @@ local token = require("helpers.token")
 
 local vm = provium:vm("v", "kernel-only"):boot()
 
+test("descriptor resolution does not nest ancestor or stacked inode locks",
+    { spec = "PKM *facs.storage.resolution-no-nested-inode-locks",
+      covered_by = "kunit:pkm_kunit_sd_cache",
+      skip = "pkm_sd_test_resolve_chain and pkm_sd_test_depth_bound resolve " ..
+             "real VFS ancestor chains; pkm_sd_test_stacked_xattr re-enters " ..
+             "lower descriptor resolution from an xattr handler. Each " ..
+             "checks that lockdep remains enabled" }, function(t) end)
+
+test("unlocked descriptor work cannot overwrite newer cache state",
+    { spec = "PKM *facs.storage.resolution-revalidates-unlocked-work",
+      covered_by = "kunit:pkm_kunit_sd_cache",
+      skip = "replacement_during_xattr, replacement_during_parent, " ..
+             "generation_during_parent, empty_invalidation, empty_round_trip " ..
+             "and stale_read_error in pkm_kunit_sd_cache inject publication, " ..
+             "invalidation, policy changes and I/O failure at VFS reads" },
+    function(t) end)
+
 local ALL_INFO = kacs.SI.OWNER | kacs.SI.GROUP | kacs.SI.DACL
 local OI_CI = access.ACE_FLAG.OBJECT_INHERIT | access.ACE_FLAG.CONTAINER_INHERIT
 local INHERITED = access.ACE_FLAG.INHERITED
