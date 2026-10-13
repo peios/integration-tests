@@ -158,21 +158,20 @@ test("auth_id has to name an existing LogonSession",
         t:assert(not fd, "and so is zero: " .. sys.errname(errno or 0))
     end)
 
-test("a Primary token has to carry impersonation level Impersonation or Delegation",
-    { spec = "PKM *token.create.validate.primary-level-floor" }, function(t)
-        for _, lvl in ipairs({ token.LEVEL.IDENTIFICATION, token.LEVEL.ANONYMOUS }) do
-            local fd, errno = mint({ impersonation_level = lvl })
-            t:assert(not fd, "primary at level " .. lvl .. " refused: " .. sys.errname(errno or 0))
+test("CreateToken preserves a deliberately chosen Primary level, including Anonymous",
+    { spec = "PKM *token.create.primary-levels" }, function(t)
+        for _, lvl in ipairs({ token.LEVEL.ANONYMOUS, token.LEVEL.IDENTIFICATION,
+            token.LEVEL.IMPERSONATION, token.LEVEL.DELEGATION }) do
+            local fd = assert(mint({ token_type = token.TYPE.PRIMARY,
+                impersonation_level = lvl }))
+            t:assert_eq(token.query_u32(vm, fd, token.CLASS.TYPE), token.TYPE.PRIMARY,
+                "the minted token is Primary")
+            t:assert_eq(token.query_u32(vm, fd, token.CLASS.IMPERSONATION_LEVEL), lvl,
+                "the minter's ceiling is preserved")
+            t:assert_eq(token.query(vm, fd, token.CLASS.USER), token.SID.TEST_USER,
+                "a low primary ceiling preserves the process's own identity")
+            sys.close(vm, fd)
         end
-        local imp = assert(mint({ impersonation_level = token.LEVEL.IMPERSONATION }))
-        t:assert_eq(token.query_u32(vm, imp, token.CLASS.IMPERSONATION_LEVEL), token.LEVEL.IMPERSONATION,
-            "a primary at Impersonation mints")
-        sys.close(vm, imp)
-        local ident = assert(mint({ token_type = token.TYPE.IMPERSONATION,
-            impersonation_level = token.LEVEL.IDENTIFICATION }))
-        t:assert_eq(token.query_u32(vm, ident, token.CLASS.IMPERSONATION_LEVEL), token.LEVEL.IDENTIFICATION,
-            "an impersonation token may be minted at Identification")
-        sys.close(vm, ident)
     end)
 
 test("write_restricted requires user_deny_only",

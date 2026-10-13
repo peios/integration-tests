@@ -190,6 +190,38 @@ test("the level is set on the socket before connect and defaults to Impersonatio
         sys.close(vm, fresh)
     end)
 
+test("a low Primary ceiling preserves local identity and bounds every peer capture",
+    { spec = "PKM *token.create.primary-levels" }, function(t)
+        local path = SOCKS .. "/primary-owned"
+        vm:write_file(path, "own identity still works")
+        t:assert_eq(kacs.set_sd(vm, path, kacs.descriptor(kacs.acl({
+            kacs.ace(kacs.ACE_ALLOWED, kacs.ALL_RIGHTS, token.SID.TEST_USER)
+        }))).ret, 0, "only the process's user SID is granted access")
+        for _, primary_level in ipairs({ L.ANONYMOUS, L.IDENTIFICATION,
+            L.IMPERSONATION, L.DELEGATION }) do
+            token.as_principal(t, vm, { impersonation_level = primary_level }, function(w)
+                local current = assert(token.effective(vm, w))
+                t:assert_eq(current.type, token.TYPE.PRIMARY, "installed as a Primary token")
+                t:assert_eq(current.user, token.SID.TEST_USER, "the process retains its identity")
+                t:assert_eq(current.level, primary_level, "installation preserves the ceiling")
+                local own = assert(sys.open(w, path, sys.O.RDONLY))
+                sys.close(w, own)
+                for _, socket_level in ipairs({ L.ANONYMOUS, L.IDENTIFICATION,
+                    L.IMPERSONATION, L.DELEGATION }) do
+                    local peer, srv, acc, cli = capture(t, w, socket_level)
+                    local expected = math.min(primary_level, socket_level)
+                    t:assert_eq(level_of(w, peer), expected,
+                        "capture takes the lower of the socket and primary ceilings")
+                    t:assert_eq(token.query(w, peer, token.CLASS.USER),
+                        expected == L.ANONYMOUS and token.SID.ANONYMOUS or token.SID.TEST_USER,
+                        "only an Anonymous capture loses the client's identity")
+                    sys.close(w, peer); sys.close(w, acc)
+                    sys.close(w, cli); sys.close(w, srv)
+                end
+            end)
+        end
+    end)
+
 -- The ratchet ------------------------------------------------------------------
 
 test("the impersonation level only ever goes down",
