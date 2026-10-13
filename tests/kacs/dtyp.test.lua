@@ -569,13 +569,19 @@ test("impersonation level is meaningful and queryable on a primary token",
             token.CLASS.IMPERSONATION_LEVEL), L.IDENTIFICATION,
             "while deriving at or below it is fine")
         sys.close(vm, same)
-        -- A primary below Impersonation cannot exist at all: the level
-        -- is a real property of the credential, not an ignored field.
+        -- A privileged minter may choose a lower primary ceiling too.
+        -- It remains a real property and cannot be raised by duplication.
         for _, level in ipairs({ L.ANONYMOUS, L.IDENTIFICATION }) do
-            local fd, err = token.mint(vm, { token_type = token.TYPE.PRIMARY,
-                impersonation_level = level })
-            t:assert(not fd, "a primary at level " .. level ..
-                " is refused: " .. sys.errname(err or 0))
+            local fd = assert(token.mint(vm, { token_type = token.TYPE.PRIMARY,
+                impersonation_level = level }))
+            t:assert_eq(token.query_u32(vm, fd, token.CLASS.IMPERSONATION_LEVEL), level,
+                "the low primary ceiling is preserved")
+            local raised, err = token.duplicate(vm, fd, {
+                token_type = token.TYPE.IMPERSONATION,
+                impersonation_level = L.IMPERSONATION })
+            t:assert(not raised, "a minted low ceiling cannot be raised")
+            t:assert_eq(err, sys.E.INVAL, "the upward derivation returns EINVAL")
+            sys.close(vm, fd)
         end
         sys.close(vm, capped)
     end)
