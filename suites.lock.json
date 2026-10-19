@@ -1,0 +1,96 @@
+{
+    "components": [
+        {
+            "id": "kernel",
+            "manifest": "peios/tests/integration/suite.json",
+            "manifest_sha256": "e9cd7e7129794c402f9f51288956ad538046456fff45b677ee369051da82bd6a",
+            "repository": "../kernel",
+            "revision": "5daf03ff8b0e4d3c08dd8d5dc332c3077144519f"
+        },
+        {
+            "id": "authd",
+            "manifest": "tests/integration/suite.json",
+            "manifest_sha256": "cff8e32dd1da20d7c8a4f65215b565a0eb16cf4ce7690124d4cf9902b7171769",
+            "repository": "../authd",
+            "revision": "b6f88ba566326dd8afde993d0283e5a5858a99ad"
+        },
+        {
+            "id": "eventd",
+            "manifest": "tests/integration/suite.json",
+            "manifest_sha256": "b3854da5c0e8fb51d4051e34f5446503c88feac045b40d7294eb0ebb9ee78a91",
+            "repository": "../eventd",
+            "revision": "d71b6859e9f0ebbf82ef6a9186e4d1655585d46b"
+        },
+        {
+            "id": "loregd",
+            "manifest": "tests/integration/suite.json",
+            "manifest_sha256": "4485d522d5cfeee09543fa73a4cd73c1655b5b603420250ac6f25ddf24dc2bee",
+            "repository": "../loregd",
+            "revision": "582ad65e55d47da4fe2ad5459cdca5e3be01b0f6"
+        },
+        {
+            "id": "netd",
+            "manifest": "tests/integration/suite.json",
+            "manifest_sha256": "8d9e517d79138681be72c8ef6125ac260f5da9999a9be4ffb8dca99842889805",
+            "repository": "../netd",
+            "revision": "93a862ae3d4b373a3befddb04848e962d3ed51d2"
+        },
+        {
+            "id": "resolvd",
+            "manifest": "tests/integration/suite.json",
+            "manifest_sha256": "cd37ecea3cf41c4c9951c3f6ef1f7c2932f56967e82b3e7428a5f98735b0816c",
+            "repository": "../resolvd",
+            "revision": "8f67cf987ceb5c17ffcfb13179ea8d033abd73ed"
+        },
+        {
+            "id": "peinit",
+            "manifest": "tests/integration/suite.json",
+            "manifest_sha256": "513852c3212469f6a213d35cc0b46f2ee0d2a39cc951af19aef5f458491fd08c",
+            "repository": "../peinit",
+            "revision": "6fc36d03d70d25864b3a658616df27ec64c6d059"
+        },
+        {
+            "id": "peiosutils",
+            "manifest": "tests/integration/suite.json",
+            "manifest_sha256": "b36e5be8e5afcb0a9080d052acd68fc0655ab5a3e8293ddd6d9e268c0b045f08",
+            "repository": "../peiosutils",
+            "revision": "e1c338b6b3fe12f00d359fbab7d6f6cbfd3c8af6"
+        },
+        {
+            "id": "prelude",
+            "manifest": "tests/integration/suite.json",
+            "manifest_sha256": "b1bb1cfc8ab30145843853966599a97cfefe4e96f0c3b605624536cd5a9ad70f",
+            "repository": "../prelude",
+            "revision": "d8b92a8c05be5c1297ff5066451b2bd25637eaf0"
+        },
+        {
+            "id": "timed",
+            "manifest": "tests/integration/suite.json",
+            "manifest_sha256": "44d810418f4ccb970c9bd0f8544a82082152a53877b21f00a6f293f0632f8132",
+            "repository": "../timed",
+            "revision": "98de2981fa69d42fd2ab61600fb3dfd34a8000e9"
+        },
+        {
+            "id": "trustd",
+            "manifest": "tests/integration/suite.json",
+            "manifest_sha256": "72f8033eec1e9563fb412abcb6cc008e10e801c7ff56b81e9ed1f4b01b4ed760",
+            "repository": "../trustd",
+            "revision": "4e33ff4b8bc81765f56a57a253b0a0f5815264b7"
+        },
+        {
+            "id": "provium",
+            "manifest": "tests/integration/suite.json",
+            "manifest_sha256": "aa4921eadeb0ea883887813fc480f95179e0e10a5110bd47d12ddb0ca7bff32e",
+            "repository": "../provium",
+            "revision": "a57188865e5e77ff465174432d998c831e772889"
+        },
+        {
+            "id": "system",
+            "manifest": "suite.json",
+            "manifest_sha256": "bf93494a54df2e3aa84bcf1081a4c5a575243ece07788c139d759e4caa76f4d1",
+            "repository": ".",
+            "revision": "7cdd63338558c2943eb7c212192fde2c1f19948e"
+        }
+    ],
+    "format": 1
+}
