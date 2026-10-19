@@ -1,0 +1,70 @@
+{
+    "format": 1,
+    "components": [
+        {
+            "id": "kernel",
+            "repository": "../kernel",
+            "manifest": "peios/tests/integration/suite.json"
+        },
+        {
+            "id": "authd",
+            "repository": "../authd",
+            "manifest": "tests/integration/suite.json"
+        },
+        {
+            "id": "eventd",
+            "repository": "../eventd",
+            "manifest": "tests/integration/suite.json"
+        },
+        {
+            "id": "loregd",
+            "repository": "../loregd",
+            "manifest": "tests/integration/suite.json"
+        },
+        {
+            "id": "netd",
+            "repository": "../netd",
+            "manifest": "tests/integration/suite.json"
+        },
+        {
+            "id": "resolvd",
+            "repository": "../resolvd",
+            "manifest": "tests/integration/suite.json"
+        },
+        {
+            "id": "peinit",
+            "repository": "../peinit",
+            "manifest": "tests/integration/suite.json"
+        },
+        {
+            "id": "peiosutils",
+            "repository": "../peiosutils",
+            "manifest": "tests/integration/suite.json"
+        },
+        {
+            "id": "prelude",
+            "repository": "../prelude",
+            "manifest": "tests/integration/suite.json"
+        },
+        {
+            "id": "timed",
+            "repository": "../timed",
+            "manifest": "tests/integration/suite.json"
+        },
+        {
+            "id": "trustd",
+            "repository": "../trustd",
+            "manifest": "tests/integration/suite.json"
+        },
+        {
+            "id": "provium",
+            "repository": "../provium",
+            "manifest": "tests/integration/suite.json"
+        },
+        {
+            "id": "system",
+            "repository": ".",
+            "manifest": "suite.json"
+        }
+    ]
+}

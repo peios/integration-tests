@@ -1,0 +1,115 @@
+{
+    "format": 1,
+    "mode": "system",
+    "artifacts": {
+        "provium": {
+            "path": "/supplied/provium",
+            "sha256": "REPLACE_WITH_SHA256"
+        },
+        "qemu": {
+            "path": "/supplied/qemu",
+            "sha256": "REPLACE_WITH_SHA256"
+        },
+        "kernel": {
+            "path": "/supplied/kernel",
+            "sha256": "REPLACE_WITH_SHA256"
+        },
+        "kernel-fixtures": {
+            "path": "/supplied/kernel-fixtures",
+            "sha256": "REPLACE_WITH_SHA256"
+        },
+        "agent-overlay": {
+            "path": "/supplied/agent-overlay",
+            "sha256": "REPLACE_WITH_SHA256"
+        },
+        "prelude-initrd": {
+            "path": "/supplied/prelude-initrd",
+            "sha256": "REPLACE_WITH_SHA256"
+        },
+        "peinit-initrd": {
+            "path": "/supplied/peinit-initrd",
+            "sha256": "REPLACE_WITH_SHA256"
+        },
+        "medium": {
+            "path": "/supplied/medium",
+            "sha256": "REPLACE_WITH_SHA256"
+        },
+        "cmdline": {
+            "path": "/supplied/cmdline",
+            "sha256": "REPLACE_WITH_SHA256"
+        },
+        "mkirf": {
+            "path": "/supplied/mkirf",
+            "sha256": "REPLACE_WITH_SHA256"
+        }
+    },
+    "runner": {
+        "artifact": "provium"
+    },
+    "components": {
+        "kernel": "REPLACE_WITH_EXACT_COMMIT",
+        "prelude": "REPLACE_WITH_EXACT_COMMIT",
+        "peinit": "REPLACE_WITH_EXACT_COMMIT"
+    },
+    "host_tools": {
+        "qemu-system-x86_64": {
+            "artifact": "qemu"
+        }
+    },
+    "environment": {
+        "PT_MKIRF": {
+            "artifact": "mkirf"
+        }
+    },
+    "guest_tools": {},
+    "packages": [],
+    "profiles": {
+        "kernel-only": {
+            "kernel": {
+                "artifact": "kernel"
+            },
+            "initrd": {
+                "artifact": "kernel-fixtures"
+            },
+            "agent_overlay_path": {
+                "artifact": "agent-overlay"
+            },
+            "cmdline": "console=hvc0 quiet panic=1 stratafs.test_hooks=1"
+        },
+        "prelude": {
+            "kernel": {
+                "artifact": "kernel"
+            },
+            "initrd": {
+                "artifact": "prelude-initrd"
+            },
+            "inject_agent": false,
+            "cmdline": "console=hvc0 panic=1 TERM=dumb",
+            "agent_boot_timeout": 12
+        },
+        "peinit": {
+            "kernel": {
+                "artifact": "kernel"
+            },
+            "initrd": {
+                "artifact": "peinit-initrd"
+            },
+            "inject_agent": false,
+            "cmdline_file": {
+                "artifact": "cmdline"
+            },
+            "cmdline": "console=hvc0 panic=1 TERM=dumb",
+            "agent_boot_timeout": 120,
+            "disks": [
+                {
+                    "path": {
+                        "artifact": "medium"
+                    },
+                    "id": "medium",
+                    "readonly": true
+                }
+            ]
+        }
+    },
+    "file_timeout_seconds": 300
+}

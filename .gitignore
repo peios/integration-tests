@@ -1,8 +1,12 @@
-# peiso build output: composed roots, media, compose locks.
 /out
-
-# Provium's per-profile build directories, when pointed here.
+/runs
+/bazel-*
+__pycache__/
+*.pyc
 /.provium-build
-
-# The suite's guest tools, compiled on demand from tests/tools/*.c.
 tests/tools/.build/
+
+.trail-cache/
+.ruff_cache/
+.mypy_cache/
+/docs/learn/dist/

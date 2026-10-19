@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+"""Run the qualification CLI from a checkout or installed source tree."""
+from qualification.__main__ import main
+
+raise SystemExit(main())

@@ -1,0 +1,24 @@
+load("//build:checks.bzl", "host_test")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "runner",
+    srcs = ["peios-qualify"] + glob(["qualification/*.py"]),
+)
+
+filegroup(
+    name = "suite",
+    srcs = ["suite.json"] + glob(
+        ["tests/**"],
+        exclude = ["**/.build/**"],
+    ),
+)
+
+host_test(
+    name = "check",
+    srcs = glob([
+        "qualification/*.py",
+        "checks/*.py",
+    ]),
+)

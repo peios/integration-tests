@@ -1,0 +1,20 @@
+{
+    "format": 1,
+    "component": "system",
+    "origin": {
+        "repository": "https://github.com/peios/integration-tests.git",
+        "commit": "a9aeaa2d6255bf59034ac5d90bee871a0d4829be"
+    },
+    "files": {
+        "tests/network/cross-component.test.lua": "tests/network/cross-component.test.lua",
+        "tests/network/cross-context.test.lua": "tests/network/cross-context.test.lua",
+        "tests/network/resolvd-netd-manager.test.lua": "tests/network/resolvd-netd-manager.test.lua",
+        "tests/peipkg/audit-events.test.lua": "tests/peipkg/audit-events.test.lua"
+    },
+    "tests": [
+        "tests/network/cross-component.test.lua",
+        "tests/network/cross-context.test.lua",
+        "tests/network/resolvd-netd-manager.test.lua",
+        "tests/peipkg/audit-events.test.lua"
+    ]
+}
