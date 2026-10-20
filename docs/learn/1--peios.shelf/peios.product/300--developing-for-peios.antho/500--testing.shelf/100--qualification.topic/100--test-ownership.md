@@ -1,6 +1,6 @@
 ---
 title: Test Ownership
-type: explanation
+type: concept
 description: Where Peios tests, fixtures, and qualification machinery belong.
 ---
 

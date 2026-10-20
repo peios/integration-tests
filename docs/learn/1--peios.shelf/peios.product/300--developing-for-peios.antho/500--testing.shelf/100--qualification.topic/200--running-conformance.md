@@ -1,6 +1,6 @@
 ---
-title: Running Conformance
-type: guide
+title: Running Conformance Tests
+type: how-to
 description: Run component or system suites against supplied, recorded inputs.
 ---
 
