@@ -23,8 +23,8 @@ Every repository in `suites.lock.json` must be available at its recorded local
 path, with the recorded Git objects. A checkout's branch does not select tests.
 The runner reads committed files directly; it does not use uncommitted files.
 
-Read the [test ownership guide](docs/learn/peios.product/4--developing-for-peios.antho/500--testing-peios.shelf/100--qualification.topic/100--test-ownership.md)
-and [run guide](docs/learn/peios.product/4--developing-for-peios.antho/500--testing-peios.shelf/100--qualification.topic/200--running-conformance.md).
+Read the [test ownership guide](docs/learn/1--peios.shelf/peios.product/4--developing-for-peios.antho/500--testing-peios.shelf/100--qualification.topic/100--test-ownership.md)
+and [run guide](docs/learn/1--peios.shelf/peios.product/4--developing-for-peios.antho/500--testing-peios.shelf/100--qualification.topic/200--running-conformance.md).
 `examples/composition.json` shows the supplied-artifact contract.
 Replace its placeholder paths, hashes, and revisions before use.
 
