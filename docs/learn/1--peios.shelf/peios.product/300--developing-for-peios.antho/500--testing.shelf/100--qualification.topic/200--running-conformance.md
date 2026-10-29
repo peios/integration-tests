@@ -4,12 +4,14 @@ type: how-to
 description: Run component or system suites against supplied, recorded inputs.
 ---
 
-Run the host checks before using the qualification runner. Use Python 3.11
-or later and Git on a Linux host:
+Run the host checks before using the qualification runner. They need
+pekit on a Linux host:
 
 ```sh
-./bazel test //:check
+pekit test
 ```
+
+The qualification runner itself needs Python 3.11 or later and Git.
 
 A native run also needs a suitable QEMU host, the required privileges,
 networking tools, and Peios images. Provium checks host prerequisites.
@@ -65,8 +67,7 @@ Repeat `--suite` for several components. Select `system` for the central
 scenarios; omit `--suite` for all test files. An empty selection is an error.
 Slow cases are included. A timeout stops the runner and its child processes.
 
-Component bundles also expose a `check-integration` script and a Bazel
-`:check` target.
+Component bundles also expose a `check-integration` script.
 Set `PEIOS_QUALIFY` to the central executable and supply the same lock,
 composition, and fresh output path. These entry points do not build images.
 

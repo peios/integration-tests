@@ -1,2 +1,0 @@
-test --test_output=errors
-build --jobs=4

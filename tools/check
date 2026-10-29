@@ -1,0 +1,9 @@
+#!/bin/sh
+# The contributor check: owned source style, then pekit's test of the
+# qualification runner.
+set -eu
+
+repo=$(CDPATH="" cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo"
+python3 tools/style-check.py
+pekit test
