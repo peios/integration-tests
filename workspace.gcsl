@@ -1,0 +1,12 @@
+# The integration-tests workspace: pekit runs the qualification runner's
+# tests with the python library's pinned Python, on the gcc library's
+# Bootlin sysroot, with the buildenv library's busybox for the shell and
+# Git built from its pinned source.
+import Toolchain::* from "github.com/gcslib/buildenv"
+import Toolchain::* from "github.com/gcslib/gcc"
+import Toolchain::* from "github.com/gcslib/python"
+import Toolchain from toolchain
+
+pekitconf = {
+    toolchains = [Toolchain::C gcc_x86_64, Toolchain::Python python_3_14, Toolchain::BuildEnv busybox_x86_64]
+}

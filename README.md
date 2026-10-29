@@ -4,11 +4,17 @@ This repository owns cross-component scenarios and the runner that assembles
 component conformance suites. Components own their contract tests, fixtures,
 and native checks. Provium owns generic VM machinery.
 
-Use Python 3.11 or later and Git on Linux. Run the orchestration checks with:
+The runner needs Python 3.11 or later and Git on Linux. Run the
+orchestration checks with pekit:
 
 ```sh
-./bazel test //:check
+pekit test
 ```
+
+`pekit test` runs the runner's unit tests with pinned Python, Git, and
+busybox, in a sandbox that holds only their declared inputs. `tools/check`
+runs the style checks and then `pekit test`; see
+[building and checking](docs/building.md).
 
 List the recorded suites, then run a component against supplied artifacts:
 

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,7 +59,7 @@ class QualificationTests(unittest.TestCase):
         write_json(self.lock, pin_catalog(self.catalog))
         self.runner = self.root / "provium"
         self.runner.write_text(
-            "#!/usr/bin/python3\nimport json, sys\n"
+            f"#!{sys.executable}\nimport json, sys\n"
             "for path in sys.argv[1:]:\n"
             " if path.endswith('.test.lua'):\n"
             "  print(json.dumps(dict(path=path, timeout='in_time', passed=True, "
@@ -226,7 +227,7 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(execute(self.output, record, 5), 1)
 
     def test_timeout_reaps_process_and_records_failure(self) -> None:
-        self.runner.write_text("#!/usr/bin/python3\nimport time\ntime.sleep(30)\n")
+        self.runner.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
         self.spec["artifacts"]["runner"]["sha256"] = fingerprint(self.runner)
         record = self.prepare()
         self.assertEqual(execute(self.output, record, 0.05), 1)

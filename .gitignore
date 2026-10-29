@@ -1,6 +1,5 @@
 /out
 /runs
-/bazel-*
 __pycache__/
 *.pyc
 /.provium-build
@@ -10,3 +9,9 @@ tests/tools/.build/
 .ruff_cache/
 .mypy_cache/
 /docs/learn/dist/
+
+# pekit build output.
+/pekit-out/
+
+# Libraries pekit fetches for the pins in `pekit.lock`.
+/.gcsl/

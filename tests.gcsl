@@ -1,0 +1,48 @@
+# integration-tests' own test, as Bazel ran it: the qualification runner's
+# unit tests, `python3 -m unittest discover -s checks`, which check source
+# pinning, artifact staging, deadlines, and result completeness against
+# Git repositories and stand-in runners they make.
+#
+# The test's own code runs in a hermetic step of its own, so what it builds
+# or fetches, and its toolchains, are in its parameters' defaults. It runs
+# on the C toolchain's sysroot, with busybox's `sh` and tools at `/bin` and
+# `/usr/bin`, the pinned Python, and Git built from its pinned source.
+import fs
+import toolchain
+import Toolchain from toolchain
+import BuildEnv from "github.com/gcslib/buildenv"
+import PythonToolchain from "github.com/gcslib/python"
+
+def test runner(
+    sources: List<{at: String, place: Dir | File}> = [
+        {at = "/work/qualification"; place = dir("qualification")},
+        {at = "/work/checks"; place = dir("checks")},
+    ],
+    git_install: Dir = build git(),
+    c: toolchain.CToolchain = toolchain.get(Toolchain::C),
+    py: PythonToolchain = toolchain.get(Toolchain::Python),
+    env: BuildEnv = toolchain.get(Toolchain::BuildEnv),
+) {
+    let home = working_dir().path
+    let tmp = fs.mkdir("{home}/tmp")
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = "/"; place = c.runtime},
+        {at = "/bin"; place = env.root.dir("bin")},
+        {at = "/usr/bin"; place = env.root.dir("bin")},
+        {at = "/tmp"; place = dir("{home}/tmp")},
+        {at = "/opt/python"; place = py.root},
+        {at = "/opt/git"; place = git_install},
+        ...(for each in sources { = {at = each.at; place = each.place} }),
+    ]
+    let box = fs.compose(placed).sandbox(
+        cwd = "/work",
+        env = {
+            PATH = "/opt/git/bin:/opt/python/bin:/usr/bin:/bin"
+            HOME = "/tmp"
+            TMPDIR = "/tmp"
+            LANG = "C.UTF-8"
+            PYTHONDONTWRITEBYTECODE = "1"
+        },
+    )
+    let ran = box.exec("/opt/python/bin/python3", "-m", "unittest", "discover", "-s", "checks", "-v")
+}
