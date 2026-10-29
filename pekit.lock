@@ -24,8 +24,8 @@
       "path": "github.com/gcslib/buildenv",
       "git": "https://github.com/gcslib/buildenv",
       "dir": "",
-      "commit": "533389a1cdade6dfb71afaf609bf13c22285dd17",
-      "tree": "a550d562a8baa002c5979c5c635467544e8ff970decd7e97472836193242c6b8"
+      "commit": "e051ed14669da2bafb71fe422d2e01cc45b61206",
+      "tree": "c717ab29e7c5d81880dda3e9d9976ef76ed94598f1fbb74019b236df62aa4af4"
     },
     {
       "path": "github.com/gcslib/gcc",

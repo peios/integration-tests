@@ -38,7 +38,10 @@ def build git() {
 }
 
 # Git built from `src` with the static zlib `libz` and its headers
-# `include`, installed at `GIT_OUT`.
+# `include`, installed at `GIT_OUT`. Every file of the source is given one
+# time first, as the buildenv library's `configure_make` gives its
+# source's, so that make takes no file the release generated for out of
+# date: the store and the copy keep no file's own time.
 #[hermetic]
 fn git_built(
     src: Dir,
@@ -61,7 +64,8 @@ fn git_built(
     let ran = box.exec(
         "/bin/sh",
         "-c",
-        "mkdir -p /tmp && cp -R /work/src-in {GIT_SRC} && chmod -R u+w {GIT_SRC} && cd {GIT_SRC} && \
+        "mkdir -p /tmp && cp -R /work/src-in {GIT_SRC} && chmod -R u+w {GIT_SRC} && \
+         find {GIT_SRC} -exec touch -h -d '2000-01-01 00:00:00' {{}} + && cd {GIT_SRC} && \
          make -j4 prefix={GIT_OUT} CC=\"$1\" AR=\"$2\" ZLIB_PATH={GIT_ZLIB} \
              NO_CURL=1 NO_EXPAT=1 NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_GETTEXT=1 NO_OPENSSL=1 \
              NO_ICONV=1 NO_RUST=1 NO_INSTALL_HARDLINKS=1 INSTALL_SYMLINKS=1 SKIP_DASHED_BUILT_INS=1 \
